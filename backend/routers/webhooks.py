@@ -317,6 +317,32 @@ async def _get_scrobble_connection_by_id(db: AsyncSession, user_id: int, connect
     return result.scalar_one_or_none()
 
 
+async def _duplicated_by_full_connection(db: AsyncSession, source: str, user_id: int, raw_session_id: str) -> bool:
+    """True when a full <source> media-server connection already has an
+    active PlaybackSession for this exact server-assigned session id (#312).
+
+    A scrobble-only connection has no server URL/token of its own, so it
+    can't identify "the same physical server" the way exclude_connection_id
+    does elsewhere (#190) - but `raw_session_id` comes straight from the
+    server's own webhook payload (Jellyfin's session_id / Plex's
+    session_key), not something Scrob generates, so an identical value
+    arriving via both a full connection's webhook and a scrobble-only
+    connection's webhook is the server itself reporting the same playback
+    twice, e.g. a user with a full connection to one Jellyfin server and a
+    scrobble-only connection accidentally also pointed at that same server.
+    Two connections to two different servers never collide here, since each
+    server mints its own session ids independently.
+
+    Used to skip the *outbound* scrobble dispatch only - local session
+    tracking and watch-event writes are left as they already were (the
+    latter already has its own 5-minute completed-watch dedup guard, see
+    _write_watch_event).
+    """
+    full_key = f"{source}:{user_id}:{raw_session_id}"
+    result = await db.execute(select(PlaybackSession.id).where(PlaybackSession.session_key == full_key))
+    return result.scalar_one_or_none() is not None
+
+
 async def _find_or_create_show(db: AsyncSession, series_tmdb_id: int, api_key: str = None) -> Show:
     result = await db.execute(select(Show).where(Show.tmdb_id == series_tmdb_id))
     show = result.scalar_one_or_none()
@@ -1521,6 +1547,9 @@ async def _handle_jellyfin_scrobble_webhook(
     # See the matching comment in _handle_jellyfin_webhook (#138 follow-up).
     media_list = await find_or_create_media_jellyfin_multi(data, db, api_key=tmdb_key, user_id=user.id)
     session_key = f"{source}:scrobble:{user.id}:{data['session_id']}"
+    # See _duplicated_by_full_connection's docstring (#312) - guards only the
+    # outbound scrobble dispatch below, not local session/watch tracking.
+    is_duplicate = await _duplicated_by_full_connection(db, source, user.id, data["session_id"])
 
     if not media_list:
         return {"status": "ignored", "reason": "episode could not be identified (no season/episode/tmdb_id)"}
@@ -1558,6 +1587,11 @@ async def _handle_jellyfin_scrobble_webhook(
             session = await _get_or_open_session(db, session_key, source, user.id, media.id)
             session.state = "playing"
             await _commit_playback_session_update(db)
+        if not is_duplicate:
+            await _maybe_trakt_scrobble(settings, media, "start", data["progress_percent"], db=db)
+            await _maybe_mdblist_scrobble(settings, media, "start", data["progress_percent"], db=db)
+            await _maybe_simkl_scrobble(settings, media, "start", data["progress_percent"], db=db)
+            await _maybe_bingebase_scrobble(settings, media, "start", data["progress_percent"], db=db)
 
     elif notification_type in ("PlaybackProgress", "playback.progress"):
         if conn.sync_playback:
@@ -1567,6 +1601,10 @@ async def _handle_jellyfin_scrobble_webhook(
             session.progress_seconds = data["progress_seconds"]
             session.updated_at = datetime.utcnow()
             await _commit_playback_session_update(db)
+        if data["is_paused"] and not is_duplicate:
+            await _maybe_trakt_scrobble(settings, media, "pause", data["progress_percent"], db=db)
+            await _maybe_mdblist_scrobble(settings, media, "pause", data["progress_percent"], db=db)
+            await _maybe_bingebase_scrobble(settings, media, "pause", data["progress_percent"], db=db)
 
     elif notification_type in ("PlaybackStop", "playback.stop"):
         # sync_watched and sync_playback are independent toggles - watched status
@@ -1583,6 +1621,12 @@ async def _handle_jellyfin_scrobble_webhook(
             for m in media_list:
                 await _write_watch_event(db, user.id, m.id, progress_percent, progress_seconds, progress_percent >= 0.90)
         await db.commit()
+        if not is_duplicate:
+            for m in media_list:
+                await _maybe_trakt_scrobble(settings, m, "stop", progress_percent, db=db)
+                await _maybe_mdblist_scrobble(settings, m, "stop", progress_percent, db=db)
+                await _maybe_simkl_scrobble(settings, m, "stop", progress_percent, db=db)
+                await _maybe_bingebase_scrobble(settings, m, "stop", progress_percent, db=db)
 
     elif notification_type in ("MarkPlayed", "item.markplayed"):
         # Same reasoning as PlaybackStop above: _close_session's pending delete
@@ -1592,6 +1636,12 @@ async def _handle_jellyfin_scrobble_webhook(
             for m in media_list:
                 await _write_watch_event(db, user.id, m.id, 1.0, data["progress_seconds"], True)
         await db.commit()
+        if not is_duplicate:
+            for m in media_list:
+                await _maybe_trakt_scrobble(settings, m, "stop", 1.0, db=db)
+                await _maybe_mdblist_scrobble(settings, m, "stop", 1.0, db=db)
+                await _maybe_simkl_scrobble(settings, m, "stop", 1.0, db=db)
+                await _maybe_bingebase_scrobble(settings, m, "stop", 1.0, db=db)
 
     elif notification_type == "UserDataSaved":
         # Jellyfin's official Webhook plugin has no dedicated "mark played"
@@ -1607,6 +1657,12 @@ async def _handle_jellyfin_scrobble_webhook(
                 for m in media_list:
                     await _write_watch_event(db, user.id, m.id, 1.0, data["progress_seconds"], True)
                 await db.commit()
+                if not is_duplicate:
+                    for m in media_list:
+                        await _maybe_trakt_scrobble(settings, m, "stop", 1.0, db=db)
+                        await _maybe_mdblist_scrobble(settings, m, "stop", 1.0, db=db)
+                        await _maybe_simkl_scrobble(settings, m, "stop", 1.0, db=db)
+                        await _maybe_bingebase_scrobble(settings, m, "stop", 1.0, db=db)
             elif played is False:
                 changed_ids = [
                     m.id for m in media_list
@@ -2506,6 +2562,9 @@ async def _handle_plex_scrobble_webhook(request: Request, db: AsyncSession, api_
     tmdb_key = await _get_tmdb_key(db, settings)
 
     session_key = f"plex:scrobble:{user.id}:{data['session_key']}"
+    # See _duplicated_by_full_connection's docstring (#312) - guards only the
+    # outbound scrobble dispatch below, not local session/watch tracking.
+    is_duplicate = await _duplicated_by_full_connection(db, "plex", user.id, data["session_key"])
 
     if event in ("media.play", "media.resume", "media.pause", "media.stop", "media.scrobble"):
         if _is_duplicate_webhook_delivery(f"{session_key}:{event}"):
@@ -2524,6 +2583,11 @@ async def _handle_plex_scrobble_webhook(request: Request, db: AsyncSession, api_
                 session.progress_seconds = data["progress_seconds"]
             await _backfill_plex_runtime(db, media, data, None, tmdb_key)
             await db.commit()
+        if not is_duplicate:
+            await _maybe_trakt_scrobble(settings, media, "start", data["progress_percent"], db=db)
+            await _maybe_mdblist_scrobble(settings, media, "start", data["progress_percent"], db=db)
+            await _maybe_simkl_scrobble(settings, media, "start", data["progress_percent"], db=db)
+            await _maybe_bingebase_scrobble(settings, media, "start", data["progress_percent"], db=db)
 
     elif event == "media.resume":
         media = await find_or_create_media_plex(data, db, api_key=tmdb_key, conn=None, user_id=user.id)
@@ -2537,6 +2601,11 @@ async def _handle_plex_scrobble_webhook(request: Request, db: AsyncSession, api_
             session.updated_at = datetime.utcnow()
             await _backfill_plex_runtime(db, media, data, None, tmdb_key)
             await db.commit()
+        if not is_duplicate:
+            await _maybe_trakt_scrobble(settings, media, "start", data["progress_percent"], db=db)
+            await _maybe_mdblist_scrobble(settings, media, "start", data["progress_percent"], db=db)
+            await _maybe_simkl_scrobble(settings, media, "start", data["progress_percent"], db=db)
+            await _maybe_bingebase_scrobble(settings, media, "start", data["progress_percent"], db=db)
 
     elif event == "media.pause":
         if conn.sync_playback:
@@ -2551,11 +2620,15 @@ async def _handle_plex_scrobble_webhook(request: Request, db: AsyncSession, api_
                 session.updated_at = datetime.utcnow()
                 await _backfill_plex_runtime(db, media, data, None, tmdb_key)
                 await db.commit()
+        if not is_duplicate:
+            await _maybe_trakt_scrobble(settings, media, "pause", data["progress_percent"], db=db)
+            await _maybe_mdblist_scrobble(settings, media, "pause", data["progress_percent"], db=db)
+            await _maybe_bingebase_scrobble(settings, media, "pause", data["progress_percent"], db=db)
 
     elif event == "media.stop":
         session = await _close_session(db, session_key)
+        progress_percent = data["progress_percent"] or (session.progress_percent if session else 0.0)
         if conn.sync_playback:
-            progress_percent = data["progress_percent"] or (session.progress_percent if session else 0.0)
             progress_seconds = data["progress_seconds"] or (session.progress_seconds if session else 0)
             if conn.sync_watched and progress_percent > 0.05:
                 await _write_watch_event(db, user.id, media.id, progress_percent, progress_seconds, progress_percent >= 0.90)
@@ -2570,6 +2643,11 @@ async def _handle_plex_scrobble_webhook(request: Request, db: AsyncSession, api_
                 connection_id=conn.id,
             )
         await db.commit()
+        if not is_duplicate:
+            await _maybe_trakt_scrobble(settings, media, "stop", progress_percent, db=db)
+            await _maybe_mdblist_scrobble(settings, media, "stop", progress_percent, db=db)
+            await _maybe_simkl_scrobble(settings, media, "stop", progress_percent, db=db)
+            await _maybe_bingebase_scrobble(settings, media, "stop", progress_percent, db=db)
 
     elif event == "media.scrobble":
         await _close_session(db, session_key)
