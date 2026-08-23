@@ -8,10 +8,7 @@ Astro.response.headers.set("Cache-Control", "no-store");
 
 <Base title="Calendar">
   <div class="mb-8 flex items-center justify-between gap-4">
-    <div>
-      <h1 class="page-title mb-2">Calendar</h1>
-      <p class="text-zinc-500">The next 14 days for shows you're collecting or watching<span id="cal-meta"></span></p>
-    </div>
+    <h1 class="page-title">Calendar</h1>
     <button
       id="cal-refresh-btn"
       class="flex items-center gap-2 px-4 py-2 text-sm font-bold text-zinc-400 bg-zinc-900 border border-zinc-800 rounded-xl hover:border-zinc-600 hover:text-zinc-200 transition-all cursor-pointer shrink-0"
@@ -27,6 +24,7 @@ Astro.response.headers.set("Cache-Control", "no-store");
   <div id="cal-loading" class="py-20 text-center text-zinc-500">Checking air dates for your shows… (first time can take a minute)</div>
   <div id="cal-error" class="hidden py-20 text-center text-zinc-500">Could not load the calendar.</div>
   <div id="cal-body" class="hidden space-y-8"></div>
+  <p class="text-zinc-500 mt-8">The next 14 days for shows you're collecting or watching<span id="cal-meta"></span></p>
 </Base>
 
 <script define:vars={{ token }}>
