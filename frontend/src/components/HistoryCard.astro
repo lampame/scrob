@@ -111,6 +111,10 @@ const href = isEpisode ? episodeHref(media) : `/media/movie/${media.tmdb_id}`;
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
 
+      const title = card.querySelector('p.text-lg')?.textContent?.trim() || 'this entry';
+      const ok = await (window as any).showConfirm(`Delete "${title}"?`, 'This removes it from your watch history. This cannot be undone.');
+      if (!ok) return;
+
       const eventId = card.dataset.eventId;
       const token = (window as any).__AUTH_TOKEN__ ?? '';
 
