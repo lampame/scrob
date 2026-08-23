@@ -6444,11 +6444,50 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                     return None
                 return _extract_source_id(found)
 
+            async def _already_watched_on_server(sid: str) -> bool | None:
+                """Plex's /:/scrobble (and Jellyfin/Emby's mark-watched call)
+                are not idempotent - calling them on an item the server
+                already shows as watched still bumps its last-viewed
+                timestamp and mints a fresh watch-history/activity entry
+                dated today, with no way to backdate it. Unconditionally
+                re-pushing a user's entire watched history on every full
+                push was silently corrupting the server's own watch
+                history/activity feed on every run (#302). Always check the
+                server's own current state first and skip the push
+                entirely when it already agrees.
+
+                Returns None when the check itself couldn't be completed
+                (network error, item not found) - callers must treat that
+                the same as "don't push": guessing wrong here risks the
+                exact corruption this exists to prevent, whereas skipping a
+                genuinely-new watch just means it's retried on the next
+                full push instead.
+                """
+                try:
+                    if conn.type == "plex":
+                        item = await plex.get_item(conn.url, conn.token, sid)
+                        if item is None:
+                            return None
+                        return int(item.get("viewCount") or 0) > 0
+                    else:
+                        client_mod = jellyfin if conn.type == "jellyfin" else emby
+                        item = await client_mod.get_item(conn.url, conn.token, sid, user_id=conn.server_user_id)
+                        if item is None:
+                            return None
+                        return bool((item.get("UserData") or {}).get("Played"))
+                except Exception:
+                    return None
+
             async def _push_known(client: _httpx.AsyncClient, item: tuple) -> bool:
                 async with sem:
                     try:
                         if item[0] == "watched":
                             sid = item[1]
+                            already = await _already_watched_on_server(sid)
+                            if already is None:
+                                return False
+                            if already:
+                                return True
                             if conn.type == "plex":
                                 return await plex.mark_watched(conn.url, conn.token, sid, client=client)
                             elif conn.type == "jellyfin":
@@ -6493,6 +6532,11 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                         if not sid:
                             return False
                         if item[0] == "watched":
+                            already = await _already_watched_on_server(sid)
+                            if already is None:
+                                return False
+                            if already:
+                                return True
                             if conn.type == "plex":
                                 return await plex.mark_watched(conn.url, conn.token, sid, client=client)
                             elif conn.type == "jellyfin":
@@ -6520,9 +6564,17 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                 # Tokens for every mid here are already armed (at queue-build
                 # time for known items, right after resolution below for
                 # looked-up ones) - this call only needs to fire the single
-                # deduped mark_watched (#298).
+                # deduped mark_watched (#298). A token that goes unconsumed
+                # because the check below skips the push is harmless - it
+                # just expires on its own TTL, same as one left over from a
+                # failed push call.
                 async with sem:
                     try:
+                        already = await _already_watched_on_server(sid)
+                        if already is None:
+                            return False
+                        if already:
+                            return True
                         if conn.type == "jellyfin":
                             return await jellyfin.mark_watched(conn.url, conn.token, conn.server_user_id, sid, client=client)
                         else:
