@@ -1669,33 +1669,11 @@ async def get_episode_detail(
         raise HTTPException(status_code=404, detail=f"Episode not found: {e}")
 
 
-@router.post("/{series_tmdb_id}/refresh")
-async def refresh_show_metadata(
-    series_tmdb_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    api_key = await get_user_tmdb_key(db, current_user.id)
-    if not check_tmdb_key(api_key):
-        raise HTTPException(status_code=400, detail="TMDB API key not configured")
-
-    show_result = await db.execute(
-        select(ShowModel).where(ShowModel.tmdb_id == series_tmdb_id)
-    )
-    show = show_result.scalar_one_or_none()
-    if not show:
-        raise HTTPException(status_code=404, detail="Show not found in local library")
-
-    try:
-        # cache_ttl=None: this is the user explicitly asking for fresh data -
-        # the shared 30-minute TMDB response cache would otherwise silently
-        # hand back whatever was last fetched (e.g. from just browsing the
-        # show page moments earlier), making "Refresh Metadata" a no-op.
-        data = await tmdb.get_show(series_tmdb_id, api_key=api_key, cache_ttl=None)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"TMDB fetch failed: {e}")
-
-    # Update show-level fields
+def apply_show_metadata(show: ShowModel, data: dict) -> None:
+    """Writes TMDB show-detail fields onto a local Show row. Shared by the
+    manual 'Refresh Metadata' action below and the daily Ended/Canceled
+    status refresher (main.py's _show_status_refresher), so both keep
+    exactly the same field mapping."""
     show.title = data.get("name") or show.title
     show.original_title = data.get("original_name")
     show.overview = data.get("overview")
@@ -1734,6 +1712,35 @@ async def refresh_show_metadata(
             for n in data.get("networks", [])
         ],
     }
+
+
+@router.post("/{series_tmdb_id}/refresh")
+async def refresh_show_metadata(
+    series_tmdb_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    api_key = await get_user_tmdb_key(db, current_user.id)
+    if not check_tmdb_key(api_key):
+        raise HTTPException(status_code=400, detail="TMDB API key not configured")
+
+    show_result = await db.execute(
+        select(ShowModel).where(ShowModel.tmdb_id == series_tmdb_id)
+    )
+    show = show_result.scalar_one_or_none()
+    if not show:
+        raise HTTPException(status_code=404, detail="Show not found in local library")
+
+    try:
+        # cache_ttl=None: this is the user explicitly asking for fresh data -
+        # the shared 30-minute TMDB response cache would otherwise silently
+        # hand back whatever was last fetched (e.g. from just browsing the
+        # show page moments earlier), making "Refresh Metadata" a no-op.
+        data = await tmdb.get_show(series_tmdb_id, api_key=api_key, cache_ttl=None)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"TMDB fetch failed: {e}")
+
+    apply_show_metadata(show, data)
 
     # Re-enrich all local episodes linked to this show
     ep_result = await db.execute(

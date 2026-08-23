@@ -369,6 +369,107 @@ async def _emby_progress_poller():
             log.error(f"Emby progress poller: {e}")
 
 
+async def _show_status_refresher():
+    """Next Up's missing-episode fallback (routers/history.py) only creates
+    a Media row for a show's next episode when TMDB says one exists - for a
+    finished show, none ever gets created, so it stays in missing_show_ids
+    (and gets re-fetched from TMDB on every cold Next Up load) forever, even
+    though it will never have a next episode again unless revived.
+
+    Once a day, directly re-checks every locally Ended/Canceled show's
+    status against TMDB, so an unexpected revival (e.g. Futurama) is picked
+    up without depending on a delta/changes feed - if this process happened
+    to be down during the window a changes feed would have caught a
+    revival, that revival is gone for good. A direct per-show check has no
+    such window: whether yesterday's sweep ran or not, today's checks every
+    finished show from scratch.
+
+    Deliberately leaves Returning Series alone - those already stay live via
+    Next Up's own per-request fallback fetch.
+    """
+    import logging
+    log = logging.getLogger("uvicorn.error")
+
+    try:
+        from db import AsyncSessionLocal
+        from models.show import Show
+        from models.global_settings import GlobalSettings
+        from models.users import User, UserSettings
+        from core import tmdb as tmdb_client
+        from routers.media import check_tmdb_key
+        from routers.shows import apply_show_metadata
+    except Exception as e:
+        log.error(f"Show status refresher: failed to import dependencies: {e}")
+        return
+
+    FINAL_STATUSES = ("Ended", "Canceled")
+    SWEEP_INTERVAL = 24 * 60 * 60
+    FETCH_CONCURRENCY = 10
+    log.info("Show status refresher: started")
+
+    while True:
+        await asyncio.sleep(SWEEP_INTERVAL)
+        try:
+            async with AsyncSessionLocal() as db:
+                # Show is a shared, instance-wide table with no single
+                # "current user" for this sweep to scope to, but a TMDB key
+                # isn't tied to whichever account configured it - any valid
+                # one fetches the same public show metadata. Global -> an
+                # admin's own key -> any user's, so installs that skip the
+                # global key still get the sweep instead of it silently
+                # never running, while preferring an admin's key over a
+                # random member's when both exist.
+                gs = (await db.execute(
+                    select(GlobalSettings).where(GlobalSettings.id == 1)
+                )).scalar_one_or_none()
+                api_key = gs.tmdb_api_key if gs else None
+                if not check_tmdb_key(api_key):
+                    api_key = (await db.execute(
+                        select(UserSettings.tmdb_api_key)
+                        .join(User, User.id == UserSettings.user_id)
+                        .where(UserSettings.tmdb_api_key.isnot(None), User.is_admin.is_(True))
+                        .limit(1)
+                    )).scalar_one_or_none()
+                if not check_tmdb_key(api_key):
+                    api_key = (await db.execute(
+                        select(UserSettings.tmdb_api_key)
+                        .where(UserSettings.tmdb_api_key.isnot(None))
+                        .limit(1)
+                    )).scalar_one_or_none()
+                if not check_tmdb_key(api_key):
+                    log.info("Show status refresher: no TMDB key configured anywhere, skipping")
+                    continue
+
+                shows = (await db.execute(
+                    select(Show).where(Show.status.in_(FINAL_STATUSES), Show.tmdb_id.isnot(None))
+                )).scalars().all()
+                if not shows:
+                    continue
+
+                sem = asyncio.Semaphore(FETCH_CONCURRENCY)
+                revived = 0
+
+                async def _check(show):
+                    nonlocal revived
+                    async with sem:
+                        try:
+                            # cache_ttl=None: a stale cached response would
+                            # defeat the point of this sweep.
+                            data = await tmdb_client.get_show(show.tmdb_id, api_key=api_key, cache_ttl=None)
+                        except Exception:
+                            return
+                    if data.get("status") in FINAL_STATUSES:
+                        return
+                    apply_show_metadata(show, data)
+                    revived += 1
+
+                await asyncio.gather(*(_check(s) for s in shows))
+                await db.commit()
+                log.info(f"Show status refresher: checked {len(shows)} finished shows, {revived} revived")
+        except Exception as e:
+            log.error(f"Show status refresher: {e}")
+
+
 async def _watchlist_poller():
     import logging
     log = logging.getLogger("uvicorn.error")
@@ -529,6 +630,7 @@ async def lifespan(app: FastAPI):
     watchlist_task = asyncio.create_task(_watchlist_poller())
     manual_session_task = asyncio.create_task(_manual_session_completer())
     emby_progress_task = asyncio.create_task(_emby_progress_poller())
+    show_status_task = asyncio.create_task(_show_status_refresher())
 
     yield
 
@@ -536,6 +638,7 @@ async def lifespan(app: FastAPI):
     watchlist_task.cancel()
     manual_session_task.cancel()
     emby_progress_task.cancel()
+    show_status_task.cancel()
     try:
         await scheduler_task
     except asyncio.CancelledError:
@@ -550,6 +653,10 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await emby_progress_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await show_status_task
     except asyncio.CancelledError:
         pass
 
