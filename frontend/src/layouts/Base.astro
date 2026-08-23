@@ -359,23 +359,23 @@ const bottomNavItem = (active: boolean) =>
     </div>
   </div>
 
-  <!-- Rewatch popover (shared, repositioned on use) -->
-  <div id="rewatch-popover" class="hidden absolute z-50 w-56 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl overflow-hidden">
-    <div class="px-3 py-2 border-b border-zinc-800 flex items-center justify-between">
-      <span class="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Rewatching</span>
-      <button id="rewatch-popover-close" class="text-zinc-500 hover:text-zinc-200 transition cursor-pointer" aria-label="Close">
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
-    </div>
-    <div class="py-1">
-      <button id="rewatch-popover-restart" class="w-full px-3 py-2 text-sm text-indigo-400 hover:bg-zinc-800 transition text-left flex items-center gap-2 cursor-pointer">
-        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>
-        Restart rewatch
-      </button>
-      <button id="rewatch-popover-cancel" class="w-full px-3 py-2 text-sm text-red-400 hover:bg-zinc-800 transition text-left flex items-center gap-2 cursor-pointer">
-        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        Cancel rewatch
-      </button>
+  <!-- Rewatch modal (shared, centered - same convention as drop-modal/watch-history-modal) -->
+  <div id="rewatch-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div class="bg-zinc-900 border border-zinc-700 rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden">
+      <div class="px-5 pt-5 pb-4 border-b border-zinc-800 flex items-center justify-between gap-3">
+        <h3 class="text-base font-bold text-zinc-100">Rewatching</h3>
+        <button id="rewatch-modal-close" class="text-zinc-500 hover:text-zinc-200 transition cursor-pointer shrink-0" aria-label="Close">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="px-5 pt-4 pb-5 space-y-2.5">
+        <button id="rewatch-modal-restart" class="w-full px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm rounded-xl transition-all cursor-pointer active:scale-95">
+          Restart rewatch
+        </button>
+        <button id="rewatch-modal-cancel" class="w-full px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 text-red-400 font-bold text-sm rounded-xl transition-all cursor-pointer active:scale-95">
+          Cancel rewatch
+        </button>
+      </div>
     </div>
   </div>
 
@@ -1099,20 +1099,14 @@ const bottomNavItem = (active: boolean) =>
       if (e.key === 'Escape') closeListPopover();
     });
 
-    // ── Rewatch popover ────────────────────────────────────────────────────────
-    let _activeRewatchBtn: HTMLElement | null = null;
-
-    function closeRewatchPopover() {
-      document.getElementById('rewatch-popover')!.classList.add('hidden');
-      _activeRewatchBtn = null;
+    // ── Rewatch modal ────────────────────────────────────────────────────────
+    function closeRewatchModal() {
+      document.getElementById('rewatch-modal')!.classList.add('hidden');
     }
 
-    function openRewatchPopover(btn: HTMLElement, seriesTmdbId: string) {
-      _activeRewatchBtn = btn;
-      const popover = document.getElementById('rewatch-popover')!;
-
-      document.getElementById('rewatch-popover-restart')!.onclick = async () => {
-        closeRewatchPopover();
+    function openRewatchModal(seriesTmdbId: string) {
+      document.getElementById('rewatch-modal-restart')!.onclick = async () => {
+        closeRewatchModal();
         try {
           await apiFetch(`/history/rewatch?series_tmdb_id=${seriesTmdbId}`, 'POST');
           window.location.reload();
@@ -1121,8 +1115,8 @@ const bottomNavItem = (active: boolean) =>
         }
       };
 
-      document.getElementById('rewatch-popover-cancel')!.onclick = async () => {
-        closeRewatchPopover();
+      document.getElementById('rewatch-modal-cancel')!.onclick = async () => {
+        closeRewatchModal();
         try {
           await apiFetch(`/history/rewatch?series_tmdb_id=${seriesTmdbId}`, 'DELETE');
           window.location.reload();
@@ -1131,20 +1125,15 @@ const bottomNavItem = (active: boolean) =>
         }
       };
 
-      const rect = btn.getBoundingClientRect();
-      popover.classList.remove('hidden');
-      const popW = popover.offsetWidth;
-      const left = Math.min(rect.left + window.scrollX, window.innerWidth - popW - 8);
-      popover.style.left = `${Math.max(8, left)}px`;
-      popover.style.top = `${rect.bottom + window.scrollY + 6}px`;
+      document.getElementById('rewatch-modal')!.classList.remove('hidden');
     }
 
-    document.getElementById('rewatch-popover-close')!.addEventListener('click', () => closeRewatchPopover());
-    document.addEventListener('click', (e) => {
-      const popover = document.getElementById('rewatch-popover')!;
-      if (!popover.classList.contains('hidden') && !popover.contains(e.target as Node) && e.target !== _activeRewatchBtn) {
-        closeRewatchPopover();
-      }
+    document.getElementById('rewatch-modal-close')!.addEventListener('click', closeRewatchModal);
+    document.getElementById('rewatch-modal')!.addEventListener('click', (e) => {
+      if (e.target === document.getElementById('rewatch-modal')) closeRewatchModal();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeRewatchModal();
     });
 
     // ── Drop modal ───────────────────────────────────────────────────────────
@@ -1955,11 +1944,7 @@ const bottomNavItem = (active: boolean) =>
         const isActive = btn.dataset.rewatchActive === 'true';
 
         if (isActive) {
-          if (document.getElementById('rewatch-popover')!.classList.contains('hidden') || _activeRewatchBtn !== btn) {
-            openRewatchPopover(btn, seriesId);
-          } else {
-            closeRewatchPopover();
-          }
+          openRewatchModal(seriesId);
           return;
         }
 
