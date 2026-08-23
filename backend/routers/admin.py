@@ -150,6 +150,7 @@ async def toggle_admin(
             )
 
     target.is_admin = not target.is_admin
+    target.role = UserRole.admin if target.is_admin else UserRole.user
     await db.commit()
     await db.refresh(target)
     return target

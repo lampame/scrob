@@ -62,7 +62,7 @@ async def _check_profile_access(user_id: int, current_user, db: AsyncSession):
     profile = profile_result.scalar_one_or_none()
 
     is_owner = current_user and current_user.id == user_id
-    is_admin = current_user and current_user.role == "admin"
+    is_admin = current_user and current_user.is_admin
     privacy = profile.privacy_level if profile else PrivacyLevel.private
 
     is_mutual_follow = False
@@ -607,7 +607,7 @@ async def get_public_profile(
 ):
     user, profile = await _check_profile_access(user_id, current_user, db)
     is_owner = current_user and current_user.id == user_id
-    is_admin = current_user and current_user.role == "admin"
+    is_admin = current_user and current_user.is_admin
 
     # --- Stats ---
     watched_q = await db.execute(
