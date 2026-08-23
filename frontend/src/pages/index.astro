@@ -255,6 +255,9 @@ const discoverBackdropUrl = discoverPick?.backdrop_path
     <section id="continue-watching-section" class="mb-16">
       <div class="flex items-center justify-between mb-8">
         <h2 class="section-headline">Continue Watching</h2>
+        <a href="/continue-watching" class="text-sm font-bold uppercase tracking-widest text-zinc-500 hover:text-blue-400 transition-all flex items-center gap-2 group/all">
+          See All <span class="group-hover/all:translate-x-1 transition-transform">→</span>
+        </a>
       </div>
       <div class="flex gap-3 overflow-x-auto pb-3 scrollbar-none -mx-6 px-6 md:mx-0 md:px-0">
         {continueWatching.slice(0, 12).map((item) => (

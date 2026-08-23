@@ -501,6 +501,8 @@ async def clear_now_playing_sessions(
 
 @router.get("/continue-watching")
 async def get_continue_watching(
+    limit: int | None = Query(20),
+    include_hidden: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_or_api_key),
 ):
@@ -510,18 +512,23 @@ async def get_continue_watching(
     dropped_movie_ids = set(settings.dropped_movies or []) if settings else set()
 
     filters = [PlaybackProgress.user_id == current_user.id]
-    if dropped_movie_ids:
+    if dropped_movie_ids and not include_hidden:
         filters.append(Media.id.notin_(dropped_movie_ids))
-    result = await db.execute(
+    query = (
         select(PlaybackProgress, Media)
         .join(Media, Media.id == PlaybackProgress.media_id)
         .options(selectinload(PlaybackProgress.media).selectinload(Media.show))
         .where(*filters)
         .order_by(desc(PlaybackProgress.updated_at))
-        .limit(20)
     )
+    if limit is not None:
+        query = query.limit(limit)
+    result = await db.execute(query)
     rows = result.all()
     items = [format_event(e, m) for e, m in rows]
+    for item in items:
+        # Only ever true for movies - episodes have no drop concept.
+        item["media"]["dropped"] = item["media"]["id"] in dropped_movie_ids
     if items:
         await enrich_with_state(db, current_user.id, [i["media"] for i in items])
         lang = await get_user_metadata_language(db, current_user.id)

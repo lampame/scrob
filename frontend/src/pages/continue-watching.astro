@@ -1,0 +1,287 @@
+---
+import Base from "../layouts/Base.astro";
+export const prerender = false;
+
+const { token } = Astro.locals;
+Astro.response.headers.set("Cache-Control", "no-store");
+---
+
+<Base title="Continue Watching">
+  <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+    <div>
+      <h1 class="page-title mb-2">Continue Watching</h1>
+      <p class="text-zinc-500">Pick up where you left off</p>
+    </div>
+    <button
+      id="toggle-hidden-btn"
+      class="flex items-center gap-2 px-4 py-2 text-sm font-bold text-zinc-400 bg-zinc-900 border border-zinc-800 rounded-xl hover:border-zinc-600 hover:text-zinc-200 transition-all cursor-pointer shrink-0"
+    >
+      <svg id="toggle-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/>
+        <path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/>
+      </svg>
+      <span id="toggle-label">Show hidden</span>
+    </button>
+  </div>
+
+  <div id="loading-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
+    {Array.from({ length: 12 }).map(() => (
+      <div class="animate-pulse rounded-2xl overflow-hidden bg-zinc-900 border border-zinc-800">
+        <div class="aspect-[2/3] bg-zinc-800"></div>
+        <div class="p-3 space-y-2">
+          <div class="h-3 bg-zinc-800 rounded w-3/4"></div>
+          <div class="h-2 bg-zinc-800 rounded w-1/2"></div>
+        </div>
+      </div>
+    ))}
+  </div>
+
+  <div id="cw-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6 hidden"></div>
+
+  <div id="empty-state" class="hidden text-center py-20 text-zinc-500">
+    <p class="text-lg">Nothing in progress.</p>
+    <p class="text-sm mt-2">Start watching something to see it here.</p>
+  </div>
+</Base>
+
+<script define:vars={{ token }}>
+  function esc(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function tmdbImageUrl(path, size = 'w500') {
+    if (!path) return null;
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      const m = /image\.tmdb\.org\/t\/p\/([^/]+)(\/.+)$/.exec(path);
+      if (m) return `/api/proxy/media/image/${m[1]}${m[2]}`;
+      return path;
+    }
+    return `/api/proxy/media/image/${size}${path.startsWith('/') ? path : '/' + path}`;
+  }
+
+  const TRASH_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
+  const DROP_ICON  = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/></svg>`;
+  const SPIN       = `<svg class="animate-spin" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10"/></svg>`;
+
+  let showingHidden = false;
+  let allItems = [];
+
+  function buildCard(item) {
+    const m = item.media;
+    const isEpisode = m.type === 'episode';
+    // Only movies can be dropped - episodes have no drop concept, so they're
+    // never suppressed here.
+    const isDropped = !isEpisode && m.dropped === true;
+
+    // Local copy of lib/episodeHref's episode branch - this define:vars
+    // script can't import (see lib/episodeHref.ts's header comment for the
+    // full list of duplicate sites to keep in sync).
+    const href = !m.tvdb_sourced && m.show_episode_order === 'tvdb' && m.show_tvdb_id
+      && m.tvdb_season_number != null && m.tvdb_episode_number != null
+      ? `/show/tvdb/${m.show_tvdb_id}/season/${m.tvdb_season_number}/${m.tvdb_episode_number}`
+      : !m.tvdb_sourced && m.show_tmdb_id && m.season_number != null && m.episode_number != null
+      ? `/show/${m.show_tmdb_id}/season/${m.season_number}/${m.episode_number}`
+      : m.show_tvdb_id && m.season_number != null && m.episode_number != null
+        ? `/show/tvdb/${m.show_tvdb_id}/season/${m.season_number}/${m.episode_number}`
+        : m.show_tmdb_id ? `/show/${m.show_tmdb_id}`
+        : m.show_tvdb_id ? `/show/tvdb/${m.show_tvdb_id}`
+        : m.tmdb_id ? `/media/${m.type}/${m.tmdb_id}` : '#';
+
+    const posterSrc = tmdbImageUrl(isEpisode && m.show_poster_path ? m.show_poster_path : m.poster_path, 'w500');
+    const sxe = isEpisode && m.season_number != null && m.episode_number != null
+      ? `S${String(m.season_number).padStart(2, '0')}E${String(m.episode_number).padStart(2, '0')}`
+      : null;
+    const progressPct = item.progress_percent != null ? Math.round(item.progress_percent * 100) : 0;
+
+    // Episodes: the existing plain "remove from Continue Watching" action
+    // (dismiss-cw, same as the homepage widget - deletes the progress row
+    // outright, no drop concept applies). Movies: the shared drop/undrop
+    // button - not dropped uses data-action="drop" so Base.astro's own
+    // document-level click delegation opens the shared modal; dropped is a
+    // direct single-click undrop (bound locally below, no ambiguity).
+    const actionBtn = isEpisode ? `
+      <button
+        class="dismiss-cw absolute top-1.5 right-1.5 z-10 w-7 h-7 rounded-lg flex items-center justify-center bg-zinc-950/80 border border-zinc-800 text-zinc-500 hover:text-rose-200 hover:border-rose-700 hover:bg-rose-900 transition-all duration-200 cursor-pointer"
+        data-media-id="${esc(String(m.id))}"
+        title="Remove from Continue Watching"
+      >${TRASH_ICON}</button>
+    ` : isDropped ? `
+      <button
+        class="cw-undrop-btn absolute top-1.5 right-1.5 z-10 w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-200 cursor-pointer bg-rose-900/60 border border-rose-600 text-rose-300 hover:bg-rose-700 hover:border-rose-500 hover:text-white"
+        data-media-id="${esc(String(m.id))}"
+        title="Undrop this movie"
+      >${DROP_ICON}</button>
+    ` : `
+      <button
+        data-card
+        data-media-type="movie"
+        data-action="drop"
+        data-media-id="${esc(String(m.id))}"
+        data-dropped="false"
+        class="absolute top-1.5 right-1.5 z-10 w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-200 cursor-pointer bg-zinc-950/80 border border-zinc-800 text-zinc-500 hover:text-rose-200 hover:border-rose-700 hover:bg-rose-900"
+        title="Drop this movie"
+      >${DROP_ICON}</button>
+    `;
+
+    // Suppressed (dropped movies only): rendered as opacity-50 + hidden
+    // (show/hide toggled by JS). A re-render while "Show hidden" is active
+    // must keep them visible.
+    const wrapperClass = isDropped ? (showingHidden ? 'opacity-50' : 'opacity-50 hidden') : '';
+
+    return `
+      <div class="${wrapperClass}" data-cw-hidden="${isDropped ? 'true' : 'false'}">
+        <div class="group relative flex flex-col rounded-2xl overflow-hidden bg-zinc-900 border border-zinc-800 hover:border-blue-500/50 hover:shadow-2xl hover:shadow-blue-900/20 transition-all duration-300 transform hover:-translate-y-1">
+          <a href="${esc(href)}" class="block active:scale-95 active:opacity-70 transition-all duration-100">
+            <div class="aspect-[2/3] bg-zinc-950 relative overflow-hidden ring-1 ring-white/5 group-hover:ring-blue-500/30 transition-all duration-300">
+              ${posterSrc
+                ? `<img src="${esc(posterSrc)}" alt="${esc(m.title)}" class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" loading="lazy" decoding="async" />`
+                : `<div class="w-full h-full flex flex-col items-center justify-center text-zinc-700 bg-zinc-900 p-4 text-center"><span class="text-3xl mb-2 opacity-30">🎬</span><span class="text-xs font-bold uppercase tracking-widest">${esc(m.title)}</span></div>`
+              }
+              <div class="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+              <div class="absolute bottom-0 left-0 right-0 h-1.5 bg-zinc-800/80">
+                <div class="h-full bg-blue-500 rounded-r-full" style="width: ${progressPct}%"></div>
+              </div>
+            </div>
+          </a>
+          ${actionBtn}
+          <a href="${esc(href)}" class="block p-3 bg-gradient-to-b from-zinc-900 to-zinc-950 flex-1">
+            ${isEpisode && m.show_title ? `<h3 class="text-xs font-medium text-zinc-400 truncate mb-0.5">${esc(m.show_title)}</h3>` : ''}
+            <h3 class="text-sm font-bold text-zinc-100 group-hover:text-blue-400 truncate transition-colors leading-tight mb-1">${esc(m.title)}</h3>
+            <div class="flex items-center justify-between">
+              ${sxe ? `<span class="text-[11px] font-bold text-blue-400 tracking-wide">${esc(sxe)}</span>` : '<span></span>'}
+              <span class="text-xs font-bold text-zinc-500 tabular-nums">${progressPct}%</span>
+            </div>
+          </a>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderGrid() {
+    const grid = document.getElementById('cw-grid');
+    grid.innerHTML = allItems.map(buildCard).join('');
+    grid.classList.remove('hidden');
+    updateEmptyState();
+    bindActionButtons();
+  }
+
+  function updateEmptyState() {
+    const grid = document.getElementById('cw-grid');
+    const empty = document.getElementById('empty-state');
+    const visibleCards = grid.querySelectorAll('[data-cw-hidden="false"]');
+    const anyVisible = visibleCards.length > 0;
+    const anyHidden  = grid.querySelectorAll('[data-cw-hidden="true"]').length > 0;
+    const isEmpty = !anyVisible && (!showingHidden || !anyHidden);
+    empty.classList.toggle('hidden', !isEmpty);
+    grid.classList.toggle('hidden', isEmpty);
+  }
+
+  async function loadContinueWatching() {
+    const grid    = document.getElementById('cw-grid');
+    const loading = document.getElementById('loading-grid');
+    const empty   = document.getElementById('empty-state');
+
+    try {
+      const res = await fetch('/api/proxy/history/continue-watching?limit=200&include_hidden=true', {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error('Failed');
+      const data = await res.json();
+      allItems = data.continue_watching ?? [];
+
+      loading.classList.add('hidden');
+
+      if (allItems.length === 0) {
+        empty.classList.remove('hidden');
+        return;
+      }
+
+      renderGrid();
+    } catch {
+      loading.classList.add('hidden');
+      empty.classList.remove('hidden');
+    }
+  }
+
+  // Dropped movie's button carries different data-action attributes
+  // depending on state (see buildCard) - simplest and most robust to just
+  // reload after undrop, same as the shared drop modal already does for its
+  // own actions, rather than hand-maintain attribute transitions in place.
+  async function undropMovie(btn, mediaId) {
+    btn.disabled = true;
+    btn.innerHTML = SPIN;
+    try {
+      await fetch(`/api/proxy/history/drop/movie?media_id=${mediaId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      window.location.reload();
+    } catch {
+      btn.disabled = false;
+      btn.innerHTML = DROP_ICON;
+    }
+  }
+
+  // Plain removal (episodes) - deletes the progress row outright, same as
+  // the homepage widget's own dismiss-cw handler. No reload needed: just
+  // drop the card from the grid and allItems.
+  async function dismissItem(btn, wrapper, mediaId) {
+    btn.disabled = true;
+    wrapper.style.opacity = '0.4';
+    try {
+      await fetch(`/api/proxy/history/continue-watching?media_id=${mediaId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      wrapper.remove();
+      allItems = allItems.filter(i => i.media.id !== mediaId);
+      updateEmptyState();
+    } catch {
+      btn.disabled = false;
+      wrapper.style.opacity = '';
+    }
+  }
+
+  // Only "undrop" and "dismiss" need local binding - the movie "drop" button
+  // carries data-action="drop" and is picked up entirely by Base.astro's own
+  // document-level click delegation (the same shared #drop-modal ActionBar's
+  // Drop button uses elsewhere), no per-element listener needed here at all.
+  function bindActionButtons() {
+    document.querySelectorAll('.cw-undrop-btn, .dismiss-cw').forEach(btn => {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = 'true';
+
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const mediaId = parseInt(btn.dataset.mediaId, 10);
+        const wrapper = btn.closest('[data-cw-hidden]');
+        if (btn.classList.contains('cw-undrop-btn')) {
+          undropMovie(btn, mediaId);
+        } else {
+          dismissItem(btn, wrapper, mediaId);
+        }
+      });
+    });
+  }
+
+  // Toggle: show/hide dropped movies in-place, no refetch
+  document.getElementById('toggle-hidden-btn').addEventListener('click', () => {
+    showingHidden = !showingHidden;
+
+    document.getElementById('toggle-label').textContent = showingHidden ? 'Hide hidden' : 'Show hidden';
+
+    document.getElementById('toggle-icon').innerHTML = showingHidden
+      ? `<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>`
+      : `<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/>`;
+
+    document.querySelectorAll('[data-cw-hidden="true"]').forEach(card => {
+      card.classList.toggle('hidden', !showingHidden);
+    });
+
+    updateEmptyState();
+  });
+
+  loadContinueWatching();
+</script>

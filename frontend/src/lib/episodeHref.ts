@@ -16,6 +16,9 @@
 // Duplicated inline (not imported) in places that can't `import` inside an
 // Astro `define:vars` client script - keep them in sync with this function
 // if it changes: frontend/src/pages/next-up.astro (buildCard),
+// frontend/src/pages/continue-watching.astro (buildCard, episode branch
+// only - this page also has movie-type cards, which fall through to the
+// final tmdb_id branch same as here),
 // frontend/src/pages/index.astro (episodeCardHtml),
 // frontend/src/pages/list/[id].astro (buildCard, season/series branches
 // only - this page has no episode-type cards), and
