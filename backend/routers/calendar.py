@@ -33,7 +33,7 @@ from models.collection import Collection
 from models.events import WatchEvent
 from models.media import Media
 from models.show import Show
-from models.users import User
+from models.users import User, UserSettings
 
 router = APIRouter()
 
@@ -92,7 +92,15 @@ async def _candidate_shows(db: AsyncSession, user_id: int) -> list[Show]:
             Show.tmdb_id.in_(direct_series_tmdb_ids),
         ))
     )).scalars().all()
-    return [s for s in shows if s.tmdb_id and (s.status or "") not in ("Ended", "Canceled")]
+
+    user_settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
+    user_settings = user_settings_result.scalar_one_or_none()
+    dropped_show_ids = set(user_settings.dropped_shows or []) if user_settings else set()
+
+    return [
+        s for s in shows
+        if s.tmdb_id and (s.status or "") not in ("Ended", "Canceled") and s.id not in dropped_show_ids
+    ]
 
 
 async def compute_calendar(db: AsyncSession, user_id: int) -> dict:

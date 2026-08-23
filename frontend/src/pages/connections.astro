@@ -719,6 +719,10 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
                             </label>
                           </div>
                         </div>
+                        <label class="flex items-center gap-3 cursor-pointer group">
+                          <input type="checkbox" name="trakt_sync_dropped" id="trakt_sync_dropped" checked={settings.trakt_sync_dropped !== false} class="sync-pref-checkbox w-4 h-4 rounded accent-red-500 cursor-pointer" />
+                          <span class="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">Dropped shows</span>
+                        </label>
                         <div class="flex flex-wrap gap-2">
                           <button
                             type="button"
@@ -745,6 +749,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
                           { key: "trakt_push_ratings", label: "Ratings" },
                           { key: "trakt_push_collection", label: "Collection" },
                           { key: "trakt_push_lists", label: "Lists" },
+                          { key: "trakt_push_dropped", label: "Dropped shows" },
                         ].map(({ key, label }) => (
                           <label class="flex items-center gap-3 cursor-pointer group">
                             <input type="checkbox" name={key} id={key} checked={!!settings[key as keyof typeof settings]} class="sync-pref-checkbox w-4 h-4 rounded accent-red-500 cursor-pointer" />
@@ -753,9 +758,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
                         ))}
                         <label class="flex items-center gap-3 cursor-pointer group">
                           <input type="checkbox" name="trakt_scrobble" id="trakt_scrobble" checked={!!settings.trakt_scrobble} class="sync-pref-checkbox w-4 h-4 rounded accent-red-500 cursor-pointer" />
-                          <span class="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">
-                            Now watching <span class="text-zinc-500 text-xs">(live scrobble on play/pause/stop)</span>
-                          </span>
+                          <span class="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">Now watching</span>
                         </label>
                         <button
                           type="button"
@@ -1012,6 +1015,10 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
                             <span class="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">{label}</span>
                           </label>
                         ))}
+                        <label class="flex items-center gap-3 cursor-pointer group">
+                          <input type="checkbox" name="mdblist_sync_dropped" id="mdblist_sync_dropped" checked={settings.mdblist_sync_dropped !== false} class="sync-pref-checkbox w-4 h-4 rounded accent-violet-500 cursor-pointer" />
+                          <span class="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">Dropped shows</span>
+                        </label>
                         <button
                           type="button"
                           data-action="sync_mdblist"
@@ -1029,6 +1036,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
                           { key: "mdblist_push_ratings", label: "Ratings" },
                           { key: "mdblist_push_watchlist", label: "Watchlist" },
                           { key: "mdblist_push_collection", label: "Collection" },
+                          { key: "mdblist_push_dropped", label: "Dropped shows" },
                         ].map(({ key, label }) => (
                           <label class="flex items-center gap-3 cursor-pointer group">
                             <input type="checkbox" name={key} id={key} checked={!!settings[key as keyof typeof settings]} class="sync-pref-checkbox w-4 h-4 rounded accent-violet-500 cursor-pointer" />
@@ -1037,9 +1045,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
                         ))}
                         <label class="flex items-center gap-3 cursor-pointer group">
                           <input type="checkbox" name="mdblist_scrobble" id="mdblist_scrobble" checked={!!settings.mdblist_scrobble} class="sync-pref-checkbox w-4 h-4 rounded accent-violet-500 cursor-pointer" />
-                          <span class="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">
-                            Now watching <span class="text-zinc-500 text-xs">(live scrobble on play/pause/stop)</span>
-                          </span>
+                          <span class="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">Now watching</span>
                         </label>
                         <button
                           type="button"
@@ -3162,8 +3168,8 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
               })(),
             };
             const traktSyncKeys = [
-              'trakt_sync_watched', 'trakt_sync_ratings', 'trakt_sync_lists', 'trakt_watchlist_split',
-              'trakt_push_watched', 'trakt_push_ratings', 'trakt_push_collection', 'trakt_push_lists', 'trakt_scrobble',
+              'trakt_sync_watched', 'trakt_sync_ratings', 'trakt_sync_lists', 'trakt_sync_dropped', 'trakt_watchlist_split',
+              'trakt_push_watched', 'trakt_push_ratings', 'trakt_push_collection', 'trakt_push_lists', 'trakt_push_dropped', 'trakt_scrobble',
             ];
             for (const key of traktSyncKeys) {
               const el = document.getElementById(key) as HTMLInputElement | null;
@@ -3224,8 +3230,8 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
               })(),
             };
             const mdblistSyncKeys = [
-              'mdblist_sync_watched', 'mdblist_sync_ratings', 'mdblist_sync_watchlist',
-              'mdblist_push_watched', 'mdblist_push_ratings', 'mdblist_push_watchlist', 'mdblist_push_collection', 'mdblist_scrobble',
+              'mdblist_sync_watched', 'mdblist_sync_ratings', 'mdblist_sync_watchlist', 'mdblist_sync_dropped',
+              'mdblist_push_watched', 'mdblist_push_ratings', 'mdblist_push_watchlist', 'mdblist_push_collection', 'mdblist_push_dropped', 'mdblist_scrobble',
             ];
             for (const key of mdblistSyncKeys) {
               const el = document.getElementById(key) as HTMLInputElement | null;
@@ -3513,6 +3519,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
               trakt_sync_watched: 'watched history',
               trakt_sync_ratings: 'ratings',
               trakt_sync_lists: 'lists',
+              trakt_sync_dropped: 'dropped shows',
             };
             const pulling: string[] = [];
             document.querySelectorAll('.sync-pref-checkbox').forEach((el: any) => {
@@ -3603,6 +3610,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
               mdblist_sync_watched: 'watched history',
               mdblist_sync_ratings: 'ratings',
               mdblist_sync_watchlist: 'watchlist',
+              mdblist_sync_dropped: 'dropped shows',
             };
             const selected = Array.from(document.querySelectorAll<HTMLInputElement>('.sync-pref-checkbox'))
               .filter(el => el.checked && labels[el.name])

@@ -130,6 +130,10 @@ async def get_watchlist(api_key: str) -> dict[str, Any]:
     return await _get_all(api_key, "/watchlist/items")
 
 
+async def get_dropped(api_key: str) -> dict[str, Any]:
+    return await _get_all(api_key, "/sync/dropped")
+
+
 def _batched_payloads(payload: dict[str, list[dict[str, Any]]]) -> Iterable[dict[str, list[dict[str, Any]]]]:
     for key in ("movies", "shows", "seasons", "episodes"):
         values = payload.get(key, [])
@@ -254,6 +258,23 @@ async def push_ratings(
 
 async def remove_ratings(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
     return await _push("/sync/ratings/remove", api_key, payload)
+
+
+async def push_dropped(api_key: str, tmdb_id: int, dropped_at: str) -> dict[str, Any]:
+    """Mark a show dropped on MDBList. Shows only - MDBList's /sync/dropped
+    has no movie support."""
+    return await _request(
+        "POST", "/sync/dropped", api_key,
+        payload={"shows": [{"ids": {"tmdb": tmdb_id}, "dropped_at": dropped_at}]},
+    )
+
+
+async def remove_dropped(api_key: str, tmdb_id: int) -> dict[str, Any]:
+    """Undrop a show on MDBList (sets dropped_at back to null)."""
+    return await _request(
+        "POST", "/sync/dropped/remove", api_key,
+        payload={"shows": [{"ids": {"tmdb": tmdb_id}}]},
+    )
 
 
 async def push_watchlist(

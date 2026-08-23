@@ -115,10 +115,12 @@ class UserSettings(BaseModel):
     trakt_sync_watched: Optional[bool] = None
     trakt_sync_ratings: Optional[bool] = None
     trakt_sync_lists: Optional[bool] = None
+    trakt_sync_dropped: Optional[bool] = None
     trakt_watchlist_split: Optional[bool] = None
     trakt_push_watched: Optional[bool] = None
     trakt_push_ratings: Optional[bool] = None
     trakt_push_collection: Optional[bool] = None
+    trakt_push_dropped: Optional[bool] = None
     trakt_push_lists: Optional[bool] = None
     trakt_scrobble: Optional[bool] = None
     trakt_auto_sync_interval: Optional[float] = None
@@ -142,10 +144,12 @@ class UserSettings(BaseModel):
     mdblist_sync_watched: Optional[bool] = None
     mdblist_sync_ratings: Optional[bool] = None
     mdblist_sync_watchlist: Optional[bool] = None
+    mdblist_sync_dropped: Optional[bool] = None
     mdblist_push_watched: Optional[bool] = None
     mdblist_push_ratings: Optional[bool] = None
     mdblist_push_watchlist: Optional[bool] = None
     mdblist_push_collection: Optional[bool] = None
+    mdblist_push_dropped: Optional[bool] = None
     mdblist_scrobble: Optional[bool] = None
     mdblist_auto_sync_interval: Optional[float] = None
     mdblist_auto_push_interval: Optional[float] = None

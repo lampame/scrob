@@ -27,6 +27,7 @@ from models.show import Show
 from models.sync import SyncJob, SyncStatus
 from models.users import User, UserSettings
 from routers.trakt import (
+    _apply_dropped_shows_import,
     _get_or_create_episode_media,
     _get_or_create_movie_media,
     _get_or_create_show,
@@ -628,6 +629,9 @@ async def run_mdblist_sync(user_id: int, job_id: int) -> None:
             if settings.mdblist_sync_watchlist:
                 labels.append("watchlist")
                 requests.append(mdblist_client.get_watchlist(settings.mdblist_api_key))
+            if settings.mdblist_sync_dropped:
+                labels.append("dropped")
+                requests.append(mdblist_client.get_dropped(settings.mdblist_api_key))
 
             import asyncio
 
@@ -671,6 +675,10 @@ async def run_mdblist_sync(user_id: int, job_id: int) -> None:
             if "watchlist" in snapshots:
                 await _import_watchlist(
                     db, user_id, snapshots["watchlist"], tmdb_key, external_cache, stats
+                )
+            if "dropped" in snapshots:
+                stats["dropped"] = await _apply_dropped_shows_import(
+                    db, user_id, snapshots["dropped"].get("shows", [])
                 )
             await db.commit()
 
@@ -953,7 +961,7 @@ async def sync_mdblist(
 ):
     result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
     settings = _require_key(result.scalar_one_or_none())
-    if not any((settings.mdblist_sync_watched, settings.mdblist_sync_ratings, settings.mdblist_sync_watchlist)):
+    if not any((settings.mdblist_sync_watched, settings.mdblist_sync_ratings, settings.mdblist_sync_watchlist, settings.mdblist_sync_dropped)):
         raise HTTPException(status_code=400, detail="Enable at least one MDBList pull option")
 
     job = SyncJob(user_id=current_user.id, source=CollectionSource.mdblist, status=SyncStatus.pending)

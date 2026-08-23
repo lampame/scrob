@@ -58,6 +58,7 @@ Astro.response.headers.set("Cache-Control", "no-store");
     <p class="text-lg">Nothing to watch next.</p>
     <p class="text-sm mt-2">Start watching a show to see your next episodes here.</p>
   </div>
+
 </Base>
 
 <script define:vars={{ token }}>
@@ -78,6 +79,7 @@ Astro.response.headers.set("Cache-Control", "no-store");
 
   const EYE_SLASH = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>`;
   const EYE    = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>`;
+  const DROP_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/></svg>`;
   const SPIN   = `<svg class="animate-spin" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10"/></svg>`;
 
   let showingHidden = false;
@@ -117,6 +119,11 @@ Astro.response.headers.set("Cache-Control", "no-store");
 
   function buildCard(item) {
     const isHidden = item.next_up_hidden === true;
+    const isDropped = item.dropped === true;
+    // "Show hidden" reveals both - dropped is stronger than hidden but both
+    // are equally "suppressed from the default view" as far as this toggle
+    // is concerned.
+    const isSuppressed = isHidden || isDropped;
     // Local copy of lib/episodeHref's episode branch - this define:vars
     // script can't import (see lib/episodeHref.ts's header comment for the
     // full list of duplicate sites to keep in sync). #186: route to
@@ -140,20 +147,43 @@ Astro.response.headers.set("Cache-Control", "no-store");
       ? `S${String(item.season_number).padStart(2, '0')}E${String(item.episode_number).padStart(2, '0')}`
       : null;
 
-    const hideBtn = item.show_id != null ? `
+    // Dropped: a direct single-click undrop (bound locally below, no
+    // ambiguity - there's only one opposite action). Hidden (not dropped):
+    // same, a direct single-click restore. Neither: the shared hide/drop
+    // popover from Base.astro (same one ActionBar's Drop button uses) -
+    // data-action="drop" on a data-card wrapper is all it needs, Base.astro's
+    // own document-level click delegation picks it up with no per-button
+    // binding here at all.
+    const hideBtn = item.show_id != null ? (isDropped ? `
       <button
-        class="nextup-hide-btn absolute top-1.5 right-1.5 z-10 w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-200 cursor-pointer ${isHidden ? 'bg-amber-900/60 border border-amber-600 text-amber-300 hover:bg-amber-700 hover:border-amber-500 hover:text-white' : 'bg-zinc-950/80 border border-zinc-800 text-zinc-500 hover:text-rose-200 hover:border-rose-700 hover:bg-rose-900'}"
+        class="nextup-undrop-btn absolute top-1.5 right-1.5 z-10 w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-200 cursor-pointer bg-rose-900/60 border border-rose-600 text-rose-300 hover:bg-rose-700 hover:border-rose-500 hover:text-white"
         data-show-id="${esc(String(item.show_id))}"
-        title="${isHidden ? 'Restore to Next Up' : 'Hide from Next Up'}"
-      >${isHidden ? EYE : EYE_SLASH}</button>
-    ` : '';
+        title="Undrop this show"
+      >${DROP_ICON}</button>
+    ` : isHidden ? `
+      <button
+        class="nextup-restore-btn absolute top-1.5 right-1.5 z-10 w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-200 cursor-pointer bg-amber-900/60 border border-amber-600 text-amber-300 hover:bg-amber-700 hover:border-amber-500 hover:text-white"
+        data-show-id="${esc(String(item.show_id))}"
+        title="Restore to Next Up"
+      >${EYE}</button>
+    ` : `
+      <button
+        data-card
+        data-media-type="series"
+        data-action="drop"
+        data-show-id="${esc(String(item.show_id))}"
+        data-dropped="false"
+        class="absolute top-1.5 right-1.5 z-10 w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-200 cursor-pointer bg-zinc-950/80 border border-zinc-800 text-zinc-500 hover:text-rose-200 hover:border-rose-700 hover:bg-rose-900"
+        title="Hide or drop this show"
+      >${EYE_SLASH}</button>
+    `) : '';
 
-    // Hidden cards: rendered as opacity-50 + hidden (show/hide toggled by JS).
-    // A re-render while "Show hidden" is active must keep them visible.
-    const wrapperClass = isHidden ? (showingHidden ? 'opacity-50' : 'opacity-50 hidden') : '';
+    // Suppressed cards: rendered as opacity-50 + hidden (show/hide toggled by
+    // JS). A re-render while "Show hidden" is active must keep them visible.
+    const wrapperClass = isSuppressed ? (showingHidden ? 'opacity-50' : 'opacity-50 hidden') : '';
 
     return `
-      <div class="${wrapperClass}" data-next-up-hidden="${isHidden ? 'true' : 'false'}">
+      <div class="${wrapperClass}" data-next-up-hidden="${isSuppressed ? 'true' : 'false'}">
         <div class="group relative flex flex-col rounded-2xl overflow-hidden bg-zinc-900 border border-zinc-800 hover:border-blue-500/50 hover:shadow-2xl hover:shadow-blue-900/20 transition-all duration-300 transform hover:-translate-y-1">
           <a href="${esc(href)}" class="block active:scale-95 active:opacity-70 transition-all duration-100">
             <div class="aspect-[2/3] bg-zinc-950 relative overflow-hidden ring-1 ring-white/5 group-hover:ring-blue-500/30 transition-all duration-300">
@@ -223,62 +253,60 @@ Astro.response.headers.set("Cache-Control", "no-store");
     }
   }
 
+  // A card's button carries different data-action attributes depending on
+  // its state (see buildCard) - flipping states in place would mean hand-
+  // maintaining those attribute sets on every transition, which is exactly
+  // the kind of thing that drifts out of sync and causes bugs. Simplest and
+  // most robust: reload after every restore/undrop, same as the shared
+  // hide/drop popover already does for its own two actions.
+  async function restoreShow(btn, showId) {
+    btn.disabled = true;
+    btn.innerHTML = SPIN;
+    try {
+      await fetch(`/api/proxy/history/next-up/hide?show_id=${showId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      window.location.reload();
+    } catch {
+      btn.disabled = false;
+      btn.innerHTML = EYE;
+    }
+  }
+
+  async function undropShow(btn, showId) {
+    btn.disabled = true;
+    btn.innerHTML = SPIN;
+    try {
+      await fetch(`/api/proxy/history/drop/show?show_id=${showId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      window.location.reload();
+    } catch {
+      btn.disabled = false;
+      btn.innerHTML = DROP_ICON;
+    }
+  }
+
+  // Only the "restore from hidden" and "undrop" buttons need local binding -
+  // the "hide or drop" button carries data-action="drop" and is picked up
+  // entirely by Base.astro's own document-level click delegation (the same
+  // shared #drop-modal ActionBar's Drop button uses elsewhere), no
+  // per-element listener needed here at all.
   function bindHideButtons() {
-    document.querySelectorAll('.nextup-hide-btn').forEach(btn => {
+    document.querySelectorAll('.nextup-restore-btn, .nextup-undrop-btn').forEach(btn => {
       if (btn.dataset.bound) return;
       btn.dataset.bound = 'true';
 
-      btn.addEventListener('click', async (e) => {
+      btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-
-        const showId  = parseInt(btn.dataset.showId, 10);
-        const wrapper = btn.closest('[data-next-up-hidden]');
-        const isHidden = wrapper.dataset.nextUpHidden === 'true';
-
-        btn.disabled = true;
-        btn.innerHTML = SPIN;
-
-        try {
-          if (isHidden) {
-            await fetch(`/api/proxy/history/next-up/hide?show_id=${showId}`, {
-              method: 'DELETE',
-              headers: { 'Authorization': `Bearer ${token}` },
-            });
-            // Restore — also sync allItems so a later re-sort re-render
-            // doesn't resurrect the stale hidden state.
-            const restored = allItems.find(i => i.show_id === showId);
-            if (restored) restored.next_up_hidden = false;
-            wrapper.dataset.nextUpHidden = 'false';
-            wrapper.classList.remove('opacity-50', 'hidden');
-            btn.classList.remove('bg-amber-900/60', 'border-amber-600', 'text-amber-300', 'hover:bg-amber-700', 'hover:border-amber-500', 'hover:text-white');
-            btn.classList.add('bg-zinc-950/80', 'border-zinc-800', 'text-zinc-500', 'hover:text-white', 'hover:border-red-600', 'hover:bg-red-700');
-            btn.title = 'Hide from Next Up';
-            btn.innerHTML = EYE_SLASH;
-          } else {
-            await fetch('/api/proxy/history/next-up/hide', {
-              method: 'POST',
-              headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-              body: JSON.stringify({ show_id: showId }),
-            });
-            // Hide — same allItems sync as the restore branch above.
-            const hidden = allItems.find(i => i.show_id === showId);
-            if (hidden) hidden.next_up_hidden = true;
-            wrapper.dataset.nextUpHidden = 'true';
-            wrapper.classList.add('opacity-50');
-            if (!showingHidden) {
-              wrapper.classList.add('hidden');
-            }
-            btn.classList.remove('bg-zinc-950/80', 'border-zinc-800', 'text-zinc-500', 'hover:text-white', 'hover:border-red-600', 'hover:bg-red-700');
-            btn.classList.add('bg-amber-900/60', 'border-amber-600', 'text-amber-300', 'hover:bg-amber-700', 'hover:border-amber-500', 'hover:text-white');
-            btn.title = 'Restore to Next Up';
-            btn.innerHTML = EYE;
-          }
-          btn.disabled = false;
-          updateEmptyState();
-        } catch {
-          btn.disabled = false;
-          btn.innerHTML = isHidden ? EYE : EYE_SLASH;
+        const showId = parseInt(btn.dataset.showId, 10);
+        if (btn.classList.contains('nextup-undrop-btn')) {
+          undropShow(btn, showId);
+        } else {
+          restoreShow(btn, showId);
         }
       });
     });

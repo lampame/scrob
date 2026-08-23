@@ -25,6 +25,9 @@ interface Props {
   showRewatch?: boolean;
   rewatch?: { started_at: string; watched: number; total: number } | null;
   airDate?: string | null;
+  showDrop?: boolean;
+  showId?: number | null;
+  dropped?: boolean;
 }
 
 const {
@@ -53,6 +56,9 @@ const {
   showRewatch = false,
   rewatch = null,
   airDate = null,
+  showDrop = false,
+  showId = null,
+  dropped = false,
 } = Astro.props;
 
 const isSeries = mediaType === "series";
@@ -108,6 +114,13 @@ const requestTitle = isMonitored
     : requestStatus === "rejected"
       ? "Request rejected"
       : (isSeries ? "Request on Sonarr" : "Request on Radarr");
+
+const dropCls = dropped
+  ? "bg-rose-500/50 text-rose-300 hover:bg-rose-400/50"
+  : "bg-zinc-800 text-zinc-500 hover:bg-rose-400/50 hover:text-rose-400";
+const dropTitle = dropped
+  ? "Dropped - click for options"
+  : "Click for hide/drop options";
 ---
 
 <div
@@ -240,6 +253,24 @@ const requestTitle = isMonitored
           <line x1="12" y1="15" x2="12" y2="3"/>
         </svg>
         <span class={label}>{isSeries ? "Sonarr" : "Radarr"}</span>
+      </button>
+    )}
+
+    <!-- Drop (rose) -->
+    {showDrop && (
+      <button
+        data-action="drop"
+        data-show-id={showId != null ? String(showId) : ""}
+        data-dropped={String(dropped)}
+        data-state={dropped ? "active" : "inactive"}
+        title={dropTitle}
+        class={`${btn} ${btnW} border-l border-zinc-800/60 ${dropCls}`}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="8" y1="12" x2="16" y2="12"/>
+        </svg>
+        <span class={label}>{dropped ? "Dropped" : "Drop"}</span>
       </button>
     )}
   </div>

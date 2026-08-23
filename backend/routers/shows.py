@@ -619,6 +619,10 @@ async def get_show(
         await require_anon_nav_allowed(db)
     effective_user_id = current_user.id if current_user else ANON_USER_ID
 
+    settings_q = await db.execute(select(UserSettings).where(UserSettings.user_id == effective_user_id))
+    _show_settings = settings_q.scalar_one_or_none()
+    dropped_show_ids = set(_show_settings.dropped_shows or []) if _show_settings else set()
+
     # 1. Try to find locally
     show_result = await db.execute(
         select(ShowModel).where(ShowModel.tmdb_id == series_tmdb_id)
@@ -904,6 +908,7 @@ async def get_show(
             "in_library": state_item.get("collection_pct", 0) > 0 if state_item else False,
             "watched": state_item.get("watched", False) if state_item else False,
             "rewatch": rewatch_info,
+            "dropped": show.id in dropped_show_ids,
             "in_lists": state_item.get("in_lists", []),
             "collection_pct": state_item.get("collection_pct", 0),
             "watch_pct": state_item.get("watch_pct", 0),

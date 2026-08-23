@@ -34,6 +34,7 @@ from models.show import Show
 from models.sync import SyncJob, SyncStatus
 from models.users import User, UserSettings
 from models.global_settings import GlobalSettings
+from sqlalchemy.orm.attributes import flag_modified
 
 logger = logging.getLogger(__name__)
 
@@ -1056,6 +1057,44 @@ def _trakt_import_summary(job_id: int, label: str, stats: dict) -> str:
     )
 
 
+async def _apply_dropped_shows_import(db: AsyncSession, user_id: int, dropped_items: list[dict]) -> int:
+    """Merges a provider's dropped-shows list into the local dropped_shows
+    setting (#117 follow-up). Shared by Trakt and MDBList - both return
+    dropped items shaped {..., "show": {"ids": {"tmdb": ...}}}. Only shows
+    already known locally can be mapped (dropped_shows stores local Show.id,
+    not tmdb_id), so a show Scrob has never seen is silently skipped rather
+    than force-creating a local Show row just to hide it.
+
+    Additive only, like the rest of this pull: a show un-dropped on Trakt
+    does not get removed from Scrob's local dropped_shows here.
+    """
+    tmdb_ids = {
+        item.get("show", {}).get("ids", {}).get("tmdb")
+        for item in dropped_items
+    }
+    tmdb_ids.discard(None)
+    if not tmdb_ids:
+        return 0
+
+    shows_result = await db.execute(select(Show.id).where(Show.tmdb_id.in_(tmdb_ids)))
+    local_show_ids = {row[0] for row in shows_result.all()}
+    if not local_show_ids:
+        return 0
+
+    settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
+    settings = settings_result.scalar_one_or_none()
+    if not settings:
+        return 0
+
+    dropped = set(settings.dropped_shows or [])
+    new_ids = local_show_ids - dropped
+    if new_ids:
+        settings.dropped_shows = list(dropped | new_ids)
+        flag_modified(settings, "dropped_shows")
+        await db.commit()
+    return len(new_ids)
+
+
 async def run_trakt_sync(user_id: int, job_id: int, full_resync: bool = False):
     from routers.sync import SyncCancelled, _raise_if_cancelled
     print(f"Starting Trakt sync for user {user_id}, job {job_id}")
@@ -1134,6 +1173,10 @@ async def run_trakt_sync(user_id: int, job_id: int, full_resync: bool = False):
 
             if settings.trakt_sync_watched and not history_had_errors:
                 settings.trakt_history_cursor_at = history_end
+
+            if settings.trakt_sync_dropped:
+                dropped_items = await trakt_client.get_dropped_shows(client_id, access_token)
+                stats["dropped"] = await _apply_dropped_shows_import(db, user_id, dropped_items)
 
             print(_trakt_import_summary(job_id, "sync", stats))
             # A pull only populates scrob's own data — it never automatically pushes to

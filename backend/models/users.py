@@ -80,12 +80,17 @@ class UserSettings(Base):
     # Trakt inbound sync flags (Trakt → Scrob)
     trakt_sync_watched       : Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     trakt_sync_ratings       : Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    # Defaults off, like trakt_sync_lists - pulling a dropped show could
+    # silently hide something from Next Up/Calendar the user never touched
+    # in Scrob, which would be a surprising side effect for existing users.
+    trakt_sync_dropped       : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     trakt_history_cursor_at  : Mapped[Optional[datetime]] = mapped_column(DateTime)
 
     # Trakt outbound push flags (Scrob → Trakt)
     trakt_push_watched       : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     trakt_push_ratings       : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     trakt_push_collection    : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    trakt_push_dropped       : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     trakt_scrobble           : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     # Trakt list import/export
@@ -128,6 +133,13 @@ class UserSettings(Base):
     shuffle_next_up : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     minimalist_next_up : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     next_up_hidden_shows : Mapped[Optional[list[int]]] = mapped_column(JSONB, server_default="'[]'")
+    # Dropped is stronger than hidden - unlike next_up_hidden_shows, dropped
+    # items are also excluded from the Calendar and from Discover/
+    # recommendations (#117). dropped_shows holds local Show.id values (same
+    # convention as next_up_hidden_shows); dropped_movies holds local
+    # Media.id values (movies have no next-up/hidden precedent to match).
+    dropped_shows  : Mapped[Optional[list[int]]] = mapped_column(JSONB, server_default="'[]'")
+    dropped_movies : Mapped[Optional[list[int]]] = mapped_column(JSONB, server_default="'[]'")
     hide_watched_from_recently_added : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     # MDBList — API key authentication
@@ -135,10 +147,12 @@ class UserSettings(Base):
     mdblist_sync_watched: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     mdblist_sync_ratings: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     mdblist_sync_watchlist: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    mdblist_sync_dropped: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     mdblist_push_watched: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     mdblist_push_ratings: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     mdblist_push_watchlist: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     mdblist_push_collection: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    mdblist_push_dropped: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     mdblist_scrobble: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
     # MDBList auto sync/push interval, in hours (null = disabled)

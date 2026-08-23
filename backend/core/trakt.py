@@ -711,6 +711,38 @@ async def remove_show_rating(client_id: str, access_token: str, tmdb_id: int) ->
         resp.raise_for_status()
 
 
+async def get_dropped_shows(client_id: str, access_token: str) -> list[dict]:
+    """Fetch the user's dropped shows via the hidden-items API.
+
+    Returns list of: {hidden_at, type: "show", show: {title, ids: {tmdb}}}
+    """
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        return await _get_all_pages(client, "/users/hidden/dropped", _headers(client_id, access_token))
+
+
+async def add_to_hidden(client_id: str, access_token: str, section: str, tmdb_id: int) -> None:
+    """Hide a show for a section of the hidden-items API ('dropped' is
+    shows-only - the same mechanism behind Trakt's own "Drop Show" button)."""
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        resp = await client.post(
+            f"{TRAKT_BASE}/users/hidden/{section}",
+            json={"shows": [{"ids": {"tmdb": tmdb_id}}]},
+            headers=_headers(client_id, access_token),
+        )
+        resp.raise_for_status()
+
+
+async def remove_from_hidden(client_id: str, access_token: str, section: str, tmdb_id: int) -> None:
+    """Unhide a show from a section of the hidden-items API."""
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        resp = await client.post(
+            f"{TRAKT_BASE}/users/hidden/{section}/remove",
+            json={"shows": [{"ids": {"tmdb": tmdb_id}}]},
+            headers=_headers(client_id, access_token),
+        )
+        resp.raise_for_status()
+
+
 async def scrobble_movie(
     client_id: str,
     access_token: str,

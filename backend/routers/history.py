@@ -505,11 +505,18 @@ async def get_continue_watching(
     current_user: User = Depends(get_current_user_or_api_key),
 ):
     """Items currently in progress."""
+    settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
+    settings = settings_result.scalar_one_or_none()
+    dropped_movie_ids = set(settings.dropped_movies or []) if settings else set()
+
+    filters = [PlaybackProgress.user_id == current_user.id]
+    if dropped_movie_ids:
+        filters.append(Media.id.notin_(dropped_movie_ids))
     result = await db.execute(
         select(PlaybackProgress, Media)
         .join(Media, Media.id == PlaybackProgress.media_id)
         .options(selectinload(PlaybackProgress.media).selectinload(Media.show))
-        .where(PlaybackProgress.user_id == current_user.id)
+        .where(*filters)
         .order_by(desc(PlaybackProgress.updated_at))
         .limit(20)
     )
@@ -813,6 +820,10 @@ async def get_next_up(
     include_hidden: bool = Query(False),
 ):
     """Next unwatched episode for each show the user is actively watching."""
+    settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
+    settings = settings_result.scalar_one_or_none()
+    dropped_show_ids = set(settings.dropped_shows or []) if settings else set()
+
     # Shows the user is mid-rewatch on read their Next Up position from that
     # rewatch's progress instead of full history - excluded from the Step 1
     # history query below and handled separately in Step 1b, so a show
@@ -908,7 +919,15 @@ async def get_next_up(
     # once it's actually played. Compute the next episode from the show's TMDB
     # season metadata and create/enrich it on demand instead of requiring it to
     # already exist locally.
-    missing_show_ids = set(last_per_show) - set(next_per_show)
+    #
+    # Dropped shows are excluded from this fallback specifically (not from
+    # last_per_show/next_per_show above) - the point of dropping is to stop
+    # paying attention to a show, so it shouldn't cost a live TMDB fetch on
+    # every Next Up load just to compute a candidate nobody will see by
+    # default (#117 follow-up). A dropped show that already has a locally
+    # synced next-episode row still surfaces fine under "Show hidden" below;
+    # only the on-demand computation is skipped for it.
+    missing_show_ids = set(last_per_show) - set(next_per_show) - dropped_show_ids
     if missing_show_ids:
         api_key = await get_user_tmdb_key(db, current_user.id)
         if check_tmdb_key(api_key):
@@ -1038,15 +1057,13 @@ async def get_next_up(
         )
         completed_ids |= {row[0] for row in rewatch_completed_result.all()}
 
-    settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
-    settings = settings_result.scalar_one_or_none()
     hidden_set = set(settings.next_up_hidden_shows or []) if settings else set()
 
     today = date.today()
     next_up = [
         m for m in next_per_show.values()
         if m.id not in completed_ids
-        and (include_hidden or m.show_id not in hidden_set)
+        and (include_hidden or (m.show_id not in hidden_set and m.show_id not in dropped_show_ids))
         # Don't surface an episode that hasn't aired yet — the immediately-next
         # episode for the show, not a later one, so we simply show nothing for
         # this show until it airs rather than skipping ahead. An episode with
@@ -1065,6 +1082,7 @@ async def get_next_up(
     items = [_format_media_item(m) for m in next_up]
     for item in items:
         item["next_up_hidden"] = item.get("show_id") in hidden_set
+        item["dropped"] = item.get("show_id") in dropped_show_ids
         show_stats = remaining_stats.get(item.get("show_id"))
         if show_stats:
             item["episodes_left"] = show_stats["episodes_left"]
@@ -1126,6 +1144,138 @@ async def unhide_next_up_show(
             hidden.remove(show_id)
             settings.next_up_hidden_shows = hidden
             flag_modified(settings, "next_up_hidden_shows")
+            await db.commit()
+    return {"status": "ok"}
+
+
+async def _push_show_dropped_to_providers(settings: UserSettings, tmdb_id: int, *, remove: bool) -> None:
+    """Best-effort push of a show's dropped state to Trakt/MDBList - never
+    raises, mirrors _push_list_item_to_trakt's error-swallowing pattern
+    (routers/lists.py) since a failed provider push shouldn't block the local
+    drop/undrop action itself."""
+    if settings.trakt_push_dropped and settings.trakt_access_token and settings.trakt_client_id:
+        try:
+            if remove:
+                await trakt_client.remove_from_hidden(settings.trakt_client_id, settings.trakt_access_token, "dropped", tmdb_id)
+            else:
+                await trakt_client.add_to_hidden(settings.trakt_client_id, settings.trakt_access_token, "dropped", tmdb_id)
+        except Exception as exc:
+            logger.warning("Failed to push dropped show to Trakt (tmdb_id=%s, remove=%s): %s", tmdb_id, remove, exc)
+
+    if settings.mdblist_push_dropped and settings.mdblist_api_key:
+        from core import mdblist as mdblist_client
+        try:
+            if remove:
+                await mdblist_client.remove_dropped(settings.mdblist_api_key, tmdb_id)
+            else:
+                await mdblist_client.push_dropped(settings.mdblist_api_key, tmdb_id, _iso_utc_now())
+        except Exception as exc:
+            logger.warning("Failed to push dropped show to MDBList (tmdb_id=%s, remove=%s): %s", tmdb_id, remove, exc)
+
+
+def _iso_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+class DropShowRequest(BaseModel):
+    show_id: int
+
+
+@router.post("/drop/show")
+async def drop_show(
+    body: DropShowRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_or_api_key),
+):
+    """Drop a show: excluded from Next Up, Calendar, and Discover/
+    recommendations, without touching watch history (#117)."""
+    settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
+    settings = settings_result.scalar_one_or_none()
+    if not settings:
+        raise HTTPException(status_code=404, detail="Settings not found")
+    dropped = list(settings.dropped_shows or [])
+    if body.show_id not in dropped:
+        dropped.append(body.show_id)
+        settings.dropped_shows = dropped
+        flag_modified(settings, "dropped_shows")
+        await db.commit()
+
+    show_result = await db.execute(select(Show).where(Show.id == body.show_id))
+    show = show_result.scalar_one_or_none()
+    if show and show.tmdb_id:
+        await _push_show_dropped_to_providers(settings, show.tmdb_id, remove=False)
+    return {"status": "ok"}
+
+
+@router.delete("/drop/show")
+async def undrop_show(
+    show_id: int = Query(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_or_api_key),
+):
+    settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
+    settings = settings_result.scalar_one_or_none()
+    if not settings:
+        raise HTTPException(status_code=404, detail="Settings not found")
+    dropped = list(settings.dropped_shows or [])
+    if show_id in dropped:
+        dropped.remove(show_id)
+        settings.dropped_shows = dropped
+        flag_modified(settings, "dropped_shows")
+        await db.commit()
+
+    show_result = await db.execute(select(Show).where(Show.id == show_id))
+    show = show_result.scalar_one_or_none()
+    if show and show.tmdb_id:
+        await _push_show_dropped_to_providers(settings, show.tmdb_id, remove=True)
+    return {"status": "ok"}
+
+
+class DropMovieRequest(BaseModel):
+    media_id: int
+
+
+@router.post("/drop/movie")
+async def drop_movie(
+    body: DropMovieRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_or_api_key),
+):
+    """Drop a movie: excluded from Continue Watching and Discover/
+    recommendations, without touching watch history (#117). Neither Trakt
+    nor MDBList support a dropped-movie concept, so this is local-only.
+
+    The underlying PlaybackProgress row is left alone rather than deleted -
+    get_continue_watching already filters it out by dropped_movies, and
+    keeping it means the resume position survives if the movie is later
+    undropped, instead of being lost."""
+    settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
+    settings = settings_result.scalar_one_or_none()
+    if not settings:
+        raise HTTPException(status_code=404, detail="Settings not found")
+    dropped = list(settings.dropped_movies or [])
+    if body.media_id not in dropped:
+        dropped.append(body.media_id)
+        settings.dropped_movies = dropped
+        flag_modified(settings, "dropped_movies")
+        await db.commit()
+    return {"status": "ok"}
+
+
+@router.delete("/drop/movie")
+async def undrop_movie(
+    media_id: int = Query(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_or_api_key),
+):
+    settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
+    settings = settings_result.scalar_one_or_none()
+    if settings:
+        dropped = list(settings.dropped_movies or [])
+        if media_id in dropped:
+            dropped.remove(media_id)
+            settings.dropped_movies = dropped
+            flag_modified(settings, "dropped_movies")
             await db.commit()
     return {"status": "ok"}
 

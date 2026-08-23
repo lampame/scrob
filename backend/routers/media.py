@@ -2330,6 +2330,28 @@ async def _show_library_ids(db: AsyncSession, user_id: int, tmdb_ids: list[int])
     return {row[0] for row in q.all()}
 
 
+async def _dropped_tmdb_ids(db: AsyncSession, user_id: int) -> tuple[set[int], set[int]]:
+    """Dropped movie/show tmdb_ids for a user, so any recommendation surface
+    can exclude them (#117) - dropped_movies/dropped_shows store local ids,
+    so this resolves them to the tmdb_id space recommendation results live in."""
+    settings_q = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
+    settings = settings_q.scalar_one_or_none()
+    if not settings:
+        return set(), set()
+
+    movie_ids: set[int] = set()
+    if settings.dropped_movies:
+        q = await db.execute(select(Media.tmdb_id).where(Media.id.in_(settings.dropped_movies), Media.tmdb_id.isnot(None)))
+        movie_ids = {row[0] for row in q.all()}
+
+    show_ids: set[int] = set()
+    if settings.dropped_shows:
+        q = await db.execute(select(ShowModel.tmdb_id).where(ShowModel.id.in_(settings.dropped_shows), ShowModel.tmdb_id.isnot(None)))
+        show_ids = {row[0] for row in q.all()}
+
+    return movie_ids, show_ids
+
+
 @router.get("/now-playing")
 async def now_playing(
     db: AsyncSession = Depends(get_db),
@@ -2642,7 +2664,13 @@ async def for_you(
     random.shuffle(combined)
 
     await enrich_with_state(db, current_user.id, combined)
-    unwatched = [item for item in combined if not item.get("watched")]
+    # Dropped items must never come back as a recommendation (#117).
+    dropped_movie_ids, dropped_show_ids = await _dropped_tmdb_ids(db, current_user.id)
+    unwatched = [
+        item for item in combined
+        if not item.get("watched")
+        and item.get("tmdb_id") not in (dropped_movie_ids if item.get("type") == MediaType.movie else dropped_show_ids)
+    ]
     result = {"results": unwatched[:20]}
     _FOR_YOU_CACHE[current_user.id] = (_time.monotonic(), result)
     return result
@@ -2749,6 +2777,12 @@ async def recommended(
     if not all_collected_movie_ids and not all_collected_show_ids:
         return {"results": []}
 
+    # Dropped items must never come back as a recommendation (#117) - kept as
+    # their own set rather than folded into all_collected_*_ids, which is
+    # also used below to pick seed items and would wrongly exclude every
+    # collected (non-dropped) item as a seed if merged.
+    dropped_movie_tmdb_ids, dropped_show_tmdb_ids = await _dropped_tmdb_ids(db, current_user.id)
+
     # Sample seed items from most recently added
     recent_movies_q = await db.execute(
         select(Media.tmdb_id)
@@ -2757,7 +2791,7 @@ async def recommended(
         .order_by(Collection.added_at.desc())
         .limit(10)
     )
-    recent_movie_ids = [row[0] for row in recent_movies_q.all()]
+    recent_movie_ids = [row[0] for row in recent_movies_q.all() if row[0] not in dropped_movie_tmdb_ids]
 
     recent_shows_q = await db.execute(
         select(ShowModel.tmdb_id)
@@ -2768,7 +2802,7 @@ async def recommended(
         .distinct()
         .limit(5)
     )
-    recent_show_ids = [row[0] for row in recent_shows_q.all()]
+    recent_show_ids = [row[0] for row in recent_shows_q.all() if row[0] not in dropped_show_tmdb_ids]
 
     seed_movies = random.sample(recent_movie_ids, min(3, len(recent_movie_ids)))
     seed_shows = random.sample(recent_show_ids, min(2, len(recent_show_ids)))
@@ -2805,9 +2839,9 @@ async def recommended(
             if not tmdb_id or tmdb_id in seen:
                 continue
             seen.add(tmdb_id)
-            if is_show and tmdb_id in all_collected_show_ids:
+            if is_show and (tmdb_id in all_collected_show_ids or tmdb_id in dropped_show_tmdb_ids):
                 continue
-            if not is_show and tmdb_id in all_collected_movie_ids:
+            if not is_show and (tmdb_id in all_collected_movie_ids or tmdb_id in dropped_movie_tmdb_ids):
                 continue
             if is_show:
                 enriched.append({
@@ -4994,6 +5028,10 @@ async def get_media_details(
         raise HTTPException(status_code=404, detail="TMDB API Key not configured")
     metadata_lang = await get_user_metadata_language(db, effective_user_id)
 
+    detail_settings_q = await db.execute(select(UserSettings).where(UserSettings.user_id == effective_user_id))
+    detail_settings = detail_settings_q.scalar_one_or_none()
+    dropped_movie_ids = set(detail_settings.dropped_movies or []) if detail_settings else set()
+
     try:
         # 1. Fetch from TMDB
         if type == MediaType.movie:
@@ -5224,6 +5262,7 @@ async def get_media_details(
             **local_info,
             "tmdb_id": tmdb_id,
             "type": type,
+            "dropped": local_info["id"] in dropped_movie_ids if local_info["id"] else False,
             "watched": state_item.get("watched", False),
             "in_lists": state_item.get("in_lists", []),
             "user_rating": state_item.get("user_rating"),
@@ -5298,6 +5337,13 @@ async def get_media_recommendations(
             data = await tmdb.get_show(tmdb_id, api_key=tmdb_key)
         
         recs_raw = data.get("recommendations", {}).get("results", [])[:12]
+
+        # Dropped items must never come back as a recommendation (#117).
+        dropped_movie_ids, dropped_show_ids = await _dropped_tmdb_ids(db, effective_user_id)
+        dropped_rec_tmdb_ids = dropped_movie_ids if type == MediaType.movie else dropped_show_ids
+        if dropped_rec_tmdb_ids:
+            recs_raw = [r for r in recs_raw if r.get("id") not in dropped_rec_tmdb_ids]
+
         recommendations = [
             {
                 "id": None,
