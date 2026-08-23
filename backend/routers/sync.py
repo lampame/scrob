@@ -6200,6 +6200,42 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                 )
                 watched_ids = {row[0] for row in watched_result.all()}
 
+                # A show mid-rewatch has deliberately unwatched episodes on
+                # the server again (seasons not yet reached this cycle) -
+                # pushing full history would re-mark all of them watched and
+                # destroy the server's own Next Up/Continue Watching position
+                # for that show (#306). Scope those shows' pushed set to what
+                # has actually been (re)watched this cycle instead; shows
+                # with no active rewatch (or a completed one) keep today's
+                # full-history behaviour. The excluded episodes are simply
+                # omitted from this push, not actively unmarked, so anyone
+                # whose server legitimately has them watched from before the
+                # rewatch keeps that - same "don't push_watched=False"
+                # asymmetry _handle_unwatch_toggle already relies on.
+                show_id_by_media: dict[int, int] = {}
+                watched_list = list(watched_ids)
+                for i in range(0, len(watched_list), _MAX_IN_PARAMS):
+                    chunk = watched_list[i : i + _MAX_IN_PARAMS]
+                    rows = await db.execute(
+                        select(Media.id, Media.show_id).where(Media.id.in_(chunk), Media.show_id.isnot(None))
+                    )
+                    show_id_by_media.update(dict(rows.all()))
+
+                show_ids = list(set(show_id_by_media.values()))
+                active_rewatches_by_show_id = await get_active_rewatches_for_shows(db, user_id, show_ids) if show_ids else {}
+                if active_rewatches_by_show_id:
+                    progress_q = await db.execute(
+                        select(RewatchProgress.media_id).where(
+                            RewatchProgress.rewatch_id.in_([r.id for r in active_rewatches_by_show_id.values()])
+                        )
+                    )
+                    rewatch_progressed_media_ids = {row[0] for row in progress_q.all()}
+                    watched_ids = {
+                        mid for mid in watched_ids
+                        if show_id_by_media.get(mid) not in active_rewatches_by_show_id
+                        or mid in rewatch_progressed_media_ids
+                    }
+
             if conn.push_ratings:
                 ratings_result = await db.execute(
                     select(Rating.media_id, Rating.season_number, Rating.rating).where(
