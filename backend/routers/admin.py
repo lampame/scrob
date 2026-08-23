@@ -283,7 +283,7 @@ async def run_admin_heal(api_key: str, user_id: int | None = None, job_id: int |
             ]
 
             await _update_job(total_items=len(to_enrich), processed_items=0)
-            await batch_enrich_items(to_enrich, api_key=api_key)
+            await batch_enrich_items(db, to_enrich, api_key=api_key, user_id=user_id)
             await db.commit()
             await _update_job(processed_items=len(to_enrich), status=SyncStatus.completed, stats={"healed": True})
             print(f"Admin heal complete: processed {len(to_enrich)} items")
