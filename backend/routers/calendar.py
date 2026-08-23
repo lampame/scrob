@@ -17,7 +17,7 @@ exists and warms it in the background otherwise.
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, Query
@@ -43,6 +43,18 @@ CALENDAR_WINDOW_DAYS = 14
 FETCH_CONCURRENCY = 8
 
 _computing: set[int] = set()
+
+
+def _server_today() -> date:
+    """Server-configured TZ (same reference used everywhere else that syncs/
+    dates against a single instance-wide clock) - not a per-browser value. A
+    naive UTC boundary would put "today" off by a day near midnight in the
+    server's real timezone."""
+    try:
+        tz = ZoneInfo(settings.tz)
+    except (ZoneInfoNotFoundError, KeyError):
+        tz = ZoneInfo("UTC")
+    return datetime.now(tz).date()
 
 
 async def _candidate_shows(db: AsyncSession, user_id: int) -> list[Show]:
@@ -88,17 +100,10 @@ async def compute_calendar(db: AsyncSession, user_id: int) -> dict:
     from core.translations import get_user_metadata_language
     from routers.media import check_tmdb_key, get_user_tmdb_key
 
-    # Server-configured TZ (same as /airing-today, and everything else that
-    # syncs/dates against a single instance-wide clock) - not a per-browser
-    # value. A naive UTC boundary would put "today" off by a day near
-    # midnight in the server's real timezone. Handed back in the payload too,
-    # so the frontend's Today/Yesterday/Tomorrow labels use this same
-    # reference instead of the viewer's own browser clock.
-    try:
-        tz = ZoneInfo(settings.tz)
-    except (ZoneInfoNotFoundError, KeyError):
-        tz = ZoneInfo("UTC")
-    today = datetime.now(tz).date()
+    # Handed back in the payload too, so the frontend's Today/Yesterday/
+    # Tomorrow labels use this same reference instead of the viewer's own
+    # browser clock.
+    today = _server_today()
 
     candidates = await _candidate_shows(db, user_id)
 
@@ -192,15 +197,26 @@ async def compute_calendar(db: AsyncSession, user_id: int) -> dict:
     }
 
 
+def _is_cache_fresh(row: UserCalendarCache | None) -> bool:
+    if not row or (datetime.utcnow() - row.computed_at) >= CALENDAR_TTL:
+        return False
+    payload = row.payload or {}
+    if payload.get("schema") != CALENDAR_SCHEMA:
+        return False
+    # A cache built before local midnight is stale the instant the calendar
+    # day rolls over, even if it's still within the raw TTL - 24h is a
+    # rolling duration, not a "still the same calendar day" guarantee, so a
+    # payload computed at 17:20 yesterday would otherwise still read as
+    # fresh this morning with every Today/Yesterday/Tomorrow label (and the
+    # airing-today widget's "today" filter) pointing at yesterday.
+    return payload.get("today") == _server_today().isoformat()
+
+
 async def _load_or_compute(db: AsyncSession, user_id: int, force: bool) -> dict:
     row = (
         await db.execute(select(UserCalendarCache).where(UserCalendarCache.user_id == user_id))
     ).scalars().first()
-    if (
-        row and not force
-        and (datetime.utcnow() - row.computed_at) < CALENDAR_TTL
-        and (row.payload or {}).get("schema") == CALENDAR_SCHEMA
-    ):
+    if not force and _is_cache_fresh(row):
         return {"computed_at": row.computed_at.isoformat(), "cached": True, "calendar": row.payload}
     payload = await compute_calendar(db, user_id)
     if row:
@@ -240,11 +256,7 @@ async def get_calendar(
         row = (
             await db.execute(select(UserCalendarCache).where(UserCalendarCache.user_id == current_user.id))
         ).scalars().first()
-        if (
-            row
-            and (datetime.utcnow() - row.computed_at) < CALENDAR_TTL
-            and (row.payload or {}).get("schema") == CALENDAR_SCHEMA
-        ):
+        if _is_cache_fresh(row):
             return {"computed_at": row.computed_at.isoformat(), "cached": True, "calendar": row.payload}
         asyncio.create_task(_background_compute(current_user.id))
         return {"computed_at": None, "cached": False, "calendar": {"entries": []}}

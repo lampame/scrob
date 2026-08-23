@@ -1647,11 +1647,17 @@ async def airing_today_collected(
     if not check_tmdb_key(tmdb_key):
         return {"results": []}
 
-    from routers.calendar import _load_or_compute
+    from routers.calendar import _load_or_compute, _server_today
 
     cache = await _load_or_compute(db, effective_user_id, force=False)
     calendar = cache["calendar"]
-    today = calendar.get("today")
+    # The real current date, not calendar["today"] - that field is stamped
+    # at cache-compute time, so it's only ever as fresh as the last refresh.
+    # _load_or_compute now recomputes on a calendar-day rollover regardless
+    # of the raw TTL, but reading the live date here too means this widget
+    # can never show yesterday's "today" even for the split second before
+    # that recompute lands.
+    today = _server_today().isoformat()
 
     results = [
         {
