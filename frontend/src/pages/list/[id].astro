@@ -555,7 +555,7 @@ const sonarrUrl = `${origin}/api/proxy/sonarr-compat/${list?.id}`;
     const grid = document.getElementById('items-grid');
     if (!grid) return;
     let visible = 0;
-    grid.querySelectorAll('[data-item-id]').forEach(card => {
+    grid.querySelectorAll(':scope > [data-item-id]').forEach(card => {
       const type = card.getAttribute('data-type');
       const show = activeItemsFilter === 'all' || type === activeItemsFilter;
       card.style.display = show ? '' : 'none';
