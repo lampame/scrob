@@ -85,22 +85,29 @@ async def _push_watch_state(
     # would otherwise swallow errors here silently.
     tasks: list[tuple[str, Any]] = []
 
+    async def _push_plex_watched_and_record(conn: MediaServerConnection, source_id: str, uid: int, mid: int) -> bool:
+        ok = await plex_client.mark_watched(conn.url, conn.token, source_id)
+        if ok:
+            from routers.sync import _record_plex_pending_push
+            await _record_plex_pending_push(uid, mid)
+        return ok
+
     if connections:
         files_result = await db.execute(
-            select(CollectionFile)
+            select(CollectionFile, Collection.media_id)
             .join(Collection, Collection.id == CollectionFile.collection_id)
             .where(
                 Collection.user_id == user_id,
                 Collection.media_id.in_(media_ids),
             )
         )
-        coll_files = files_result.scalars().all()
+        coll_files = files_result.all()
 
         conn_by_type: dict[str, list[MediaServerConnection]] = {}
         for conn in connections:
             conn_by_type.setdefault(conn.type, []).append(conn)
 
-        for coll_file in coll_files:
+        for coll_file, coll_media_id in coll_files:
             if not coll_file.source_id:
                 continue
             source_type = coll_file.source.value if hasattr(coll_file.source, "value") else str(coll_file.source)
@@ -108,7 +115,7 @@ async def _push_watch_state(
                 if coll_file.source == CollectionSource.plex:
                     label = f"plex connection {conn.id}"
                     if watched:
-                        tasks.append((label, plex_client.mark_watched(conn.url, conn.token, coll_file.source_id)))
+                        tasks.append((label, _push_plex_watched_and_record(conn, coll_file.source_id, user_id, coll_media_id)))
                     else:
                         tasks.append((label, plex_client.mark_unwatched(conn.url, conn.token, coll_file.source_id)))
                 elif coll_file.source == CollectionSource.jellyfin:

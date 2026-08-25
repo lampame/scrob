@@ -28,6 +28,7 @@ from .episode_order import EpisodeOrderMapping, UserShowEpisodeOrder
 from .rewatch import ShowRewatch, RewatchProgress
 from .title_credits import TitleCredits
 from .calendar_cache import UserCalendarCache
+from .plex_pending_push import PlexPendingPush
 
 __all__ = [
     "Base",
@@ -58,4 +59,5 @@ __all__ = [
     "ShowTranslation",
     "EpisodeOrderMapping", "UserShowEpisodeOrder",
     "ShowRewatch", "RewatchProgress",
+    "PlexPendingPush",
 ]

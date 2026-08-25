@@ -21,6 +21,7 @@ from models.events import WatchEvent
 from models.ratings import Rating, RatingChanges, RatingKey
 from models.playback_progress import PlaybackProgress
 from models.library_selections import JellyfinLibrarySelection, EmbyLibrarySelection, PlexLibrarySelection
+from models.plex_pending_push import PlexPendingPush
 from models.season_override import ShowSeasonOverride
 from datetime import datetime, timedelta, timezone
 from dateutil import parser
@@ -1180,7 +1181,7 @@ async def _fan_out_changes_to_other_connections(
                 for mid in new_watched_ids:
                     for sid in source_ids_map.get((conn.id, mid), []):
                         if conn.type == "plex":
-                            push_tasks.append(_guarded(plex.mark_watched(conn.url, conn.token, sid)))
+                            push_tasks.append(_guarded(_push_plex_watched_and_record(conn, sid, user_id, mid)))
                         elif conn.type == "jellyfin":
                             # Registered before the call, not inside it - Jellyfin/Emby's
                             # UserDataSaved webhook can echo this back fast enough that a
@@ -2848,6 +2849,51 @@ async def _backfill_plex_languages(user_id: int, connection_id: int, p_url: str,
         return total
 
 
+# How long a PlexPendingPush row is kept around waiting for its echo before
+# it's treated as stale. This only bounds how long a pending row survives to
+# be matched against - the actual match still requires the echo's viewedAt to
+# land within PLEX_CONFIRMED_RECONCILE_WINDOW of pushed_at, so widening this
+# doesn't widen what counts as a match, it only affects how long we keep
+# waiting (e.g. across a slow first pull) before giving up and letting a
+# stale row be silently superseded by a genuinely new play (see GitHub #320).
+PLEX_PENDING_PUSH_MAX_AGE = timedelta(hours=1)
+
+
+async def _record_plex_pending_push(user_id: int, media_id: int) -> None:
+    """Record that we just pushed a "watched" mark to Plex for (user_id,
+    media_id), so a later history pull can recognize Plex's echo of it even
+    when the original watch happened long before the push (see GitHub #320
+    and PlexPendingPush's docstring). Upserts - one row per (user, media).
+
+    Uses its own short-lived session rather than a caller-supplied one: every
+    call site fires this from inside a concurrently-gathered push task, and
+    AsyncSession isn't safe for concurrent use from multiple coroutines on
+    the same session instance.
+    """
+    async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async with async_session() as db:
+        stmt = insert(PlexPendingPush).values(
+            user_id=user_id,
+            media_id=media_id,
+            pushed_at=datetime.utcnow(),
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["user_id", "media_id"],
+            set_={"pushed_at": stmt.excluded.pushed_at},
+        )
+        await db.execute(stmt)
+        await db.commit()
+
+
+async def _push_plex_watched_and_record(conn: MediaServerConnection, sid: str, user_id: int, media_id: int) -> bool:
+    """plex.mark_watched, then record a PlexPendingPush on success - see
+    _record_plex_pending_push and GitHub #320."""
+    ok = await plex.mark_watched(conn.url, conn.token, sid)
+    if ok:
+        await _record_plex_pending_push(user_id, media_id)
+    return ok
+
+
 # How long a webhook-created (provisional) WatchEvent's watched_at — this
 # server's receipt time for the completion webhook — can plausibly lag behind
 # Plex's own recorded viewedAt for that same play, before this stops treating
@@ -2975,6 +3021,39 @@ async def _backfill_plex_watch_history(
                 for c in candidates
             )
 
+        pp_res = await db.execute(
+            select(PlexPendingPush.id, PlexPendingPush.media_id, PlexPendingPush.pushed_at)
+            .where(
+                PlexPendingPush.user_id == user_id,
+                PlexPendingPush.pushed_at >= datetime.utcnow() - PLEX_PENDING_PUSH_MAX_AGE,
+            )
+        )
+        # media_id -> list of (pending_push_id, pushed_at) still awaiting their echo
+        pending_push_by_media: dict[int, list[tuple[int, datetime]]] = defaultdict(list)
+        for pp_id, media_id, pushed_at in pp_res:
+            pending_push_by_media[media_id].append((pp_id, pushed_at))
+
+        # Opportunistically clear out this user's pending-push rows that missed
+        # their echo's reconcile window for good - nothing left to match them
+        # against, and a rewatch of the same media later shouldn't be able to
+        # accidentally match a push from long ago.
+        await db.execute(
+            delete(PlexPendingPush).where(
+                PlexPendingPush.user_id == user_id,
+                PlexPendingPush.pushed_at < datetime.utcnow() - PLEX_PENDING_PUSH_MAX_AGE,
+            )
+        )
+
+        def _closest_pending_push(media_id: int, watched_at: datetime) -> tuple[int, datetime] | None:
+            candidates = pending_push_by_media.get(media_id) or []
+            in_range = [
+                c for c in candidates
+                if abs((watched_at - c[1]).total_seconds()) <= PLEX_CONFIRMED_RECONCILE_WINDOW.total_seconds()
+            ]
+            if not in_range:
+                return None
+            return min(in_range, key=lambda c: abs((watched_at - c[1]).total_seconds()))
+
         new_events = 0
         reconciled = 0
         unmatched = 0
@@ -3006,6 +3085,18 @@ async def _backfill_plex_watch_history(
                 # confirmed event's own watched_at is left as-is (it's the
                 # user's own action time, more meaningful than Plex's
                 # push-receipt time), just don't insert a second row for it.
+                reconciled += 1
+            elif (pp_match := _closest_pending_push(media_id, watched_at)) is not None:
+                # Echo of a push whose original watch was recorded long
+                # before it was pushed (#320) - too large a gap from the
+                # existing confirmed event's own watched_at for
+                # _has_nearby_confirmed above to catch, but close to when
+                # this connection actually told Plex to mark it watched.
+                # That existing event already covers this play; consume the
+                # pending marker instead of inserting a second row.
+                pp_id, _ = pp_match
+                await db.execute(delete(PlexPendingPush).where(PlexPendingPush.id == pp_id))
+                pending_push_by_media[media_id].remove(pp_match)
                 reconciled += 1
             else:
                 watch_event = WatchEvent(
@@ -6383,7 +6474,7 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                             mark_pushed_watched(user_id, mid)
                             watched_sid_to_mids.setdefault(sid, set()).add(mid)
                         else:
-                            push_items.append(("watched", sid))
+                            push_items.append(("watched", sid, mid))
 
             if conn.push_ratings:
                 for (mid, season_number), rating in ratings_map.items():
@@ -6515,7 +6606,10 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                             if already:
                                 return True
                             if conn.type == "plex":
-                                return await plex.mark_watched(conn.url, conn.token, sid, client=client)
+                                ok = await plex.mark_watched(conn.url, conn.token, sid, client=client)
+                                if ok:
+                                    await _record_plex_pending_push(user_id, item[2])
+                                return ok
                             elif conn.type == "jellyfin":
                                 return await jellyfin.mark_watched(conn.url, conn.token, conn.server_user_id, sid, client=client)
                             else:
@@ -6564,7 +6658,10 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                             if already:
                                 return True
                             if conn.type == "plex":
-                                return await plex.mark_watched(conn.url, conn.token, sid, client=client)
+                                ok = await plex.mark_watched(conn.url, conn.token, sid, client=client)
+                                if ok:
+                                    await _record_plex_pending_push(user_id, mid)
+                                return ok
                             elif conn.type == "jellyfin":
                                 mark_pushed_watched(user_id, mid)
                                 return await jellyfin.mark_watched(conn.url, conn.token, conn.server_user_id, sid, client=client)
