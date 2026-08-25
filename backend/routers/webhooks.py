@@ -1728,19 +1728,18 @@ def parse_plex_payload(payload: dict) -> dict | None:
     if metadata.get("librarySectionType") == "livetv" or metadata.get("live"):
         return None
 
-    # Extract TMDB ID from Guid array: [{"id": "tmdb://12345"}, ...]
-    guids = metadata.get("Guid") or []
-    tmdb_id: Optional[str] = None
-    tvdb_id: Optional[str] = None
-    imdb_id: Optional[str] = None
-    for g in guids:
-        gid = g.get("id", "")
-        if gid.startswith("tmdb://"):
-            tmdb_id = gid.replace("tmdb://", "")
-        elif gid.startswith("tvdb://"):
-            tvdb_id = gid.replace("tvdb://", "")
-        elif gid.startswith("imdb://"):
-            imdb_id = gid.replace("imdb://", "")
+    # Extract TMDB/TVDB/IMDb IDs from the Guid array: [{"id": "tmdb://12345"}, ...].
+    # A legacy-agent item has no Guid array at all, only a lowercase 'guid'
+    # string (e.g. 'com.plexapp.agents.thetvdb://73762/4/3') - get_guids()
+    # falls back to that, and the extract_* helpers recognize both the
+    # modern short prefixes and the legacy 'com.plexapp.agents.X://' ones,
+    # so older/manually-matched libraries still resolve.
+    import core.plex as plex_client
+    guids = plex_client.get_guids(metadata)
+    _tmdb_id = plex_client.extract_tmdb_id(guids)
+    tmdb_id = str(_tmdb_id) if _tmdb_id else None
+    tvdb_id = plex_client.extract_tvdb_id(guids)
+    imdb_id = plex_client.extract_imdb_id(guids)
 
     # Extract series identifiers from grandparent
     grandparent_guid = metadata.get("grandparentGuid", "")
@@ -1995,6 +1994,33 @@ async def _backfill_plex_runtime(
         print(f"  Could not backfill runtime from TMDB for media_id={getattr(media, 'id', None)}: {e}")
 
 
+async def _resolve_plex_progress(
+    data: dict, conn: MediaServerConnection | None,
+) -> tuple[float, int]:
+    """Plex's play/resume/stop webhook can fire with viewOffset still at 0 -
+    the client hasn't reported its real seek position back to the server yet
+    (most visible on resume: the Now Playing bar would start over at 0%
+    instead of the position playback actually resumed from). Asking Plex
+    directly for the item's own last known viewOffset is authoritative -
+    it's the same value that powers Plex's own Continue Watching - so it's a
+    reliable fallback when the webhook's momentary value is suspiciously 0.
+    """
+    if data["progress_percent"] > 0:
+        return data["progress_percent"], data["progress_seconds"]
+    if conn and getattr(conn, "url", None) and getattr(conn, "token", None) and data.get("plex_rating_key"):
+        try:
+            import core.plex as plex_client
+            item = await plex_client.get_item(conn.url, conn.token, str(data["plex_rating_key"]))
+            if item:
+                view_offset_ms = item.get("viewOffset", 0) or 0
+                duration_ms = item.get("duration", 0) or 0
+                if duration_ms and view_offset_ms:
+                    return round(view_offset_ms / duration_ms, 4), int(view_offset_ms / 1000)
+        except Exception as e:
+            print(f"  Could not fetch Plex item to resolve authoritative progress: {e}")
+    return data["progress_percent"], data["progress_seconds"]
+
+
 async def find_or_create_media_plex(
     data: dict, db: AsyncSession, api_key: str = None, conn: MediaServerConnection | None = None,
     user_id: int | None = None,
@@ -2057,7 +2083,10 @@ async def find_or_create_media_plex(
                 import core.plex as plex_client
                 show_item = await plex_client.get_item(conn.url, conn.token, data["grandparent_rating_key"])
                 if show_item:
-                    show_guids = show_item.get("Guid") or []
+                    # get_guids() falls back to the lowercase 'guid' string a
+                    # legacy-agent show has instead of a Guid array, so an
+                    # older/manually-matched show can still resolve here.
+                    show_guids = plex_client.get_guids(show_item)
                     for g in show_guids:
                         gid = g.get("id", "")
                         if gid.startswith("tmdb://"):
@@ -2275,9 +2304,10 @@ async def _handle_plex_webhook(request: Request, db: AsyncSession, api_key: str,
             session = await _get_or_open_session(db, session_key, "plex", user.id, media.id)
             session.state = "playing"
             session.updated_at = datetime.utcnow()
-            if data["progress_percent"] > 0:
-                session.progress_percent = data["progress_percent"]
-                session.progress_seconds = data["progress_seconds"]
+            resolved_percent, resolved_seconds = await _resolve_plex_progress(data, conn)
+            if resolved_percent > 0:
+                session.progress_percent = resolved_percent
+                session.progress_seconds = resolved_seconds
             await _backfill_plex_runtime(db, media, data, conn, tmdb_key)
             await db.commit()
         await _maybe_trakt_scrobble(settings, media, "start", data["progress_percent"], db=db)
@@ -2292,8 +2322,13 @@ async def _handle_plex_webhook(request: Request, db: AsyncSession, api_key: str,
         if not conn or conn.sync_playback:
             session = await _get_or_open_session(db, session_key, "plex", user.id, media.id)
             session.state = "playing"
-            session.progress_percent = data["progress_percent"]
-            session.progress_seconds = data["progress_seconds"]
+            # Same resolution as media.play above - Plex can fire this before
+            # the player has reported its actual seek position, so a 0 here
+            # is often stale rather than a real "back to the start" resume.
+            resolved_percent, resolved_seconds = await _resolve_plex_progress(data, conn)
+            if resolved_percent > 0:
+                session.progress_percent = resolved_percent
+                session.progress_seconds = resolved_seconds
             session.updated_at = datetime.utcnow()
             await _backfill_plex_runtime(db, media, data, conn, tmdb_key)
             await db.commit()
@@ -2321,9 +2356,11 @@ async def _handle_plex_webhook(request: Request, db: AsyncSession, api_key: str,
 
     elif event == "media.stop":
         session = await _close_session(db, session_key)
-        progress_percent = data["progress_percent"] or (session.progress_percent if session else 0.0)
+        progress_percent, progress_seconds = await _resolve_plex_progress(data, conn)
+        if progress_percent <= 0:
+            progress_percent = session.progress_percent if session else 0.0
+            progress_seconds = session.progress_seconds if session else 0
         if not conn or conn.sync_playback:
-            progress_seconds = data["progress_seconds"] or (session.progress_seconds if session else 0)
             media_id = session.media_id if session else None
             if media_id is None:
                 fallback = await find_or_create_media_plex(data, db, api_key=tmdb_key, conn=conn, user_id=user.id)
@@ -2409,7 +2446,7 @@ async def _handle_plex_webhook(request: Request, db: AsyncSession, api_key: str,
 
             if recent_items:
                 for plex_item in recent_items:
-                    item_guids = plex_item.get("Guid") or []
+                    item_guids = plex_client.get_guids(plex_item)
                     item_tmdb_id = plex_client.extract_tmdb_id(item_guids)
                     item_rating_key = str(plex_item.get("ratingKey", ""))
                     item_quality = plex_client.extract_quality(plex_item.get("Media", []))

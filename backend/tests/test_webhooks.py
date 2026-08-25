@@ -18,6 +18,7 @@ from routers.webhooks import (
     _episode_for_progress,
     _is_duplicate_webhook_delivery,
     _maybe_bingebase_scrobble,
+    _resolve_plex_progress,
     _resolve_tvdb_episode_to_tmdb_position,
     _write_watch_event,
     find_or_create_media_jellyfin,
@@ -968,6 +969,57 @@ class BackfillPlexRuntimeTests(IsolatedAsyncioTestCase):
         # rather than also exercising the TMDB fallback that follows it.
         await _backfill_plex_runtime(db, media, {"duration_ms": "not-a-number"}, None, None)
         self.assertIsNone(media.runtime)
+
+
+class ResolvePlexProgressTests(IsolatedAsyncioTestCase):
+    """Plex's play/resume/stop webhook can fire with viewOffset stuck at 0
+    (see #322's Now Playing bar starting a resume over at 0%, and its
+    Continue Watching entry for a mid-episode stop never being written) -
+    _resolve_plex_progress should trust a non-zero webhook value as-is, and
+    only reach out to Plex directly when that value is suspiciously 0."""
+
+    async def test_trusts_a_nonzero_webhook_value_without_calling_plex(self) -> None:
+        data = {"progress_percent": 0.42, "progress_seconds": 500}
+        with patch("core.plex.get_item", new_callable=AsyncMock) as mock_get_item:
+            percent, seconds = await _resolve_plex_progress(data, SimpleNamespace(url="u", token="t"))
+        mock_get_item.assert_not_called()
+        self.assertEqual((percent, seconds), (0.42, 500))
+
+    async def test_falls_back_to_plex_item_lookup_when_webhook_reports_zero(self) -> None:
+        data = {"progress_percent": 0.0, "progress_seconds": 0, "plex_rating_key": "57214"}
+        conn = SimpleNamespace(url="http://plex.local", token="plex-token")
+        with patch(
+            "core.plex.get_item", new_callable=AsyncMock,
+            return_value={"viewOffset": 3_758_054, "duration": 5_567_274},
+        ) as mock_get_item:
+            percent, seconds = await _resolve_plex_progress(data, conn)
+        mock_get_item.assert_awaited_once_with("http://plex.local", "plex-token", "57214")
+        self.assertAlmostEqual(percent, 0.6750, places=4)
+        self.assertEqual(seconds, 3758)
+
+    async def test_plex_lookup_also_zero_returns_the_webhook_zero(self) -> None:
+        data = {"progress_percent": 0.0, "progress_seconds": 0, "plex_rating_key": "57214"}
+        conn = SimpleNamespace(url="http://plex.local", token="plex-token")
+        with patch(
+            "core.plex.get_item", new_callable=AsyncMock,
+            return_value={"viewOffset": 0, "duration": 5_567_274},
+        ):
+            percent, seconds = await _resolve_plex_progress(data, conn)
+        self.assertEqual((percent, seconds), (0.0, 0))
+
+    async def test_no_conn_skips_plex_and_returns_the_webhook_zero(self) -> None:
+        data = {"progress_percent": 0.0, "progress_seconds": 0, "plex_rating_key": "57214"}
+        with patch("core.plex.get_item", new_callable=AsyncMock) as mock_get_item:
+            percent, seconds = await _resolve_plex_progress(data, None)
+        mock_get_item.assert_not_called()
+        self.assertEqual((percent, seconds), (0.0, 0))
+
+    async def test_plex_lookup_raising_does_not_crash(self) -> None:
+        data = {"progress_percent": 0.0, "progress_seconds": 0, "plex_rating_key": "57214"}
+        conn = SimpleNamespace(url="http://plex.local", token="plex-token")
+        with patch("core.plex.get_item", new_callable=AsyncMock, side_effect=RuntimeError("boom")):
+            percent, seconds = await _resolve_plex_progress(data, conn)
+        self.assertEqual((percent, seconds), (0.0, 0))
 
 
 if __name__ == "__main__":
