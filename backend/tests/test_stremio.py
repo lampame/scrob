@@ -622,9 +622,9 @@ class StremioCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             scalars=lambda: SimpleNamespace(all=lambda: [connection]),
         )
         settings_result = SimpleNamespace(scalar_one_or_none=lambda: settings)
-        files_result = SimpleNamespace(
-            scalars=lambda: SimpleNamespace(all=lambda: []),
-        )
+        # _push_watch_state selects (CollectionFile, Collection.media_id) and
+        # reads it via .all() directly, not .scalars().all().
+        files_result = SimpleNamespace(all=lambda: [])
         movie = Media(id=10, tmdb_id=603, media_type=MediaType.movie, title="The Matrix")
         stremio_media_result = SimpleNamespace(
             scalars=lambda: SimpleNamespace(all=lambda: [movie]),

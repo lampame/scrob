@@ -109,13 +109,19 @@ class PlexSyncNeedsLibraryScanTests(unittest.TestCase):
 class _PlexHistoryFakeDB:
     """Minimal async-session double for _backfill_plex_watch_history: just
     enough to serve db.get(MediaServerConnection), the existing-WatchEvent
-    select, db.add()/flush()/commit(), and the reconciling UPDATE statement."""
+    select, the #320 pending-push select, db.add()/flush()/commit(), and the
+    reconciling UPDATE statement."""
 
-    def __init__(self, conn, existing_watch_rows):
+    def __init__(self, conn, existing_watch_rows, pending_push_rows=None):
         self.conn = conn
         self.existing_watch_rows = existing_watch_rows
+        # (pending_push_id, media_id, pushed_at) rows - defaults to none
+        # still awaiting their echo, since most of these tests aren't
+        # exercising that reconciliation path.
+        self.pending_push_rows = pending_push_rows or []
         self.added: list = []
         self.updates: list[dict] = []
+        self.deletes: list = []
         self.commit = AsyncMock()
 
     async def __aenter__(self):
@@ -132,6 +138,11 @@ class _PlexHistoryFakeDB:
         if sql.startswith("UPDATE watch_events"):
             self.updates.append(dict(statement.compile().params))
             return None
+        if sql.startswith("DELETE FROM plex_pending_pushes"):
+            self.deletes.append(statement)
+            return None
+        if "FROM plex_pending_pushes" in sql:
+            return list(self.pending_push_rows)
         return list(self.existing_watch_rows)
 
     def add(self, obj):
@@ -151,10 +162,11 @@ class BackfillPlexWatchHistoryDedupTests(unittest.IsolatedAsyncioTestCase):
     and only against provisional rows, not a broad time-window match against
     any existing play regardless of source (the original, too-broad fix)."""
 
-    async def _run(self, existing_watch_rows, history_entries):
+    async def _run(self, existing_watch_rows, history_entries, pending_push_rows=None):
         # existing_watch_rows: list of (id, media_id, watched_at, provisional)
+        # pending_push_rows: list of (pending_push_id, media_id, pushed_at)
         conn = SimpleNamespace(plex_history_cursor_at=None)
-        db = _PlexHistoryFakeDB(conn, existing_watch_rows)
+        db = _PlexHistoryFakeDB(conn, existing_watch_rows, pending_push_rows)
 
         with (
             patch.object(sync, "async_sessionmaker", return_value=lambda *a, **k: db),
@@ -216,14 +228,13 @@ class BackfillPlexWatchHistoryDedupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(db.added), 1)
         self.assertEqual(db.added[0].watched_at, authoritative_watched_at)
 
-    async def test_confirmed_event_requires_exact_match_not_a_window(self):
-        # A non-provisional (already-confirmed) row — e.g. from a prior run of
-        # this same backfill, or an unrelated Trakt/Simkl import — must only
-        # be treated as the same play on an exact watched_at match. A close
-        # but non-identical confirmed row must NOT suppress recording the
-        # authoritative play, unlike the old blanket time-window approach.
+    async def test_confirmed_event_outside_reconcile_window_is_not_suppressed(self):
+        # A non-provisional (already-confirmed) row - e.g. from a prior run of
+        # this same backfill, or an unrelated Trakt/Simkl import - that's well
+        # outside PLEX_CONFIRMED_RECONCILE_WINDOW is a genuinely distinct play,
+        # not an echo of a synchronous push (#320) - must still get its own row.
         confirmed_watched_at = datetime(2026, 8, 1, 20, 0, 0)
-        authoritative_watched_at = confirmed_watched_at + timedelta(minutes=2)
+        authoritative_watched_at = confirmed_watched_at + timedelta(minutes=5)
 
         new_events, reconciled, unmatched, db = await self._run(
             existing_watch_rows=[(101, 10, confirmed_watched_at, False)],
@@ -234,6 +245,50 @@ class BackfillPlexWatchHistoryDedupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reconciled, 0)
         self.assertEqual(db.updates, [])
         self.assertEqual(len(db.added), 1)
+
+    async def test_confirmed_event_within_reconcile_window_is_treated_as_push_echo(self):
+        # #320: marking something watched in Scrob pushes to Plex
+        # synchronously, so a play showing up within
+        # PLEX_CONFIRMED_RECONCILE_WINDOW of an existing confirmed watch for
+        # the same media is almost certainly that same push echoing back -
+        # must reconcile (no new row), and leave the confirmed event's own
+        # watched_at untouched (no UPDATE, unlike the provisional-webhook path).
+        confirmed_watched_at = datetime(2026, 8, 1, 20, 0, 0)
+        echo_watched_at = confirmed_watched_at + timedelta(minutes=2)
+
+        new_events, reconciled, unmatched, db = await self._run(
+            existing_watch_rows=[(101, 10, confirmed_watched_at, False)],
+            history_entries=[self._history_entry(echo_watched_at)],
+        )
+
+        self.assertEqual(new_events, 0)
+        self.assertEqual(reconciled, 1)
+        self.assertEqual(db.updates, [])
+        self.assertEqual(db.added, [])
+
+    async def test_pending_push_echo_of_a_backdated_watch_is_reconciled(self):
+        # #320: a watch recorded long before it was pushed (e.g. imported from
+        # Trakt, then later marked watched again) is too far from the push
+        # echo's viewedAt for _has_nearby_confirmed above to catch, but the
+        # PlexPendingPush row (recorded at push time) is close to it - must
+        # reconcile against that instead of inserting a duplicate row, and
+        # consume the pending marker so it can't match a later, real rewatch.
+        confirmed_watched_at = datetime(2025, 1, 1, 20, 0, 0)
+        pushed_at = datetime(2026, 8, 1, 19, 59, 0)
+        echo_watched_at = pushed_at + timedelta(minutes=1)
+
+        new_events, reconciled, unmatched, db = await self._run(
+            existing_watch_rows=[(101, 10, confirmed_watched_at, False)],
+            history_entries=[self._history_entry(echo_watched_at)],
+            pending_push_rows=[(201, 10, pushed_at)],
+        )
+
+        self.assertEqual(new_events, 0)
+        self.assertEqual(reconciled, 1)
+        self.assertEqual(db.added, [])
+        # 2 DELETEs: the unconditional stale-pending-push cleanup that runs on
+        # every backfill pass, plus consuming this specific matched marker.
+        self.assertEqual(len(db.deletes), 2)
 
     async def test_confirmed_event_exact_match_is_a_no_op(self):
         # Re-running the backfill (e.g. cursor overlap) must not re-add a play

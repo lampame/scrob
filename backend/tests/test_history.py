@@ -339,17 +339,19 @@ class PushWatchStateExcludeConnectionTests(unittest.IsolatedAsyncioTestCase):
         return conn_origin, conn_other
 
     def _coll_files(self):
+        # (CollectionFile, Collection.media_id) - _push_watch_state selects
+        # both columns, joining in the owning collection's media_id.
         cf1 = SimpleNamespace(source=CollectionSource.jellyfin, source_id="item-1")
         cf2 = SimpleNamespace(source=CollectionSource.jellyfin, source_id="item-2")
-        return cf1, cf2
+        return (cf1, 10), (cf2, 10)
 
     async def test_excludes_only_the_originating_connection(self) -> None:
         conn_origin, conn_other = self._connections()
-        cf1, cf2 = self._coll_files()
+        row1, row2 = self._coll_files()
         # Query order in _push_watch_state (settings=None short-circuits every
         # later trakt/mdblist/simkl query, keeping this fixture minimal):
         # 1. connections, 2. settings, 3. collection files.
-        db = _FakeSession([[conn_origin, conn_other], None, [cf1, cf2]])
+        db = _FakeSession([[conn_origin, conn_other], None, [row1, row2]])
 
         calls: list[str] = []
 
@@ -371,8 +373,8 @@ class PushWatchStateExcludeConnectionTests(unittest.IsolatedAsyncioTestCase):
         # webhook-triggered), behavior is unchanged - every push_watched
         # connection still gets it, including what would be conn_origin above.
         conn_origin, conn_other = self._connections()
-        cf1, cf2 = self._coll_files()
-        db = _FakeSession([[conn_origin, conn_other], None, [cf1, cf2]])
+        row1, row2 = self._coll_files()
+        db = _FakeSession([[conn_origin, conn_other], None, [row1, row2]])
 
         calls: list[str] = []
 
