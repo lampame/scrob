@@ -2855,6 +2855,19 @@ async def _backfill_plex_languages(user_id: int, connection_id: int, p_url: str,
 # not by content runtime — unlike a runtime-based guess, this reflects the
 # actual mechanism of the drift (see GitHub #135).
 PLEX_WEBHOOK_RECONCILE_WINDOW = timedelta(minutes=10)
+
+# Same idea, but for a *confirmed* (non-provisional) WatchEvent - e.g. one
+# created directly by "mark as watched" in Scrob's own UI, not a webhook
+# receipt estimate. Marking something watched pushes to every push-enabled
+# connection synchronously, in the same request (see history.py's
+# _push_watch_state) - so a Plex play that shows up within a couple minutes
+# of an existing confirmed watch for the same media is almost certainly that
+# same push echoing back, not an independent second viewing. Kept much
+# tighter than the provisional window: unlike a webhook's receipt-time
+# estimate (which is expected to drift), a confirmed event's own timestamp is
+# already meaningful and shouldn't be treated as approximate over a wide
+# window (see GitHub #320).
+PLEX_CONFIRMED_RECONCILE_WINDOW = timedelta(minutes=2)
 _PLEX_HISTORY_CHUNK = 200  # WatchEvents per commit, for a large first-time backfill
 
 
@@ -2955,6 +2968,13 @@ async def _backfill_plex_watch_history(
                 return None
             return min(in_range, key=lambda c: abs((watched_at - c[1]).total_seconds()))
 
+        def _has_nearby_confirmed(media_id: int, watched_at: datetime) -> bool:
+            candidates = confirmed_watched_by_media.get(media_id) or set()
+            return any(
+                abs((watched_at - c).total_seconds()) <= PLEX_CONFIRMED_RECONCILE_WINDOW.total_seconds()
+                for c in candidates
+            )
+
         new_events = 0
         reconciled = 0
         unmatched = 0
@@ -2980,6 +3000,12 @@ async def _backfill_plex_watch_history(
                 )
                 provisional_by_media[media_id].remove(match)
                 confirmed_watched_by_media[media_id].add(watched_at)
+                reconciled += 1
+            elif _has_nearby_confirmed(media_id, watched_at):
+                # Echo of Scrob's own synchronous push (#320) - the existing
+                # confirmed event's own watched_at is left as-is (it's the
+                # user's own action time, more meaningful than Plex's
+                # push-receipt time), just don't insert a second row for it.
                 reconciled += 1
             else:
                 watch_event = WatchEvent(
