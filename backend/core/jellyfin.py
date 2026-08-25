@@ -99,14 +99,28 @@ async def get_movies(library_id: str, url: str, token: str, user_id: str) -> lis
     return all_items
 
 async def get_shows(library_id: str, url: str, token: str, user_id: str) -> list:
-    data = await _get(url, token, f"Users/{user_id}/Items", params={
-        "ParentId": library_id,
-        "IncludeItemTypes": "Series",
-        "Recursive": True,
-        "Fields": "ProviderIds",
-        "Limit": 2000,
-    })
-    return data.get("Items", [])
+    all_items = []
+    start = 0
+    page_size = 500
+
+    while True:
+        data = await _get(url, token, f"Users/{user_id}/Items", params={
+            "ParentId": library_id,
+            "IncludeItemTypes": "Series",
+            "Recursive": True,
+            "Fields": "ProviderIds",
+            "Limit": page_size,
+            "StartIndex": start,
+        })
+        items = data.get("Items", [])
+        all_items.extend(items)
+
+        total = data.get("TotalRecordCount", 0)
+        start += page_size
+        if start >= total:
+            break
+
+    return all_items
 
 async def get_episodes(library_id: str, url: str, token: str, user_id: str) -> list:
     all_items = []

@@ -61,6 +61,40 @@ class JellyfinMovieQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("DateCreated", requested_params["Fields"])
 
 
+class JellyfinShowQueryTests(unittest.IsolatedAsyncioTestCase):
+    """Regression test for #315: get_shows fetched a single page capped at
+    Limit=2000 with no pagination, unlike get_movies/get_episodes - a
+    library with more than 2000 series silently dropped the rest, and every
+    episode belonging to those shows was skipped too."""
+
+    async def test_get_shows_paginates_past_the_first_page(self) -> None:
+        requests: list[dict[str, str]] = []
+
+        total = 1200
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            start = int(params["StartIndex"])
+            page = [{"Id": f"show-{start + i}"} for i in range(min(500, total - start))]
+            return httpx.Response(200, json={"Items": page, "TotalRecordCount": total})
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            jellyfin.httpx,
+            "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            shows = await jellyfin.get_shows(
+                "library-id", "http://jellyfin.local", "token", "user-id"
+            )
+
+        self.assertEqual(len(shows), 1200)
+        self.assertEqual(len(requests), 3)
+        self.assertEqual([r["StartIndex"] for r in requests], ["0", "500", "1000"])
+        self.assertEqual(requests[0]["IncludeItemTypes"], "Series")
+
+
 class JellyfinSetRatingTests(unittest.IsolatedAsyncioTestCase):
     async def test_set_rating_preserves_existing_user_data(self) -> None:
         # Regression test for #168: POST .../UserData replaces the whole
