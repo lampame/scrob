@@ -1994,6 +1994,28 @@ async def _backfill_plex_runtime(
         print(f"  Could not backfill runtime from TMDB for media_id={getattr(media, 'id', None)}: {e}")
 
 
+async def _backfill_credits_stingers(db: AsyncSession, media: Media, tmdb_key: str | None) -> None:
+    """Actively fills in a movie's mid/post-credits-scene flags (#319) when a
+    webhook event finds them missing from tmdb_data - a movie enriched before
+    this feature shipped has no has_mid_credits_scene/has_post_credits_scene
+    keys yet, so the Now Playing bar's badge would otherwise never show for
+    it until a manual "Refresh Metadata". Self-heals once per movie: the
+    keys are always written together, so their presence (even both False)
+    means this has already run.
+    """
+    if media.media_type != MediaType.movie or not media.tmdb_id or not tmdb_key:
+        return
+    tmdb_data = media.tmdb_data or {}
+    if "has_mid_credits_scene" in tmdb_data:
+        return
+    try:
+        data = await tmdb.get_movie(media.tmdb_id, api_key=tmdb_key)
+        has_mid, has_post = tmdb.extract_credits_stingers(data)
+        media.tmdb_data = {**tmdb_data, "has_mid_credits_scene": has_mid, "has_post_credits_scene": has_post}
+    except Exception as e:
+        print(f"  Could not backfill credits-stinger flags for media_id={getattr(media, 'id', None)}: {e}")
+
+
 async def _resolve_plex_progress(
     data: dict, conn: MediaServerConnection | None,
 ) -> tuple[float, int]:
@@ -2309,6 +2331,7 @@ async def _handle_plex_webhook(request: Request, db: AsyncSession, api_key: str,
                 session.progress_percent = resolved_percent
                 session.progress_seconds = resolved_seconds
             await _backfill_plex_runtime(db, media, data, conn, tmdb_key)
+            await _backfill_credits_stingers(db, media, tmdb_key)
             await db.commit()
         await _maybe_trakt_scrobble(settings, media, "start", data["progress_percent"], db=db)
         await _maybe_mdblist_scrobble(settings, media, "start", data["progress_percent"], db=db)
@@ -2331,6 +2354,7 @@ async def _handle_plex_webhook(request: Request, db: AsyncSession, api_key: str,
                 session.progress_seconds = resolved_seconds
             session.updated_at = datetime.utcnow()
             await _backfill_plex_runtime(db, media, data, conn, tmdb_key)
+            await _backfill_credits_stingers(db, media, tmdb_key)
             await db.commit()
         await _maybe_trakt_scrobble(settings, media, "start", data["progress_percent"], db=db)
         await _maybe_mdblist_scrobble(settings, media, "start", data["progress_percent"], db=db)
@@ -2349,6 +2373,7 @@ async def _handle_plex_webhook(request: Request, db: AsyncSession, api_key: str,
                 session.progress_seconds = data["progress_seconds"]
                 session.updated_at = datetime.utcnow()
                 await _backfill_plex_runtime(db, media, data, conn, tmdb_key)
+                await _backfill_credits_stingers(db, media, tmdb_key)
                 await db.commit()
         await _maybe_trakt_scrobble(settings, media, "pause", data["progress_percent"], db=db)
         await _maybe_mdblist_scrobble(settings, media, "pause", data["progress_percent"], db=db)
@@ -2372,6 +2397,7 @@ async def _handle_plex_webhook(request: Request, db: AsyncSession, api_key: str,
                     progress_percent >= 0.90,
                 )
             await _backfill_plex_runtime(db, media, data, conn, tmdb_key)
+            await _backfill_credits_stingers(db, media, tmdb_key)
             await db.commit()
         await _maybe_trakt_scrobble(settings, media, "stop", progress_percent, db=db)
         await _maybe_mdblist_scrobble(settings, media, "stop", progress_percent, db=db)
@@ -2619,6 +2645,7 @@ async def _handle_plex_scrobble_webhook(request: Request, db: AsyncSession, api_
                 session.progress_percent = data["progress_percent"]
                 session.progress_seconds = data["progress_seconds"]
             await _backfill_plex_runtime(db, media, data, None, tmdb_key)
+            await _backfill_credits_stingers(db, media, tmdb_key)
             await db.commit()
         if not is_duplicate:
             await _maybe_trakt_scrobble(settings, media, "start", data["progress_percent"], db=db)
@@ -2637,6 +2664,7 @@ async def _handle_plex_scrobble_webhook(request: Request, db: AsyncSession, api_
             session.progress_seconds = data["progress_seconds"]
             session.updated_at = datetime.utcnow()
             await _backfill_plex_runtime(db, media, data, None, tmdb_key)
+            await _backfill_credits_stingers(db, media, tmdb_key)
             await db.commit()
         if not is_duplicate:
             await _maybe_trakt_scrobble(settings, media, "start", data["progress_percent"], db=db)
@@ -2656,6 +2684,7 @@ async def _handle_plex_scrobble_webhook(request: Request, db: AsyncSession, api_
                 session.progress_seconds = data["progress_seconds"]
                 session.updated_at = datetime.utcnow()
                 await _backfill_plex_runtime(db, media, data, None, tmdb_key)
+                await _backfill_credits_stingers(db, media, tmdb_key)
                 await db.commit()
         if not is_duplicate:
             await _maybe_trakt_scrobble(settings, media, "pause", data["progress_percent"], db=db)
@@ -2670,6 +2699,7 @@ async def _handle_plex_scrobble_webhook(request: Request, db: AsyncSession, api_
             if conn.sync_watched and progress_percent > 0.05:
                 await _write_watch_event(db, user.id, media.id, progress_percent, progress_seconds, progress_percent >= 0.90)
         await _backfill_plex_runtime(db, media, data, None, tmdb_key)
+        await _backfill_credits_stingers(db, media, tmdb_key)
         if conn.sync_collection:
             quality = data.get("quality")
             await _ensure_collection_entry(

@@ -12,6 +12,7 @@ from sqlalchemy.orm.exc import StaleDataError
 from models.base import MediaType
 from routers import webhooks
 from routers.webhooks import (
+    _backfill_credits_stingers,
     _backfill_plex_runtime,
     _commit_playback_session_update,
     _consume_recently_pushed_watched,
@@ -1020,6 +1021,57 @@ class ResolvePlexProgressTests(IsolatedAsyncioTestCase):
         with patch("core.plex.get_item", new_callable=AsyncMock, side_effect=RuntimeError("boom")):
             percent, seconds = await _resolve_plex_progress(data, conn)
         self.assertEqual((percent, seconds), (0.0, 0))
+
+
+class BackfillCreditsStingersTests(IsolatedAsyncioTestCase):
+    """#319 - a movie enriched before the credits-stinger badge shipped has
+    no has_mid_credits_scene/has_post_credits_scene keys in tmdb_data yet, so
+    the Now Playing bar's badge silently never showed for it. Playing it
+    again should self-heal those keys in, once, without re-fetching on every
+    subsequent event."""
+
+    def _movie(self, **overrides):
+        defaults = dict(id=1, media_type=MediaType.movie, tmdb_id=550, tmdb_data={})
+        return SimpleNamespace(**{**defaults, **overrides})
+
+    async def test_backfills_missing_flags_from_tmdb(self) -> None:
+        media = self._movie(tmdb_data={"runtime": 139})
+        db = _FakeDB([])
+        tmdb_data = {"keywords": {"keywords": [{"id": 1, "name": "aftercreditsstinger"}]}}
+        with patch("core.tmdb.get_movie", AsyncMock(return_value=tmdb_data)) as mock_get_movie:
+            await _backfill_credits_stingers(db, media, "tmdb-key")
+        mock_get_movie.assert_awaited_once_with(550, api_key="tmdb-key")
+        self.assertEqual(media.tmdb_data["runtime"], 139)
+        self.assertFalse(media.tmdb_data["has_mid_credits_scene"])
+        self.assertTrue(media.tmdb_data["has_post_credits_scene"])
+
+    async def test_already_backfilled_does_not_call_tmdb_again(self) -> None:
+        media = self._movie(tmdb_data={"has_mid_credits_scene": False, "has_post_credits_scene": True})
+        db = _FakeDB([])
+        with patch("core.tmdb.get_movie", new_callable=AsyncMock) as mock_get_movie:
+            await _backfill_credits_stingers(db, media, "tmdb-key")
+        mock_get_movie.assert_not_called()
+
+    async def test_episode_is_skipped(self) -> None:
+        media = SimpleNamespace(id=1, media_type=MediaType.episode, tmdb_id=550, tmdb_data={})
+        db = _FakeDB([])
+        with patch("core.tmdb.get_movie", new_callable=AsyncMock) as mock_get_movie:
+            await _backfill_credits_stingers(db, media, "tmdb-key")
+        mock_get_movie.assert_not_called()
+
+    async def test_no_tmdb_key_is_skipped(self) -> None:
+        media = self._movie()
+        db = _FakeDB([])
+        with patch("core.tmdb.get_movie", new_callable=AsyncMock) as mock_get_movie:
+            await _backfill_credits_stingers(db, media, None)
+        mock_get_movie.assert_not_called()
+
+    async def test_tmdb_failure_does_not_crash(self) -> None:
+        media = self._movie()
+        db = _FakeDB([])
+        with patch("core.tmdb.get_movie", new_callable=AsyncMock, side_effect=RuntimeError("boom")):
+            await _backfill_credits_stingers(db, media, "tmdb-key")
+        self.assertNotIn("has_mid_credits_scene", media.tmdb_data)
 
 
 if __name__ == "__main__":

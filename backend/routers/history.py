@@ -453,6 +453,8 @@ async def get_now_playing(
                 "episode_number": media.episode_number,
                 "runtime": media.runtime,
                 "tvdb_sourced": is_unmapped_tvdb_episode(media),
+                "has_mid_credits_scene": (media.tmdb_data or {}).get("has_mid_credits_scene", False),
+                "has_post_credits_scene": (media.tmdb_data or {}).get("has_post_credits_scene", False),
             },
         }
         if media.media_type == MediaType.episode and media.show_id:

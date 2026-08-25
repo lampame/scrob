@@ -568,6 +568,11 @@ export interface MediaItem {
   age_rating?: string | null;
   imdb_id?: string | null;
   adult?: boolean;
+  // Movie-only (#319) - TMDB tags these via community-added keywords rather
+  // than a dedicated field, so they're derived server-side from the movie's
+  // keyword list.
+  has_mid_credits_scene?: boolean;
+  has_post_credits_scene?: boolean;
   show_id?: number | null;
   show_title?: string | null;
   show_tmdb_id?: number | null;

@@ -675,6 +675,23 @@ const bottomNavItem = (active: boolean) =>
         const rawPoster = isEpisode ? (m.show_poster_path ?? m.poster_path) : m.poster_path;
         const posterUrl = tmdbImageUrl(rawPoster, 'w185');
 
+        // #319 - movie-only mid/post-credits scene indicator. Movies never
+        // use the subtitle line (that's episode-only), so it doubles as a
+        // visible text label here - an icon alone read as unlabeled noise,
+        // especially on mobile where there's no hover to explain it.
+        const hasCreditsScene = !isEpisode && (m.has_mid_credits_scene || m.has_post_credits_scene);
+        const creditsLabel = m.has_mid_credits_scene && m.has_post_credits_scene
+          ? 'Stay for Credits x2'
+          : m.has_mid_credits_scene
+          ? 'Mid-Credits Scene'
+          : 'Post-Credits Scene';
+        const creditsLine = hasCreditsScene
+          ? `<p class="credits-scene-icon flex items-center gap-1 text-[10px] font-bold text-amber-400 truncate leading-tight mt-0.5">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 24 24" class="shrink-0 w-3 h-3"><path d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z"/></svg>
+              ${esc(creditsLabel)}
+            </p>`
+          : '';
+
         return `<div class="relative group border-b border-zinc-800/50 last:border-0">
             <div class="absolute inset-0 bg-zinc-900"></div>
             ${href ? `<a href="${esc(href)}" class="relative flex items-center gap-3 px-6 md:px-8 py-2.5 max-w-screen-xl mx-auto hover:brightness-110 transition-all">` : `<div class="relative flex items-center gap-3 px-6 md:px-8 py-2.5 max-w-screen-xl mx-auto">`}
@@ -691,6 +708,7 @@ const bottomNavItem = (active: boolean) =>
                 </div>
                 <p class="text-xs font-semibold text-zinc-100 truncate leading-tight">${esc(title)}</p>
                 ${subtitle ? `<p class="text-[10px] text-zinc-400 truncate leading-tight mt-0.5">${esc(subtitle)}</p>` : ''}
+                ${creditsLine}
               </div>
               <span data-nppct="${sessionKey}" class="text-xs font-bold text-zinc-300 tabular-nums shrink-0">${esc(String(pctDisplay))}%</span>
             ${href ? '</a>' : '</div>'}

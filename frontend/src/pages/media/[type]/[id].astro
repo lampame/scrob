@@ -172,6 +172,25 @@ const refreshUrl = isEpisode
                     </span>
                   )
                 )}
+                {isMovie && (item.has_mid_credits_scene || item.has_post_credits_scene) && (
+                  <span
+                    class="credits-scene-badge flex items-center gap-1.5 px-2 py-0.5 bg-amber-500/10 border border-amber-500/30 text-amber-400 rounded text-[10px] font-black tracking-widest"
+                    title={item.has_mid_credits_scene && item.has_post_credits_scene
+                      ? "Has a mid-credits and a post-credits scene"
+                      : item.has_mid_credits_scene
+                      ? "Has a mid-credits scene"
+                      : "Has a post-credits scene"}
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-3.5 h-3.5">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09Z" />
+                    </svg>
+                    {item.has_mid_credits_scene && item.has_post_credits_scene
+                      ? "Stay for Credits x2"
+                      : item.has_mid_credits_scene
+                      ? "Mid-Credits Scene"
+                      : "Post-Credits Scene"}
+                  </span>
+                )}
                 {originalLanguage && (
                   <span class="flex items-center gap-1.5 font-medium text-zinc-400">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-4 h-4 text-zinc-500">

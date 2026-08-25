@@ -878,6 +878,8 @@ def format_media(media: Media) -> dict:
         "cast": cast[:12],
         "collection": (media.tmdb_data or {}).get("collection"),
         "adult": media.adult,
+        "has_mid_credits_scene": (media.tmdb_data or {}).get("has_mid_credits_scene", False),
+        "has_post_credits_scene": (media.tmdb_data or {}).get("has_post_credits_scene", False),
     }
 
 
@@ -5258,6 +5260,8 @@ async def get_media_details(
         if collection and collection.get("parts"):
             await enrich_with_state(db, effective_user_id, collection["parts"])
 
+        has_mid_credits_scene, has_post_credits_scene = tmdb.extract_credits_stingers(data)
+
         return {
             **local_info,
             "tmdb_id": tmdb_id,
@@ -5290,6 +5294,8 @@ async def get_media_details(
             "release_dates": _extract_movie_release_dates(data),
             "imdb_id": data.get("imdb_id"),
             "adult": data.get("adult", False),
+            "has_mid_credits_scene": has_mid_credits_scene,
+            "has_post_credits_scene": has_post_credits_scene,
             "collection": collection,
             "production_companies": production_companies,
             "directors": [

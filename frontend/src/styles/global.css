@@ -233,6 +233,15 @@ html.light [data-action="request"][data-state="active"]:hover {
 
 html.light .item-rating { color: #fbbf24; /* amber-400 */ }
 
+/* Post/mid-credits scene badge - amber-400 text is illegible on a white
+   surface, same issue as the Now Playing status labels above. */
+html.light .credits-scene-badge {
+  background-color: #fef3c7; /* amber-100 */
+  border-color: #fde68a;     /* amber-200 */
+  color: #78350f;            /* amber-900 */
+}
+html.light .credits-scene-icon { color: #b45309; /* amber-700 */ }
+
 /* Transitions for theme switching */
 body {
   transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;

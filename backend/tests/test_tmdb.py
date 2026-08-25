@@ -184,5 +184,32 @@ class MetadataLanguageParamTests(unittest.IsolatedAsyncioTestCase):
         await self._assert_language_param(lambda lang: tmdb.discover_shows(api_key="key", language=lang))
 
 
+class ExtractCreditsStingersTests(unittest.TestCase):
+    """#319 - a movie's mid/post-credits scene is exposed via TMDB's
+    community-added keywords, not a dedicated field."""
+
+    def test_no_keywords_returns_false_false(self) -> None:
+        self.assertEqual(tmdb.extract_credits_stingers({}), (False, False))
+
+    def test_unrelated_keywords_return_false_false(self) -> None:
+        data = {"keywords": {"keywords": [{"id": 1, "name": "superhero"}]}}
+        self.assertEqual(tmdb.extract_credits_stingers(data), (False, False))
+
+    def test_detects_mid_credits_stinger(self) -> None:
+        data = {"keywords": {"keywords": [{"id": 1, "name": "duringcreditsstinger"}]}}
+        self.assertEqual(tmdb.extract_credits_stingers(data), (True, False))
+
+    def test_detects_post_credits_stinger(self) -> None:
+        data = {"keywords": {"keywords": [{"id": 2, "name": "aftercreditsstinger"}]}}
+        self.assertEqual(tmdb.extract_credits_stingers(data), (False, True))
+
+    def test_detects_both(self) -> None:
+        data = {"keywords": {"keywords": [
+            {"id": 1, "name": "duringcreditsstinger"},
+            {"id": 2, "name": "aftercreditsstinger"},
+        ]}}
+        self.assertEqual(tmdb.extract_credits_stingers(data), (True, True))
+
+
 if __name__ == "__main__":
     unittest.main()

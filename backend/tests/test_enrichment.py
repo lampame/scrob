@@ -416,6 +416,31 @@ class EnrichMediaRuntimeColumnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(media.runtime, 120)
 
 
+class EnrichMediaCreditsStingerTests(unittest.IsolatedAsyncioTestCase):
+    """#319 - a movie's mid/post-credits scene keywords should land in
+    tmdb_data so the detail page can show a badge for it."""
+
+    async def test_stinger_keywords_are_stored_on_tmdb_data(self) -> None:
+        media = Media(media_type=MediaType.movie, tmdb_id=550)
+        tmdb_data = {
+            "title": "Fight Club",
+            "runtime": 139,
+            "keywords": {"keywords": [{"id": 1, "name": "aftercreditsstinger"}]},
+        }
+        with patch("core.enrichment.tmdb.get_movie", AsyncMock(return_value=tmdb_data)):
+            await enrich_media(media, api_key="tmdb-key")
+        self.assertFalse(media.tmdb_data["has_mid_credits_scene"])
+        self.assertTrue(media.tmdb_data["has_post_credits_scene"])
+
+    async def test_no_stinger_keywords_stores_false(self) -> None:
+        media = Media(media_type=MediaType.movie, tmdb_id=550)
+        tmdb_data = {"title": "Fight Club", "runtime": 139}
+        with patch("core.enrichment.tmdb.get_movie", AsyncMock(return_value=tmdb_data)):
+            await enrich_media(media, api_key="tmdb-key")
+        self.assertFalse(media.tmdb_data["has_mid_credits_scene"])
+        self.assertFalse(media.tmdb_data["has_post_credits_scene"])
+
+
 class EnrichMediaBypassCacheTests(unittest.IsolatedAsyncioTestCase):
     """Regression tests for: "Refresh Metadata" going through enrich_media
     (the movie path) silently returned whatever TMDB response was already

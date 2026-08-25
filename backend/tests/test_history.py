@@ -448,6 +448,44 @@ class GetNowPlayingEpisodeOrderTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("tvdb_season_number", item)
 
 
+class GetNowPlayingCreditsStingerTests(unittest.IsolatedAsyncioTestCase):
+    """#319 - the Now Playing bar's credits-scene icon reads these two flags
+    straight off the playing movie's cached tmdb_data."""
+
+    async def test_movie_with_stingers_exposes_both_flags(self) -> None:
+        media = Media(
+            id=10, tmdb_id=550, media_type=MediaType.movie, title="Fight Club",
+            tmdb_data={"has_mid_credits_scene": True, "has_post_credits_scene": True},
+        )
+        session = PlaybackSession(
+            id=1, user_id=7, media_id=10, session_key="k", source="plex",
+            state="playing", progress_percent=0.1, progress_seconds=60,
+            started_at=datetime(2026, 1, 1), updated_at=datetime(2026, 1, 1),
+        )
+        db = _FakeSession([[(session, media)]])
+
+        result = await history.get_now_playing(db=db, current_user=SimpleNamespace(id=7))
+
+        item = result["now_playing"][0]["media"]
+        self.assertTrue(item["has_mid_credits_scene"])
+        self.assertTrue(item["has_post_credits_scene"])
+
+    async def test_movie_without_tmdb_data_defaults_to_false(self) -> None:
+        media = Media(id=10, tmdb_id=550, media_type=MediaType.movie, title="Fight Club")
+        session = PlaybackSession(
+            id=1, user_id=7, media_id=10, session_key="k", source="plex",
+            state="playing", progress_percent=0.1, progress_seconds=60,
+            started_at=datetime(2026, 1, 1), updated_at=datetime(2026, 1, 1),
+        )
+        db = _FakeSession([[(session, media)]])
+
+        result = await history.get_now_playing(db=db, current_user=SimpleNamespace(id=7))
+
+        item = result["now_playing"][0]["media"]
+        self.assertFalse(item["has_mid_credits_scene"])
+        self.assertFalse(item["has_post_credits_scene"])
+
+
 class ClearHistoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_clears_playback_progress_along_with_watch_events(self) -> None:
         # Continue Watching is sourced from PlaybackProgress, not WatchEvent -

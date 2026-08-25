@@ -109,7 +109,7 @@ async def validate_api_key(api_key: str) -> bool:
 
 
 async def get_movie(tmdb_id: int, api_key: str = None, language: str | None = None, cache_ttl: float | None = DEFAULT_CACHE_TTL) -> dict:
-    params: dict = {"append_to_response": "credits,release_dates,recommendations,external_ids"}
+    params: dict = {"append_to_response": "credits,release_dates,recommendations,external_ids,keywords"}
     if language:
         params["language"] = language
     return await _get(
@@ -118,6 +118,14 @@ async def get_movie(tmdb_id: int, api_key: str = None, language: str | None = No
         params=params,
         cache_ttl=cache_ttl,
     )
+
+
+def extract_credits_stingers(data: dict) -> tuple[bool, bool]:
+    """Returns (has_mid_credits_scene, has_post_credits_scene) from a movie
+    response's appended keywords (#319) - TMDB tags these via community-added
+    keywords rather than a dedicated field, and only does so for movies."""
+    names = {k.get("name", "") for k in (data.get("keywords") or {}).get("keywords", [])}
+    return "duringcreditsstinger" in names, "aftercreditsstinger" in names
 
 
 async def get_show(tmdb_id: int, api_key: str = None, language: str | None = None, cache_ttl: float | None = DEFAULT_CACHE_TTL) -> dict:

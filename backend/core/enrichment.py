@@ -201,6 +201,7 @@ async def enrich_media(
             # duration_ms ever set it, leaving it null until the first watch
             # actually reported one (see #169).
             media.runtime = data.get("runtime") or media.runtime
+            has_mid_credits_scene, has_post_credits_scene = tmdb.extract_credits_stingers(data)
             media.tmdb_data = {
                 "runtime": data.get("runtime"),
                 "genres": [g["name"] for g in data.get("genres", [])],
@@ -213,6 +214,8 @@ async def enrich_media(
                 "status": data.get("status"),
                 "adult": data.get("adult", False),
                 "release_dates": _extract_release_dates((data.get("release_dates") or {}).get("results", [])),
+                "has_mid_credits_scene": has_mid_credits_scene,
+                "has_post_credits_scene": has_post_credits_scene,
             }
             media.adult = data.get("adult", False)
 
