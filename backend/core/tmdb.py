@@ -11,6 +11,47 @@ _RETRYABLE = (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolEr
 
 DEFAULT_CACHE_TTL = 1800  # 30 minutes — TMDB metadata/discovery results don't need to be fresher than this
 
+# Request-path budget. Kept deliberately tight: these calls sit inside
+# page-render fan-outs (home page enrich_with_state, Next Up, etc.), so a wide
+# retry window turns "TMDB is unreachable" into a multi-minute hang and a proxy
+# 504 instead of a quick fall-back to locally-stored data. The circuit breaker
+# below then makes every call after the first failure return instantly.
+_HTTP_TIMEOUT = 8.0
+_MAX_RETRIES = 1
+_BACKOFF_BASE = 1  # seconds; sleep is _BACKOFF_BASE * 2**attempt between tries
+
+# Circuit breaker: after _BREAKER_THRESHOLD consecutive retryable failures,
+# short-circuit every _get for _BREAKER_COOLDOWN seconds. _fail_count is not
+# reset when the cooldown lapses, so the first probe request that fails again
+# re-opens the breaker immediately; a single success resets everything.
+_BREAKER_THRESHOLD = 3
+_BREAKER_COOLDOWN = 45.0
+_breaker_fail_count = 0
+_breaker_open_until = 0.0
+
+
+class TMDBUnavailable(Exception):
+    """Raised by _get while the circuit breaker is open (TMDB looks down).
+    Callers that already tolerate a missing TMDB response - the metadata
+    enrichers, trending rows, etc. - catch this like any other fetch error."""
+
+
+def _breaker_blocked() -> bool:
+    return _breaker_open_until > time.monotonic()
+
+
+def _breaker_record_success() -> None:
+    global _breaker_fail_count, _breaker_open_until
+    _breaker_fail_count = 0
+    _breaker_open_until = 0.0
+
+
+def _breaker_record_failure() -> None:
+    global _breaker_fail_count, _breaker_open_until
+    _breaker_fail_count += 1
+    if _breaker_fail_count >= _BREAKER_THRESHOLD:
+        _breaker_open_until = time.monotonic() + _BREAKER_COOLDOWN
+
 
 class _TTLCache:
     """Minimal bounded in-process cache: TTL expiry checked lazily on read, oldest
@@ -57,7 +98,7 @@ async def _get(
     *,
     headers: dict = None,
     params: dict = None,
-    max_retries: int = 3,
+    max_retries: int = _MAX_RETRIES,
     cache_ttl: float | None = DEFAULT_CACHE_TTL,
 ) -> dict:
     """Shared GET helper with retry + exponential backoff for transient failures.
@@ -67,6 +108,9 @@ async def _get(
     so it's deliberately excluded from the cache key to share hits across users/
     jobs. Pass cache_ttl=None to bypass caching (e.g. validate_api_key, where the
     response genuinely depends on which key was used).
+
+    Raises TMDBUnavailable immediately (no HTTP attempt) while the circuit
+    breaker is open — see the _breaker_* helpers above.
     """
     cache_key = None
     if cache_ttl is not None:
@@ -75,26 +119,37 @@ async def _get(
         if cached is not None:
             return cached
 
-    last_exc: Exception = None
+    if _breaker_blocked():
+        raise TMDBUnavailable("TMDB circuit breaker open")
+
+    last_exc: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(_HTTP_TIMEOUT)) as client:
                 r = await client.get(url, headers=headers or {}, params=params)
                 if r.status_code == 429:
                     wait = int(r.headers.get("Retry-After", 2 ** (attempt + 1)))
+                    last_exc = httpx.HTTPStatusError(
+                        "429 Too Many Requests", request=r.request, response=r
+                    )
                     await asyncio.sleep(wait)
                     continue
                 r.raise_for_status()
                 data = r.json()
                 if cache_key is not None:
                     _cache.set(cache_key, data, cache_ttl)
+                _breaker_record_success()
                 return data
         except _RETRYABLE as e:
             last_exc = e
             if attempt < max_retries:
-                await asyncio.sleep(2 ** (attempt + 1))  # 2s, 4s, 8s
+                await asyncio.sleep(_BACKOFF_BASE * 2 ** attempt)  # 1s, 2s, ...
         except httpx.HTTPStatusError:
             raise  # 4xx/5xx — don't retry, surface immediately
+    # Only a genuine connectivity/timeout failure trips the breaker; a 429 just
+    # means TMDB is up and throttling us.
+    if isinstance(last_exc, _RETRYABLE):
+        _breaker_record_failure()
     raise last_exc
 
 

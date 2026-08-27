@@ -1,6 +1,6 @@
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 
@@ -69,6 +69,61 @@ class GetShowCacheBypassTests(unittest.IsolatedAsyncioTestCase):
             await tmdb.get_episode(1399, 1, 1, api_key="key", cache_ttl=None)
 
         self.assertEqual(len(requests), 6)
+
+
+class CircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
+    """After a run of connection failures, _get should short-circuit instead of
+    making every subsequent caller re-discover that TMDB is down (one slow
+    failure per page load instead of dozens)."""
+
+    def setUp(self) -> None:
+        tmdb._cache._store.clear()
+        tmdb._breaker_fail_count = 0
+        tmdb._breaker_open_until = 0.0
+
+    tearDown = setUp
+
+    def _transport(self, *, fail: bool, count: list[int]):
+        def handler(request: httpx.Request) -> httpx.Response:
+            count.append(1)
+            if fail:
+                raise httpx.ConnectError("boom", request=request)
+            return httpx.Response(200, json={"id": 1})
+        return httpx.MockTransport(handler)
+
+    async def _run(self, transport, coro_factory):
+        with patch.object(tmdb.httpx, "AsyncClient",
+                          side_effect=lambda **kw: _REAL_ASYNC_CLIENT(transport=transport, **kw)), \
+             patch.object(tmdb.asyncio, "sleep", new_callable=AsyncMock):
+            return await coro_factory()
+
+    async def test_opens_after_threshold_then_short_circuits(self) -> None:
+        calls: list[int] = []
+        transport = self._transport(fail=True, count=calls)
+        for _ in range(tmdb._BREAKER_THRESHOLD):
+            with self.assertRaises(httpx.ConnectError):
+                await self._run(transport, lambda: tmdb.get_show(1, api_key="k", cache_ttl=None))
+        calls_before = len(calls)
+
+        # Breaker is now open: no HTTP attempt, distinct exception type.
+        with self.assertRaises(tmdb.TMDBUnavailable):
+            await self._run(transport, lambda: tmdb.get_show(2, api_key="k", cache_ttl=None))
+        self.assertEqual(len(calls), calls_before)
+
+    async def test_success_resets_the_breaker(self) -> None:
+        tmdb._breaker_fail_count = tmdb._BREAKER_THRESHOLD - 1
+        ok: list[int] = []
+        await self._run(self._transport(fail=False, count=ok), lambda: tmdb.get_show(1, api_key="k", cache_ttl=None))
+        self.assertEqual(tmdb._breaker_fail_count, 0)
+
+    async def test_429_does_not_trip_the_breaker(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, headers={"Retry-After": "0"}, json={})
+        transport = httpx.MockTransport(handler)
+        with self.assertRaises(httpx.HTTPStatusError):
+            await self._run(transport, lambda: tmdb.get_show(1, api_key="k", cache_ttl=None))
+        self.assertEqual(tmdb._breaker_fail_count, 0)
+        self.assertFalse(tmdb._breaker_blocked())
 
 
 class DiscoverGenreIdsTests(unittest.IsolatedAsyncioTestCase):

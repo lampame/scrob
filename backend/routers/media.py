@@ -66,6 +66,12 @@ import time as _time
 _FOR_YOU_CACHE: dict[int, tuple[float, dict]] = {}
 _FOR_YOU_TTL = 900  # 15 minutes
 
+# Ceiling for a live-TMDB fan-out that only refines already-usable data (aired
+# episode counts from stored metadata). If TMDB is slow/down we'd rather render
+# the page with slightly-stale percentages than block the request. tmdb._get's
+# circuit breaker makes everything after the first failure instant anyway.
+_TMDB_FANOUT_TIMEOUT = 6.0
+
 # TMDB genre name → ID mappings (used to convert filter names to discover API IDs)
 MOVIE_GENRE_IDS: dict[str, int] = {
     "Action": 28, "Adventure": 12, "Animation": 16, "Comedy": 35,
@@ -489,7 +495,13 @@ async def enrich_with_state(
                     return tid, None, set()
 
             if missing_show_ids:
-                missing_results = await asyncio.gather(*[fetch_show_and_seasons(tid) for tid in missing_show_ids])
+                try:
+                    missing_results = await asyncio.wait_for(
+                        asyncio.gather(*[fetch_show_and_seasons(tid) for tid in missing_show_ids]),
+                        timeout=_TMDB_FANOUT_TIMEOUT,
+                    )
+                except (asyncio.TimeoutError, tmdb.TMDBUnavailable):
+                    missing_results = []
                 for tid, data, _ in missing_results:
                     if data:
                         seasons = data.get("seasons", [])
@@ -603,7 +615,13 @@ async def enrich_with_state(
                     except Exception:
                         return tid, None
 
-                live_results = await asyncio.gather(*[fetch_last_aired(tid) for tid in needs_live_call])
+                try:
+                    live_results = await asyncio.wait_for(
+                        asyncio.gather(*[fetch_last_aired(tid) for tid in needs_live_call]),
+                        timeout=_TMDB_FANOUT_TIMEOUT,
+                    )
+                except (asyncio.TimeoutError, tmdb.TMDBUnavailable):
+                    live_results = []
                 for tid, data in live_results:
                     if data and data.get("last_episode_to_air"):
                         prefetched[tid] = data["last_episode_to_air"]

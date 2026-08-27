@@ -888,7 +888,18 @@ async def _next_up_remaining_stats(
                     except Exception:
                         return sid, None
 
-            for sid, data in await asyncio.gather(*[_fetch_show_light(sid) for sid in needs_last_ep]):
+            # Cap the whole fan-out: this only refines capped-season counts, so
+            # if TMDB is slow/down we render Next Up from stored metadata rather
+            # than block the home page. tmdb._get's breaker makes calls after the
+            # first failure instant regardless.
+            try:
+                fetched_last_ep = await asyncio.wait_for(
+                    asyncio.gather(*[_fetch_show_light(sid) for sid in needs_last_ep]),
+                    timeout=6.0,
+                )
+            except (asyncio.TimeoutError, tmdb.TMDBUnavailable):
+                fetched_last_ep = []
+            for sid, data in fetched_last_ep:
                 if data:
                     last_ep_by_show[sid] = data
 
@@ -1054,7 +1065,18 @@ async def get_next_up(
                     except Exception:
                         return show_id, (show.tmdb_data or {}).get("seasons", [])
 
-            seasons_by_show = dict(await asyncio.gather(*[_fetch_seasons(sid) for sid in missing_show_ids]))
+            try:
+                seasons_by_show = dict(await asyncio.wait_for(
+                    asyncio.gather(*[_fetch_seasons(sid) for sid in missing_show_ids]),
+                    timeout=8.0,
+                ))
+            except (asyncio.TimeoutError, tmdb.TMDBUnavailable):
+                # TMDB slow/down - fall back to each show's cached season snapshot.
+                seasons_by_show = {
+                    sid: (shows_by_id.get(sid).tmdb_data or {}).get("seasons", [])
+                    for sid in missing_show_ids
+                    if shows_by_id.get(sid)
+                }
 
             for show_id in missing_show_ids:
                 show = shows_by_id.get(show_id)
