@@ -723,10 +723,18 @@ async def get_dropped_shows(client_id: str, access_token: str) -> list[dict]:
 async def add_to_hidden(client_id: str, access_token: str, section: str, tmdb_id: int) -> None:
     """Hide a show for a section of the hidden-items API ('dropped' is
     shows-only - the same mechanism behind Trakt's own "Drop Show" button)."""
+    await add_to_hidden_batch(client_id, access_token, section, [tmdb_id])
+
+
+async def add_to_hidden_batch(client_id: str, access_token: str, section: str, tmdb_ids: list[int]) -> None:
+    """add_to_hidden for multiple shows in one request (used by the scheduled
+    push to reconcile dropped state - see #329)."""
+    if not tmdb_ids:
+        return
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         resp = await client.post(
             f"{TRAKT_BASE}/users/hidden/{section}",
-            json={"shows": [{"ids": {"tmdb": tmdb_id}}]},
+            json={"shows": [{"ids": {"tmdb": tmdb_id}} for tmdb_id in tmdb_ids]},
             headers=_headers(client_id, access_token),
         )
         resp.raise_for_status()

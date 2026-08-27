@@ -263,9 +263,17 @@ async def remove_ratings(api_key: str, payload: dict[str, list[dict[str, Any]]])
 async def push_dropped(api_key: str, tmdb_id: int, dropped_at: str) -> dict[str, Any]:
     """Mark a show dropped on MDBList. Shows only - MDBList's /sync/dropped
     has no movie support."""
+    return await push_dropped_batch(api_key, [tmdb_id], dropped_at)
+
+
+async def push_dropped_batch(api_key: str, tmdb_ids: list[int], dropped_at: str) -> dict[str, Any]:
+    """Mark multiple shows dropped on MDBList in one request (scheduled-push
+    reconcile - see #329)."""
+    if not tmdb_ids:
+        return {}
     return await _request(
         "POST", "/sync/dropped", api_key,
-        payload={"shows": [{"ids": {"tmdb": tmdb_id}, "dropped_at": dropped_at}]},
+        payload={"shows": [{"ids": {"tmdb": tid}, "dropped_at": dropped_at} for tid in tmdb_ids]},
     )
 
 

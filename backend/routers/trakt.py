@@ -1175,6 +1175,20 @@ async def _apply_dropped_shows_import(db: AsyncSession, user_id: int, dropped_it
     return len(new_ids)
 
 
+async def _local_dropped_show_tmdb_ids(db: AsyncSession, settings: UserSettings) -> set[int]:
+    """TMDB ids of the shows the user has dropped locally. dropped_shows stores
+    local Show.id values, so this resolves them; a dropped show with no tmdb_id
+    (TVDB-only) can't be pushed to Trakt/MDBList and is dropped from the set."""
+    if not settings.dropped_shows:
+        return set()
+    result = await db.execute(
+        select(Show.tmdb_id).where(
+            Show.id.in_(settings.dropped_shows), Show.tmdb_id.isnot(None)
+        )
+    )
+    return {row[0] for row in result.all()}
+
+
 async def run_trakt_sync(user_id: int, job_id: int, full_resync: bool = False):
     from routers.sync import SyncCancelled, _raise_if_cancelled
     print(f"Starting Trakt sync for user {user_id}, job {job_id}")
@@ -1556,6 +1570,25 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
             collected_ids: set[int] = set()
             ratings_map: RatingChanges = {}
 
+            # Dropped shows Trakt's hidden/dropped list is missing. The one-shot
+            # push at drop time (_push_show_dropped_to_providers) is best-effort;
+            # if it failed at a bad moment nothing else ever retried it (#329).
+            dropped_to_push: list[int] = []
+            if settings.trakt_push_dropped:
+                try:
+                    local_dropped = await _local_dropped_show_tmdb_ids(db, settings)
+                    if local_dropped:
+                        remote_dropped = await trakt_client.get_dropped_shows(
+                            settings.trakt_client_id, settings.trakt_access_token
+                        )
+                        remote_tmdb = {
+                            (it.get("show") or {}).get("ids", {}).get("tmdb") for it in remote_dropped
+                        }
+                        remote_tmdb.discard(None)
+                        dropped_to_push = sorted(local_dropped - remote_tmdb)
+                except Exception as exc:
+                    logger.warning("Trakt push job %s: could not reconcile dropped shows: %s", job_id, exc)
+
             if settings.trakt_push_watched:
                 watched_result = await db.execute(
                     select(WatchEvent.media_id, WatchEvent.watched_at).where(
@@ -1588,7 +1621,7 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                 }
                 all_media_ids |= {media_id for media_id, _ in ratings_map}
 
-            if not all_media_ids:
+            if not all_media_ids and not dropped_to_push:
                 await db.execute(
                     update(SyncJob)
                     .where(SyncJob.id == job_id)
@@ -1828,6 +1861,15 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                         ),
                     ))
 
+            if dropped_to_push:
+                push_tasks.append((
+                    "dropped",
+                    len(dropped_to_push),
+                    trakt_client.add_to_hidden_batch(
+                        settings.trakt_client_id, settings.trakt_access_token, "dropped", dropped_to_push,
+                    ),
+                ))
+
             total = sum(item_count for _, item_count, _ in push_tasks)
             already_present = watched_already_present + ratings_already_present
             await db.execute(
@@ -1944,7 +1986,8 @@ async def push_trakt(
     _require_trakt_config(settings)
     if not settings or not settings.trakt_access_token:
         raise HTTPException(status_code=400, detail="Trakt is not connected")
-    if not settings.trakt_push_watched and not settings.trakt_push_ratings and not settings.trakt_push_collection:
+    if not (settings.trakt_push_watched or settings.trakt_push_ratings
+            or settings.trakt_push_collection or settings.trakt_push_dropped):
         raise HTTPException(status_code=400, detail="Enable 'Scrob → Trakt' push flags first")
     job = SyncJob(user_id=current_user.id, source=CollectionSource.trakt, status=SyncStatus.pending, job_type="push")
     db.add(job)

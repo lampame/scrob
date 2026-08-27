@@ -169,6 +169,32 @@ class MDBListClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(batch_sizes), 450)
         self.assertEqual(result["submitted"], 450)
 
+    async def test_push_dropped_batch_sends_one_request_for_all_shows(self) -> None:
+        # #329: the scheduled push reconciles missing dropped shows in one call.
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/sync/dropped")
+            seen.append(json.loads(request.content))
+            return httpx.Response(200, json={"added": {"shows": 2}})
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            mdblist.httpx, "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            await mdblist.push_dropped_batch("secret-key", [95479, 1399], "2026-08-27T00:00:00Z")
+            await mdblist.push_dropped("secret-key", 550, "2026-08-27T00:00:00Z")
+
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(
+            seen[0]["shows"],
+            [
+                {"ids": {"tmdb": 95479}, "dropped_at": "2026-08-27T00:00:00Z"},
+                {"ids": {"tmdb": 1399}, "dropped_at": "2026-08-27T00:00:00Z"},
+            ],
+        )
+        self.assertEqual(seen[1]["shows"], [{"ids": {"tmdb": 550}, "dropped_at": "2026-08-27T00:00:00Z"}])
 
 
 class MDBListListFanoutTests(unittest.IsolatedAsyncioTestCase):

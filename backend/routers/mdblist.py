@@ -31,6 +31,7 @@ from routers.trakt import (
     _get_or_create_episode_media,
     _get_or_create_movie_media,
     _get_or_create_show,
+    _local_dropped_show_tmdb_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -757,6 +758,23 @@ async def run_mdblist_push(user_id: int, job_id: int) -> None:
             if not settings or not settings.mdblist_api_key:
                 raise RuntimeError("MDBList API key is not configured")
 
+            # Reconcile dropped shows MDBList is missing - the one-shot push at
+            # drop time is best-effort and nothing else ever retried it (#329).
+            dropped_to_push: list[int] = []
+            if settings.mdblist_push_dropped:
+                try:
+                    local_dropped = await _local_dropped_show_tmdb_ids(db, settings)
+                    if local_dropped:
+                        remote = await mdblist_client.get_dropped(settings.mdblist_api_key)
+                        remote_tmdb = {
+                            (it.get("show") or {}).get("ids", {}).get("tmdb")
+                            for it in remote.get("shows", [])
+                        }
+                        remote_tmdb.discard(None)
+                        dropped_to_push = sorted(local_dropped - remote_tmdb)
+                except Exception as exc:
+                    logger.warning("MDBList push job %s: could not reconcile dropped shows: %s", job_id, exc)
+
             watched_rows: list[tuple[int, datetime]] = []
             rating_rows: list[tuple[int, int | None, float, datetime | None]] = []
             watchlist_ids: set[int] = set()
@@ -858,7 +876,7 @@ async def run_mdblist_push(user_id: int, job_id: int) -> None:
             total_items = sum(
                 mdblist_client._count_leaf_items(payload)
                 for payload in (watched_payload, ratings_payload, watchlist_payload, collection_payload)
-            )
+            ) + len(dropped_to_push)
             await db.execute(
                 update(SyncJob).where(SyncJob.id == job_id).values(total_items=total_items)
             )
@@ -867,7 +885,8 @@ async def run_mdblist_push(user_id: int, job_id: int) -> None:
             print(
                 f"MDBList push job {job_id}: queued "
                 f"{len(watched_rows)} watched, {len(rating_rows)} ratings, "
-                f"{len(watchlist_ids)} watchlist, {len(collected_rows)} collection "
+                f"{len(watchlist_ids)} watchlist, {len(collected_rows)} collection, "
+                f"{len(dropped_to_push)} dropped "
                 f"({total_items} payload entries after merging by show)."
             )
 
@@ -900,6 +919,11 @@ async def run_mdblist_push(user_id: int, job_id: int) -> None:
                 results["collection"] = await mdblist_client.push_collection(
                     settings.mdblist_api_key, collection_payload, on_batch=_report_progress
                 )
+            if dropped_to_push:
+                await mdblist_client.push_dropped_batch(
+                    settings.mdblist_api_key, dropped_to_push, _iso_utc(None)
+                )
+                results["dropped"] = {"submitted": len(dropped_to_push), "not_found": 0, "batches": 1}
 
             submitted = sum(result["submitted"] for result in results.values())
             not_found = sum(result["not_found"] for result in results.values())
@@ -980,7 +1004,8 @@ async def push_mdblist(
 ):
     result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
     settings = _require_key(result.scalar_one_or_none())
-    if not any((settings.mdblist_push_watched, settings.mdblist_push_ratings, settings.mdblist_push_watchlist, settings.mdblist_push_collection)):
+    if not any((settings.mdblist_push_watched, settings.mdblist_push_ratings, settings.mdblist_push_watchlist,
+                settings.mdblist_push_collection, settings.mdblist_push_dropped)):
         raise HTTPException(status_code=400, detail="Enable at least one MDBList push option")
 
     job = SyncJob(

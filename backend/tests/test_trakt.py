@@ -329,6 +329,29 @@ class TraktClientTests(unittest.IsolatedAsyncioTestCase):
             [{"ids": {"tmdb": 3572}}],
         )
 
+    async def test_add_to_hidden_batch_sends_one_request_for_all_shows(self) -> None:
+        requests: list[tuple[str, dict]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append((request.url.path, json.loads(request.content)))
+            return httpx.Response(200, json={"added": {"shows": len(json.loads(request.content)["shows"])}})
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            trakt.httpx, "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            await trakt.add_to_hidden_batch("client-id", "access-token", "dropped", [95479, 1399])
+            await trakt.add_to_hidden("client-id", "access-token", "dropped", 550)
+
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0][0], "/users/hidden/dropped")
+        self.assertEqual(
+            requests[0][1]["shows"],
+            [{"ids": {"tmdb": 95479}}, {"ids": {"tmdb": 1399}}],
+        )
+        self.assertEqual(requests[1][1]["shows"], [{"ids": {"tmdb": 550}}])
+
     async def test_get_list_items_fetches_every_page(self) -> None:
         # Regression test for #193: a single unpaginated GET silently
         # truncated large personal lists to ~100 items. get_list_items must
@@ -675,6 +698,7 @@ class TraktHistorySafetyTests(unittest.IsolatedAsyncioTestCase):
             trakt_push_watched=True,
             trakt_push_collection=False,
             trakt_push_ratings=False,
+            trakt_push_dropped=False,
         )
         movie = Media(
             id=10,
@@ -732,6 +756,7 @@ class TraktHistorySafetyTests(unittest.IsolatedAsyncioTestCase):
             trakt_push_watched=True,
             trakt_push_collection=False,
             trakt_push_ratings=False,
+            trakt_push_dropped=False,
         )
         movie = Media(
             id=10,
@@ -787,6 +812,7 @@ class TraktHistorySafetyTests(unittest.IsolatedAsyncioTestCase):
             trakt_push_watched=True,
             trakt_push_collection=False,
             trakt_push_ratings=False,
+            trakt_push_dropped=False,
         )
         movie = Media(
             id=10,
@@ -872,6 +898,7 @@ class TraktHistorySafetyTests(unittest.IsolatedAsyncioTestCase):
             trakt_push_watched=True,
             trakt_push_collection=False,
             trakt_push_ratings=False,
+            trakt_push_dropped=False,
         )
         movie1 = Media(id=10, tmdb_id=550, media_type=MediaType.movie, title="Fight Club")
         movie2 = Media(id=11, tmdb_id=680, media_type=MediaType.movie, title="Pulp Fiction")
@@ -909,6 +936,63 @@ class TraktHistorySafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(get_movies.await_args.kwargs["end_at"])
 
 
+class TraktDroppedReconcileTests(unittest.IsolatedAsyncioTestCase):
+    """#329: the scheduled push must reconcile dropped shows Trakt is missing -
+    the one-shot push at drop time is fire-and-forget and nothing else retried."""
+
+    def _settings(self):
+        return SimpleNamespace(
+            trakt_access_token="access-token", trakt_client_id="client-id",
+            trakt_token_expires_at=9_999_999_999,
+            trakt_push_watched=False, trakt_push_collection=False, trakt_push_ratings=False,
+            trakt_push_dropped=True,
+            dropped_shows=[1, 2],
+        )
+
+    async def _run(self, *, local_show_tmdb, remote_dropped, add_hidden):
+        session = _FakeSession(self._settings(), [], [], list(local_show_tmdb))
+        with (
+            patch.object(trakt_router, "async_sessionmaker", return_value=lambda: session),
+            patch.object(trakt_router.trakt_client, "get_dropped_shows",
+                         AsyncMock(return_value=remote_dropped)),
+            patch.object(trakt_router.trakt_client, "add_to_hidden_batch", add_hidden),
+            patch.object(trakt_router.asyncio, "sleep", AsyncMock()),
+        ):
+            await trakt_router._run_trakt_push(user_id=1, job_id=50)
+
+    async def test_pushes_only_the_dropped_shows_trakt_is_missing(self):
+        add_hidden = AsyncMock()
+        await self._run(
+            local_show_tmdb=[(95479,), (1399,)],
+            remote_dropped=[{"show": {"ids": {"tmdb": 1399}}}],  # 1399 already dropped on Trakt
+            add_hidden=add_hidden,
+        )
+        add_hidden.assert_awaited_once_with("client-id", "access-token", "dropped", [95479])
+
+    async def test_nothing_pushed_when_trakt_has_them_all(self):
+        add_hidden = AsyncMock()
+        await self._run(
+            local_show_tmdb=[(95479,)],
+            remote_dropped=[{"show": {"ids": {"tmdb": 95479}}}],
+            add_hidden=add_hidden,
+        )
+        add_hidden.assert_not_awaited()
+
+    async def test_reconcile_failure_does_not_fail_the_job(self):
+        add_hidden = AsyncMock()
+        session = _FakeSession(self._settings(), [], [], [(95479,)])
+        with (
+            patch.object(trakt_router, "async_sessionmaker", return_value=lambda: session),
+            patch.object(trakt_router.trakt_client, "get_dropped_shows",
+                         AsyncMock(side_effect=RuntimeError("429"))),
+            patch.object(trakt_router.trakt_client, "add_to_hidden_batch", add_hidden),
+            patch.object(trakt_router.asyncio, "sleep", AsyncMock()),
+        ):
+            await trakt_router._run_trakt_push(user_id=1, job_id=52)
+        add_hidden.assert_not_awaited()
+        self.assertEqual(session.job_updates[-1]["status"], SyncStatus.completed)
+
+
 class TraktRatingsPushTests(unittest.IsolatedAsyncioTestCase):
     """#327: the ratings push must batch into /sync/ratings array requests and
     dedup against what Trakt already has, not fire one POST per rating."""
@@ -921,6 +1005,7 @@ class TraktRatingsPushTests(unittest.IsolatedAsyncioTestCase):
             trakt_push_watched=False,
             trakt_push_collection=False,
             trakt_push_ratings=True,
+            trakt_push_dropped=False,
         )
 
     def _media(self):
