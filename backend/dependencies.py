@@ -8,9 +8,48 @@ from sqlalchemy.orm import selectinload
 
 from db import get_db
 from models.users import User
+from models.oauth_device import OAuthDeviceGrant
 from core.config import settings
 from core.security import ALGORITHM
 import schemas
+
+# Scopes carried by device-authorization-grant access tokens (#331). These
+# tokens are deliberately weaker than a full session: they authorize data
+# operations (history, lists, ratings) but are rejected outright by
+# get_current_user, which guards account/security endpoints (password, email,
+# 2FA, API key, connections, account deletion, admin).
+DEVICE_TOKEN_TYPE = "device"
+
+
+async def _user_from_device_grant(db: AsyncSession, payload: dict) -> Optional[User]:
+    """Resolve a device-scoped access token to its user, re-checking the
+    backing grant on every request so a revoked grant (Connected Apps ->
+    Revoke) stops working immediately rather than at token expiry."""
+    grant_id = payload.get("jti")
+    user_id_val = payload.get("sub")
+    if grant_id is None or user_id_val is None:
+        return None
+    try:
+        grant_id = int(grant_id)
+        user_id = int(user_id_val)
+    except (TypeError, ValueError):
+        return None
+
+    result = await db.execute(select(OAuthDeviceGrant).where(OAuthDeviceGrant.id == grant_id))
+    grant = result.scalar_one_or_none()
+    if (
+        grant is None
+        or grant.status != "approved"
+        or grant.revoked_at is not None
+        or grant.user_id != user_id
+    ):
+        return None
+
+    # No selectinload(User.profile) here, matching the API-key branch of
+    # get_current_user_or_api_key - these non-session callers hit data
+    # endpoints, not the profile-rendering pages.
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    return user_result.scalar_one_or_none()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 oauth2_scheme_optional = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False)
@@ -39,6 +78,13 @@ async def get_current_user(
         payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
         if payload.get("type") == "2fa_pending":
             raise credentials_exception
+        if payload.get("type") == DEVICE_TOKEN_TYPE:
+            # A device-grant token is scope-limited and must never satisfy the
+            # strict dependency that guards account and security operations.
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This access token has limited scope and cannot be used for account operations",
+            )
         user_id: int = int(payload.get("sub"))
         if user_id is None:
             raise credentials_exception
@@ -70,6 +116,8 @@ async def get_optional_user(
         payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
         if payload.get("type") == "2fa_pending":
             return None
+        if payload.get("type") == DEVICE_TOKEN_TYPE:
+            return await _user_from_device_grant(db, payload)
         user_id_val = payload.get("sub")
         if user_id_val is None:
             return None

@@ -53,6 +53,44 @@ class Token(BaseModel):
 class TokenPayload(BaseModel):
     sub: Optional[int] = None
 
+
+# --- OAuth 2.0 Device Authorization Grant (RFC 8628), #331 ---
+
+class DeviceCodeRequest(BaseModel):
+    client_name: Optional[str] = None
+    scope: Optional[str] = None
+
+class DeviceCodeResponse(BaseModel):
+    device_code: str
+    user_code: str
+    verification_uri: str
+    verification_uri_complete: str
+    expires_in: int
+    interval: int
+
+class DeviceApproveRequest(BaseModel):
+    user_code: str
+    action: str  # "approve" | "deny"
+    # Optional user-chosen label, set on the approval screen; falls back to the
+    # name the client sent with /device/code.
+    name: Optional[str] = None
+
+class DevicePendingResponse(BaseModel):
+    client_name: str
+    scope: str
+    requested_at: datetime
+
+class DeviceGrantItem(BaseModel):
+    id: int
+    client_name: str
+    scope: str
+    created_at: datetime
+    approved_at: Optional[datetime] = None
+    last_seen_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
 class TotpSetupResponse(BaseModel):
     provisioning_uri: str
     secret: str

@@ -1,3 +1,5 @@
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Union
 from jose import jwt
@@ -29,3 +31,18 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
+
+
+def hash_opaque_token(token: str) -> str:
+    """SHA-256 hex digest for at-rest storage of high-entropy bearer secrets
+    (device codes, refresh tokens). These are already 256-bit random strings,
+    so a slow password KDF buys nothing - a fast digest that never stores the
+    raw value is what matters. Looked up by exact hash match, never by
+    comparing a decrypted value."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def generate_opaque_token() -> str:
+    """URL-safe, ~256 bits of entropy."""
+    return secrets.token_urlsafe(32)
+

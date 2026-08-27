@@ -358,6 +358,21 @@ export interface TotpSetupData {
   secret: string;
 }
 
+export interface DevicePending {
+  client_name: string;
+  scope: string;
+  requested_at: string;
+}
+
+export interface DeviceGrant {
+  id: number;
+  client_name: string;
+  scope: string;
+  created_at: string;
+  approved_at: string | null;
+  last_seen_at: string | null;
+}
+
 export interface TotpBackupCode {
   id: number;
   code: string;
@@ -1037,6 +1052,10 @@ export const api = {
       post<{ message: string }>(`/auth/reset-password/${token}`, { new_password }),
     me: (token: string) =>
       get<UserProfile>("/auth/me", undefined, token),
+    devicePending: (userCode: string, token: string) =>
+      get<DevicePending>("/auth/device/pending", { user_code: userCode }, token),
+    deviceGrants: (token: string) =>
+      get<DeviceGrant[]>("/auth/device/grants", undefined, token),
     getSettings: (token: string) =>
       get<UserSettings>("/auth/settings", undefined, token),
     updateSettings: (settings: Partial<UserSettings>, token: string) =>

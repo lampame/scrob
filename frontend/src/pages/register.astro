@@ -1,5 +1,8 @@
 ---
 import Base from "../layouts/Base.astro";
+import PosterWall from "../components/PosterWall.astro";
+import AuthHero from "../components/AuthHero.astro";
+import AuthMobileFeatures from "../components/AuthMobileFeatures.astro";
 import { api } from "../lib/api";
 
 let error = "";
@@ -7,6 +10,7 @@ let pendingEmailConfirmation = false;
 
 const { enabled: registrationEnabled } = await api.auth.registrationStatus().catch(() => ({ enabled: false }));
 const { has_users: hasUsers } = await api.auth.hasUsers().catch(() => ({ has_users: true }));
+const { enable_logged_out_navigation: showNav } = await api.profile.publicAccessStatus().catch(() => ({ enable_logged_out_navigation: false }));
 
 if (!registrationEnabled) {
   return Astro.redirect("/login");
@@ -53,162 +57,194 @@ if (Astro.request.method === "POST") {
     error = e instanceof Error ? e.message : "Registration failed";
   }
 }
+
+// When the nav bar renders (logged-out navigation enabled), it adds real
+// height above this section that the fixed 9rem/5rem budget below doesn't
+// know about - without this, the page overflows by the nav's height even
+// though the hero content itself fits the viewport.
+const heroMinHeightClass = showNav
+  ? "min-h-[calc(100dvh-14rem)] md:min-h-[calc(100dvh-10rem)]"
+  : "min-h-[calc(100dvh-9rem)] md:min-h-[calc(100dvh-5rem)]";
 ---
 
-<Base title="Register" hideNav>
-  <div class="max-w-md mx-auto mt-16 p-8 bg-zinc-900 rounded-xl border border-zinc-800 shadow-2xl relative">
-    <button 
-      id="theme-toggle"
-      class="absolute top-4 right-4 p-2 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-100 transition-all hover:scale-110 active:scale-95"
-      aria-label="Toggle Theme"
-    >
-      <span id="sun-icon" class="hidden">
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
-      </span>
-      <span id="moon-icon">
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
-      </span>
-    </button>
-    <div class="flex flex-col items-center mb-6">
-      <img src="/scrob.png" alt="Scrob Logo" class="w-36 object-contain mb-2" />
-      <span class="text-zinc-100 font-bold text-xl tracking-tight">Scrob</span>
-    </div>
-    <h1 class="text-3xl font-bold mb-6 text-zinc-100 text-center">
-      {pendingEmailConfirmation ? "Account created" : "Create Account"}
-    </h1>
-    
-    {error && (
-      <div class="bg-red-500/10 border border-red-500 text-red-500 p-3 rounded-lg mb-6">
-        {error}
-      </div>
-    )}
+<Base title="Register" hideNav={!showNav}>
+  <!-- Decorative poster-wall background (full viewport, behind content) -->
+  <PosterWall />
 
-    {pendingEmailConfirmation ? (
-      <div class="text-center py-4">
-        <div class="w-14 h-14 bg-zinc-800 rounded-full flex items-center justify-center mx-auto mb-4">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-7 h-7 text-zinc-300">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
-          </svg>
-        </div>
-        <h2 class="text-lg font-semibold text-zinc-100 mb-2">Check your inbox</h2>
-        <p class="text-sm text-zinc-400 mb-6">
-          We've sent an activation link to your email address.<br />
-          Click the link to confirm your account and sign in.
-        </p>
-        <a href="/login" class="text-sm text-zinc-400 hover:text-zinc-100 transition-colors">Back to login</a>
-      </div>
-    ) : (
-    <form method="POST" class="space-y-4">
-      <div>
-        <label for="email" class="block text-sm font-medium text-zinc-400 mb-1">Email</label>
-        <input
-          type="email"
-          name="email"
-          id="email"
-          autocomplete="email"
-          required
-          class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
-        />
-      </div>
-      <div>
-        <label for="username" class="block text-sm font-medium text-zinc-400 mb-1">Username</label>
-        <input
-          type="text"
-          name="username"
-          id="username"
-          autocomplete="username"
-          required
-          class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
-        />
-      </div>
-      <div>
-        <label for="password" class="block text-sm font-medium text-zinc-400 mb-1">Password</label>
-        <div class="relative group/field">
-          <input
-            type="password"
-            name="password"
-            id="password"
-            autocomplete="new-password"
-            required
-            class="w-full bg-zinc-800 border border-zinc-700 rounded-lg pl-4 pr-10 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
-          />
-          <button
-            type="button"
-            class="password-toggle absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-1 cursor-pointer transition-colors"
-            aria-label="Toggle password visibility"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 eye-icon">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.644C3.412 7.943 7.213 5 12 5c4.787 0 8.588 2.943 9.964 6.678.066.18.066.362 0 .544C20.588 16.057 16.787 19 12 19c-4.787 0-8.588-2.943-9.964-6.678z" />
-              <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 eye-slash-icon hidden">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
-            </svg>
-          </button>
-        </div>
-      </div>
-      <div>
-        <label for="confirm_password" class="block text-sm font-medium text-zinc-400 mb-1">Confirm Password</label>
-        <div class="relative group/field">
-          <input
-            type="password"
-            name="confirm_password"
-            id="confirm_password"
-            autocomplete="new-password"
-            required
-            class="w-full bg-zinc-800 border border-zinc-700 rounded-lg pl-4 pr-10 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
-          />
-          <button
-            type="button"
-            class="password-toggle absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-1 cursor-pointer transition-colors"
-            aria-label="Toggle password visibility"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 eye-icon">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.644C3.412 7.943 7.213 5 12 5c4.787 0 8.588 2.943 9.964 6.678.066.18.066.362 0 .544C20.588 16.057 16.787 19 12 19c-4.787 0-8.588-2.943-9.964-6.678z" />
-              <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 eye-slash-icon hidden">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
-            </svg>
-          </button>
-        </div>
-      </div>
-      <button
-        type="submit"
-        class="w-full bg-zinc-100 text-zinc-950 font-bold py-2 rounded-lg hover:bg-zinc-200 transition-colors cursor-pointer mt-4"
-      >
-        Create Account
-      </button>
-    </form>
-    
-    <div class="mt-6 text-center text-sm text-zinc-500">
-      Already have an account? <a href="/login" class="text-zinc-100 hover:underline">Login</a>
-    </div>
-    )}
-  </div>
-
-  {!hasUsers && (
-    <div class="max-w-md mx-auto mt-4 mb-12">
-      <div class="flex items-center gap-3 mb-4">
-        <div class="flex-1 border-t border-zinc-800"></div>
-        <span class="text-xs text-zinc-600">or restore from backup</span>
-        <div class="flex-1 border-t border-zinc-800"></div>
-      </div>
-      <div class="p-6 bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl">
-        <h2 class="font-semibold text-zinc-100 mb-1">Restore Database</h2>
-        <p class="text-sm text-zinc-400 mb-4">Upload a <code class="text-zinc-300">.bak</code> file to restore a previous installation.</p>
-        <div class="flex flex-col gap-3">
-          <input id="bootstrap-restore-file" type="file" accept=".bak"
-            class="block w-full text-sm text-zinc-400 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-zinc-800 file:text-zinc-300 hover:file:bg-zinc-700 file:cursor-pointer cursor-pointer" />
-          <button id="bootstrap-restore-btn" disabled
-            class="w-full px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white text-sm font-semibold rounded-xl transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
-            Restore Database
-          </button>
-        </div>
-        <div id="bootstrap-restore-error" class="hidden mt-3 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2"></div>
-      </div>
-    </div>
+  {!showNav && (
+  <button
+    id="theme-toggle"
+    tabindex="1"
+    class="fixed top-4 right-4 z-20 p-2 rounded-lg bg-zinc-900/80 backdrop-blur-sm border border-zinc-700 text-zinc-400 hover:text-zinc-100 transition-all hover:scale-110 active:scale-95"
+    aria-label="Toggle Theme"
+  >
+    <span id="sun-icon" class="hidden">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>
+    </span>
+    <span id="moon-icon">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+    </span>
+  </button>
   )}
+
+  <div class={`relative z-10 ${heroMinHeightClass} flex items-center py-6 md:py-10`}>
+    <div class="w-full grid md:grid-cols-2 gap-8 md:gap-12 lg:gap-20 items-center">
+
+      <AuthHero />
+
+      <!-- Register card -->
+      <div class="w-full max-w-md mx-auto md:justify-self-end">
+        <div class="p-8 bg-zinc-900/85 backdrop-blur-md rounded-xl border border-zinc-800 shadow-2xl">
+          <h2 class="text-2xl font-bold mb-6 text-zinc-100 text-center">
+            {pendingEmailConfirmation ? "Account created" : "Create your account"}
+          </h2>
+
+          {error && (
+            <div class="bg-red-500/10 border border-red-500 text-red-500 p-3 rounded-lg mb-6">
+              {error}
+            </div>
+          )}
+
+          {pendingEmailConfirmation ? (
+            <div class="text-center py-4">
+              <div class="w-14 h-14 bg-zinc-800 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-7 h-7 text-zinc-300">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
+                </svg>
+              </div>
+              <h3 class="text-lg font-semibold text-zinc-100 mb-2">Check your inbox</h3>
+              <p class="text-sm text-zinc-400 mb-6">
+                We've sent an activation link to your email address.<br />
+                Click the link to confirm your account and sign in.
+              </p>
+              <a href="/login" class="text-sm text-zinc-400 hover:text-zinc-100 transition-colors">Back to login</a>
+            </div>
+          ) : (
+            <>
+              <form method="POST" class="space-y-4">
+                <div>
+                  <label for="email" class="block text-sm font-medium text-zinc-400 mb-1">Email</label>
+                  <input
+                    type="email"
+                    name="email"
+                    id="email"
+                    autocomplete="email"
+                    required
+                    tabindex="2"
+                    class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                  />
+                </div>
+                <div>
+                  <label for="username" class="block text-sm font-medium text-zinc-400 mb-1">Username</label>
+                  <input
+                    type="text"
+                    name="username"
+                    id="username"
+                    autocomplete="username"
+                    required
+                    tabindex="3"
+                    class="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+                  />
+                </div>
+                <div>
+                  <label for="password" class="block text-sm font-medium text-zinc-400 mb-1">Password</label>
+                  <div class="relative group/field">
+                    <input
+                      type="password"
+                      name="password"
+                      id="password"
+                      autocomplete="new-password"
+                      required
+                      tabindex="4"
+                      class="w-full bg-zinc-800 border border-zinc-700 rounded-lg pl-4 pr-10 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                    />
+                    <button
+                      type="button"
+                      tabindex="-1"
+                      class="password-toggle absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-1 cursor-pointer transition-colors"
+                      aria-label="Toggle password visibility"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 eye-icon">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.644C3.412 7.943 7.213 5 12 5c4.787 0 8.588 2.943 9.964 6.678.066.18.066.362 0 .544C20.588 16.057 16.787 19 12 19c-4.787 0-8.588-2.943-9.964-6.678z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      </svg>
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 eye-slash-icon hidden">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label for="confirm_password" class="block text-sm font-medium text-zinc-400 mb-1">Confirm Password</label>
+                  <div class="relative group/field">
+                    <input
+                      type="password"
+                      name="confirm_password"
+                      id="confirm_password"
+                      autocomplete="new-password"
+                      required
+                      tabindex="5"
+                      class="w-full bg-zinc-800 border border-zinc-700 rounded-lg pl-4 pr-10 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                    />
+                    <button
+                      type="button"
+                      tabindex="-1"
+                      class="password-toggle absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-1 cursor-pointer transition-colors"
+                      aria-label="Toggle password visibility"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 eye-icon">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.644C3.412 7.943 7.213 5 12 5c4.787 0 8.588 2.943 9.964 6.678.066.18.066.362 0 .544C20.588 16.057 16.787 19 12 19c-4.787 0-8.588-2.943-9.964-6.678z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      </svg>
+                      <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 eye-slash-icon hidden">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+                <button
+                  type="submit"
+                  tabindex="6"
+                  class="w-full bg-zinc-100 text-zinc-950 font-bold py-2 rounded-lg hover:bg-zinc-200 transition-colors cursor-pointer mt-4"
+                >
+                  Create Account
+                </button>
+              </form>
+
+              <div class="mt-6 text-center text-sm text-zinc-500">
+                Already have an account? <a href="/login" tabindex="7" class="text-zinc-100 hover:underline">Sign in</a>
+              </div>
+            </>
+          )}
+        </div>
+
+        {!hasUsers && (
+          <div class="mt-4">
+            <div class="flex items-center gap-3 mb-4">
+              <div class="flex-1 border-t border-zinc-800"></div>
+              <span class="text-xs text-zinc-600">or restore from backup</span>
+              <div class="flex-1 border-t border-zinc-800"></div>
+            </div>
+            <div class="p-6 bg-zinc-900/85 backdrop-blur-md border border-zinc-800 rounded-xl shadow-2xl">
+              <h2 class="font-semibold text-zinc-100 mb-1">Restore Database</h2>
+              <p class="text-sm text-zinc-400 mb-4">Upload a <code class="text-zinc-300">.bak</code> file to restore a previous installation.</p>
+              <div class="flex flex-col gap-3">
+                <input id="bootstrap-restore-file" type="file" accept=".bak"
+                  class="block w-full text-sm text-zinc-400 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-zinc-800 file:text-zinc-300 hover:file:bg-zinc-700 file:cursor-pointer cursor-pointer" />
+                <button id="bootstrap-restore-btn" disabled
+                  class="w-full px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white text-sm font-semibold rounded-xl transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+                  Restore Database
+                </button>
+              </div>
+              <div id="bootstrap-restore-error" class="hidden mt-3 text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2"></div>
+            </div>
+          </div>
+        )}
+
+        <AuthMobileFeatures />
+      </div>
+    </div>
+  </div>
 </Base>
 
 <!-- Bootstrap Restore Confirmation Modal -->

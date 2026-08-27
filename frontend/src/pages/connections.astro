@@ -1,16 +1,20 @@
 ---
 import Base from "../layouts/Base.astro";
 import { api } from "../lib/api";
+import type { DeviceGrant } from "../lib/api";
 import { connectionIconHtml } from "../lib/connectionIcons";
 
 const { token } = Astro.locals;
-const [settings, me, connections, scrobbleConnections, seasonOverrides] = await Promise.all([
+const [settings, me, connections, scrobbleConnections, seasonOverrides, deviceGrants] = await Promise.all([
   api.auth.getSettings(token!),
   api.auth.me(token!),
   api.auth.getConnections(token!),
   api.auth.getScrobbleConnections(token!),
   api.sync.getSeasonOverrides(token!).catch(() => []),
+  api.auth.deviceGrants(token!).catch(() => [] as DeviceGrant[]),
 ]);
+const fmtGrantDate = (v: string | null) =>
+  v ? new Date(v.endsWith("Z") ? v : v + "Z").toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "—";
 const hasTmdbKey = settings.has_effective_tmdb_key;
 const AUTO_SYNC_INTERVAL_OPTIONS = [
   { value: 0.25, label: "Every 15m" },
@@ -1370,6 +1374,42 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
             </div>
           </div>
         </form>
+      </section>
+
+      <!-- Connected Apps -->
+      <section>
+        <h2 class="section-headline mb-4 border-b border-zinc-800 pb-2">Connected Apps</h2>
+        <div class="space-y-4 max-w-xl">
+          <p class="text-sm text-zinc-400">
+            Apps and devices you've linked with a one-time code (for example the Umbrella Kodi add-on). Each holds a
+            write-scoped token — it can change your watch history, ratings and lists, but not your password, email or
+            security settings. Revoking takes effect immediately.
+          </p>
+          <ul id="device-grants-list" class="space-y-2">
+            {deviceGrants.length === 0 && (
+              <li class="text-sm text-zinc-500 border border-zinc-800 rounded-lg px-4 py-3">No connected apps.</li>
+            )}
+            {deviceGrants.map((g) => (
+              <li
+                data-grant-id={g.id}
+                class="flex items-center justify-between gap-4 border border-zinc-800 rounded-lg px-4 py-3"
+              >
+                <div class="min-w-0">
+                  <p class="font-semibold text-zinc-100 truncate">{g.client_name}</p>
+                  <p class="text-xs text-zinc-500 mt-0.5">
+                    Linked {fmtGrantDate(g.approved_at ?? g.created_at)} · Last used {fmtGrantDate(g.last_seen_at)} · Scope: {g.scope}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  class="revoke-grant-btn shrink-0 text-sm font-semibold text-rose-400 hover:text-rose-300 border border-rose-500/30 hover:border-rose-500/60 rounded-lg px-3 py-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  Revoke
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       </section>
 
       <!-- Import -->
@@ -4925,6 +4965,37 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
     }
   }
 
+  function setupConnectedApps() {
+    document.querySelectorAll<HTMLButtonElement>('.revoke-grant-btn').forEach((btn) => {
+      if (btn.dataset.bound) return;
+      btn.dataset.bound = '1';
+      btn.addEventListener('click', async () => {
+        const row = btn.closest('li');
+        const id = row?.getAttribute('data-grant-id');
+        if (!id || btn.disabled) return;
+        btn.disabled = true;
+        btn.textContent = 'Revoking…';
+        try {
+          const res = await fetch(`/api/proxy/auth/device/grants/${id}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${token}` },
+          });
+          if (!res.ok) throw new Error();
+          row?.remove();
+          const list = document.getElementById('device-grants-list');
+          if (list && list.querySelectorAll('li[data-grant-id]').length === 0) {
+            list.innerHTML = '<li class="text-sm text-zinc-500 border border-zinc-800 rounded-lg px-4 py-3">No connected apps.</li>';
+          }
+          showMessage('Connected app revoked.');
+        } catch {
+          btn.disabled = false;
+          btn.textContent = 'Revoke';
+          showMessage('Failed to revoke connected app', 'error');
+        }
+      });
+    });
+  }
+
   function setupCollapsibleRows() {
     document.querySelectorAll('.collapsible-header').forEach(header => {
       header.addEventListener('click', () => {
@@ -5713,6 +5784,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
   setupScrobbleConnections();
   setupSettingsForm();
   setupApiKey();
+  setupConnectedApps();
   setupCollapsibleRows();
   checkConnections();
   loadSyncWarnings();
@@ -5725,6 +5797,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
     setupConnections();
     setupSettingsForm();
     setupApiKey();
+    setupConnectedApps();
     setupCollapsibleRows();
     checkConnections();
     loadSyncWarnings();

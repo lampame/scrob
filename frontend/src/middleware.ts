@@ -1,8 +1,12 @@
 import { defineMiddleware } from "astro:middleware";
 import { api } from "./lib/api";
 
-const PUBLIC_ROUTES = ["/login", "/register", "/logout", "/oidc-callback", "/oidc-start", "/site.webmanifest", "/favicon.ico", "/favicon.svg", "/apple-touch-icon.png", "/sw.js", "/offline.html"];
-const PUBLIC_PREFIXES = ["/auth/activate/", "/forgot-password", "/reset-password/", "/api/proxy/webhooks/", "/api/proxy/auth/has-users", "/api/proxy/auth/bootstrap-restore", "/api/proxy/media/stream/", "/api/proxy/radarr-compat/", "/api/proxy/sonarr-compat/"];
+const PUBLIC_ROUTES = ["/login", "/register", "/logout", "/oidc-callback", "/oidc-start", "/link", "/site.webmanifest", "/favicon.ico", "/favicon.svg", "/apple-touch-icon.png", "/sw.js", "/offline.html"];
+// /api/proxy/auth/device/code and /device/token are the RFC 8628 endpoints a
+// third-party client hits with no Scrob session at all (#331) — the backend
+// leaves them unauthenticated by design, so the cookie gate must let them
+// through. Approve/pending/grants are NOT listed: those require a real login.
+const PUBLIC_PREFIXES = ["/auth/activate/", "/forgot-password", "/reset-password/", "/api/proxy/webhooks/", "/api/proxy/auth/has-users", "/api/proxy/auth/bootstrap-restore", "/api/proxy/auth/device/code", "/api/proxy/auth/device/token", "/api/proxy/media/stream/", "/api/proxy/radarr-compat/", "/api/proxy/sonarr-compat/"];
 // Matches /profile/{id} (someone else's public profile page) but not the bare
 // /profile page (the logged-in user's own profile management), which must stay gated.
 const PUBLIC_PROFILE_PAGE_RE = /^\/profile\/\d+\/?$/;
