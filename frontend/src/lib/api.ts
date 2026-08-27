@@ -682,6 +682,24 @@ export interface ContinueWatchingItem {
   completed: boolean;
 }
 
+export interface DroppedShow {
+  id: number;
+  tmdb_id: number | null;
+  tvdb_id: number | null;
+  title: string;
+  poster_path: string | null;
+  year: string | null;
+  status: string | null;
+}
+
+export interface DroppedMovie {
+  id: number;
+  tmdb_id: number | null;
+  title: string;
+  poster_path: string | null;
+  year: string | null;
+}
+
 export interface CollectionDetail {
   id: number;
   name: string;
@@ -1288,6 +1306,9 @@ export const api = {
 
     nowPlaying: (token: string) =>
       get<{ now_playing: NowPlayingSession[] }>("/history/now-playing", undefined, token),
+
+    dropped: (token?: string) =>
+      get<{ shows: DroppedShow[]; movies: DroppedMovie[] }>("/history/dropped", undefined, token),
   },
 
   lists: {

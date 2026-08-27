@@ -1370,7 +1370,43 @@ async def undrop_show(
 
 
 class DropMovieRequest(BaseModel):
-    media_id: int
+    # dropped_movies stores local Media.id. Callers with a local row send it
+    # directly; a movie opened straight from TMDB (not watched/collected) has
+    # no local row yet, so it sends tmdb_id and we resolve/create one (#330).
+    media_id: int | None = None
+    tmdb_id: int | None = None
+
+
+async def _resolve_movie_media_id(
+    db: AsyncSession, user_id: int, media_id: int | None, tmdb_id: int | None, *, create: bool
+) -> int | None:
+    """Turn a (media_id | tmdb_id) drop/undrop request into a local movie
+    Media.id. create=True materialises the row from TMDB when it doesn't
+    exist yet (drop); create=False just looks (undrop - nothing to remove
+    if there's no row)."""
+    if media_id and media_id > 0:
+        return media_id
+    if not tmdb_id:
+        return None
+    existing = (await db.execute(
+        select(Media)
+        .where(Media.tmdb_id == tmdb_id, Media.media_type == MediaType.movie)
+        .order_by(Media.id)
+    )).scalars().first()
+    if existing:
+        return existing.id
+    if not create:
+        return None
+    from routers.media import get_user_tmdb_key
+    api_key = await get_user_tmdb_key(db, user_id)
+    try:
+        data = await tmdb.get_movie(tmdb_id, api_key=api_key)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Movie not found on TMDB: {e}")
+    media, _created = await create_media_safely(db, tmdb_id, MediaType.movie, title=data.get("title") or "")
+    await enrich_media(media, api_key=api_key)
+    await db.flush()
+    return media.id
 
 
 @router.post("/drop/movie")
@@ -1391,9 +1427,12 @@ async def drop_movie(
     settings = settings_result.scalar_one_or_none()
     if not settings:
         raise HTTPException(status_code=404, detail="Settings not found")
+    media_id = await _resolve_movie_media_id(db, current_user.id, body.media_id, body.tmdb_id, create=True)
+    if not media_id:
+        raise HTTPException(status_code=400, detail="media_id or tmdb_id is required")
     dropped = list(settings.dropped_movies or [])
-    if body.media_id not in dropped:
-        dropped.append(body.media_id)
+    if media_id not in dropped:
+        dropped.append(media_id)
         settings.dropped_movies = dropped
         flag_modified(settings, "dropped_movies")
         await db.commit()
@@ -1402,20 +1441,75 @@ async def drop_movie(
 
 @router.delete("/drop/movie")
 async def undrop_movie(
-    media_id: int = Query(...),
+    media_id: int | None = Query(None),
+    tmdb_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_or_api_key),
 ):
     settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
     settings = settings_result.scalar_one_or_none()
     if settings:
+        resolved = await _resolve_movie_media_id(db, current_user.id, media_id, tmdb_id, create=False)
         dropped = list(settings.dropped_movies or [])
-        if media_id in dropped:
-            dropped.remove(media_id)
+        if resolved is not None and resolved in dropped:
+            dropped.remove(resolved)
             settings.dropped_movies = dropped
             flag_modified(settings, "dropped_movies")
             await db.commit()
     return {"status": "ok"}
+
+
+@router.get("/dropped")
+async def list_dropped(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_or_api_key),
+):
+    """Every dropped show and movie, for the dedicated Dropped page (#330).
+
+    dropped_shows / dropped_movies store bare local ids with no timestamps;
+    they're returned newest-drop-first (drop appends to the list)."""
+    settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
+    settings = settings_result.scalar_one_or_none()
+    show_ids = list(settings.dropped_shows or []) if settings else []
+    movie_ids = list(settings.dropped_movies or []) if settings else []
+
+    shows_out: list[dict] = []
+    if show_ids:
+        rows = (await db.execute(select(Show).where(Show.id.in_(show_ids)))).scalars().all()
+        by_id = {s.id: s for s in rows}
+        for sid in reversed(show_ids):
+            s = by_id.get(sid)
+            if not s:
+                continue
+            shows_out.append({
+                "id": s.id,
+                "tmdb_id": s.tmdb_id,
+                "tvdb_id": s.tvdb_id,
+                "title": s.title,
+                "poster_path": s.poster_path,
+                "year": (s.first_air_date or "")[:4] or None,
+                "status": s.status,
+            })
+
+    movies_out: list[dict] = []
+    if movie_ids:
+        rows = (await db.execute(
+            select(Media).where(Media.id.in_(movie_ids), Media.media_type == MediaType.movie)
+        )).scalars().all()
+        by_id = {m.id: m for m in rows}
+        for mid in reversed(movie_ids):
+            m = by_id.get(mid)
+            if not m:
+                continue
+            movies_out.append({
+                "id": m.id,
+                "tmdb_id": m.tmdb_id,
+                "title": m.title,
+                "poster_path": m.poster_path,
+                "year": (m.release_date or "")[:4] or None,
+            })
+
+    return {"shows": shows_out, "movies": movies_out}
 
 
 class SeasonWatchRequest(BaseModel):

@@ -1,0 +1,180 @@
+---
+import Base from "../layouts/Base.astro";
+import { api, tmdbImageUrl, type DroppedShow, type DroppedMovie } from "../lib/api";
+export const prerender = false;
+
+const { token } = Astro.locals;
+Astro.response.headers.set("Cache-Control", "no-store");
+
+let shows: DroppedShow[] = [];
+let movies: DroppedMovie[] = [];
+let failed = false;
+try {
+  const data = await api.history.dropped(token);
+  shows = data.shows ?? [];
+  movies = data.movies ?? [];
+} catch {
+  failed = true;
+}
+
+const showHref = (s: DroppedShow) =>
+  s.tmdb_id ? `/show/${s.tmdb_id}` : s.tvdb_id ? `/show/tvdb/${s.tvdb_id}` : "#";
+const total = shows.length + movies.length;
+---
+
+<Base title="Dropped">
+  <div class="mb-8">
+    <h1 class="page-title mb-2">Dropped</h1>
+    <p class="text-zinc-500">
+      {total > 0
+        ? `${total} title${total === 1 ? "" : "s"} you've dropped — excluded from Next Up, Continue Watching, Calendar and recommendations.`
+        : "Shows and movies you drop are collected here."}
+    </p>
+  </div>
+
+  {failed && (
+    <div class="text-center py-20 text-zinc-500">
+      <p class="text-lg">Couldn't load your dropped titles.</p>
+    </div>
+  )}
+
+  {!failed && total === 0 && (
+    <div class="text-center py-20 text-zinc-500">
+      <p class="text-lg">Nothing dropped.</p>
+      <p class="text-sm mt-2">Drop a show or movie from its page and it'll show up here.</p>
+    </div>
+  )}
+
+  {shows.length > 0 && (
+    <section class="mb-12">
+      <h2 class="section-headline mb-4">Shows</h2>
+      <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
+        {shows.map((s) => (
+          <div class="group relative flex flex-col rounded-2xl overflow-hidden bg-zinc-900 border border-zinc-800 hover:border-blue-500/50 hover:shadow-2xl hover:shadow-blue-900/20 transition-all duration-300 transform hover:-translate-y-1">
+            <a href={showHref(s)} class="block active:scale-95 active:opacity-70 transition-all duration-100">
+              <div class="aspect-[2/3] bg-zinc-950 relative overflow-hidden ring-1 ring-white/5 group-hover:ring-blue-500/30 transition-all duration-300">
+                {tmdbImageUrl(s.poster_path, "w500") ? (
+                  <img
+                    src={tmdbImageUrl(s.poster_path, "w500")}
+                    alt={s.title}
+                    class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                ) : (
+                  <div class="w-full h-full flex flex-col items-center justify-center text-zinc-700 bg-zinc-900 p-4 text-center">
+                    <span class="text-3xl mb-2 opacity-30">📺</span>
+                    <span class="text-xs font-bold uppercase tracking-widest">{s.title}</span>
+                  </div>
+                )}
+              </div>
+            </a>
+            <button
+              class="undrop-btn absolute top-1.5 right-1.5 z-10 w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-200 cursor-pointer bg-rose-900/60 border border-rose-600 text-rose-300 hover:bg-rose-700 hover:border-rose-500 hover:text-white"
+              data-kind="show"
+              data-id={String(s.id)}
+              title="Undrop this show"
+              aria-label={`Undrop ${s.title}`}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+            </button>
+            <a href={showHref(s)} class="block p-3 bg-gradient-to-b from-zinc-900 to-zinc-950 flex-1">
+              <h3 class="text-sm font-bold text-zinc-100 group-hover:text-blue-400 truncate transition-colors leading-tight">{s.title}</h3>
+              <div class="flex items-center gap-2 mt-1">
+                {s.year && <span class="text-[11px] font-medium text-zinc-500">{s.year}</span>}
+                {s.status && <span class="text-[11px] font-medium text-zinc-600 truncate">{s.status}</span>}
+              </div>
+            </a>
+          </div>
+        ))}
+      </div>
+    </section>
+  )}
+
+  {movies.length > 0 && (
+    <section class="mb-12">
+      <h2 class="section-headline mb-4">Movies</h2>
+      <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
+        {movies.map((m) => (
+          <div class="group relative flex flex-col rounded-2xl overflow-hidden bg-zinc-900 border border-zinc-800 hover:border-blue-500/50 hover:shadow-2xl hover:shadow-blue-900/20 transition-all duration-300 transform hover:-translate-y-1">
+            <a href={m.tmdb_id ? `/media/movie/${m.tmdb_id}` : "#"} class="block active:scale-95 active:opacity-70 transition-all duration-100">
+              <div class="aspect-[2/3] bg-zinc-950 relative overflow-hidden ring-1 ring-white/5 group-hover:ring-blue-500/30 transition-all duration-300">
+                {tmdbImageUrl(m.poster_path, "w500") ? (
+                  <img
+                    src={tmdbImageUrl(m.poster_path, "w500")}
+                    alt={m.title}
+                    class="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                ) : (
+                  <div class="w-full h-full flex flex-col items-center justify-center text-zinc-700 bg-zinc-900 p-4 text-center">
+                    <span class="text-3xl mb-2 opacity-30">🎬</span>
+                    <span class="text-xs font-bold uppercase tracking-widest">{m.title}</span>
+                  </div>
+                )}
+              </div>
+            </a>
+            <button
+              class="undrop-btn absolute top-1.5 right-1.5 z-10 w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-200 cursor-pointer bg-rose-900/60 border border-rose-600 text-rose-300 hover:bg-rose-700 hover:border-rose-500 hover:text-white"
+              data-kind="movie"
+              data-id={String(m.id)}
+              title="Undrop this movie"
+              aria-label={`Undrop ${m.title}`}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+            </button>
+            <a href={m.tmdb_id ? `/media/movie/${m.tmdb_id}` : "#"} class="block p-3 bg-gradient-to-b from-zinc-900 to-zinc-950 flex-1">
+              <h3 class="text-sm font-bold text-zinc-100 group-hover:text-blue-400 truncate transition-colors leading-tight">{m.title}</h3>
+              {m.year && <span class="text-[11px] font-medium text-zinc-500 mt-1 block">{m.year}</span>}
+            </a>
+          </div>
+        ))}
+      </div>
+    </section>
+  )}
+</Base>
+
+<script>
+  const token = (window as any).__AUTH_TOKEN__ ?? "";
+  const SPIN = `<svg class="animate-spin" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10"/></svg>`;
+
+  document.querySelectorAll<HTMLButtonElement>(".undrop-btn").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const original = btn.innerHTML;
+      btn.innerHTML = SPIN;
+      const kind = btn.dataset.kind;
+      const id = btn.dataset.id;
+      const path = kind === "movie"
+        ? `/api/proxy/history/drop/movie?media_id=${id}`
+        : `/api/proxy/history/drop/show?show_id=${id}`;
+      try {
+        const res = await fetch(path, {
+          method: "DELETE",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!res.ok) throw new Error();
+        // Fade the card out, then drop it from the DOM.
+        const card = btn.closest(".group") as HTMLElement | null;
+        if (card) {
+          card.style.transition = "opacity 0.2s, transform 0.2s";
+          card.style.opacity = "0";
+          card.style.transform = "scale(0.95)";
+          setTimeout(() => {
+            const section = card.closest("section");
+            card.remove();
+            if (section && section.querySelectorAll(".undrop-btn").length === 0) section.remove();
+            if (document.querySelectorAll(".undrop-btn").length === 0) window.location.reload();
+          }, 200);
+        }
+      } catch {
+        btn.disabled = false;
+        btn.innerHTML = original;
+      }
+    });
+  });
+</script>

@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, patch
 os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
 
+from fastapi import HTTPException
+
 from models.base import MediaType, CollectionSource
 from models.episode_order import EpisodeOrderMapping, UserShowEpisodeOrder
 from models.events import WatchEvent
@@ -612,6 +614,95 @@ class PushWatchStateTraktTokenTests(unittest.IsolatedAsyncioTestCase):
                 watched_at_by_media={5: datetime(2024, 1, 1)},
             )
         add_movie.assert_not_awaited()
+
+
+class DropMovieResolveTests(unittest.IsolatedAsyncioTestCase):
+    """#330: dropping a movie opened straight from TMDB (no local Media row)
+    must resolve/create one instead of storing a garbage id."""
+
+    def setUp(self):
+        # flag_modified needs a real ORM instance; these tests use SimpleNamespace.
+        p = patch("routers.history.flag_modified")
+        p.start()
+        self.addCleanup(p.stop)
+
+    async def test_drop_by_media_id_uses_it_directly(self):
+        settings = SimpleNamespace(dropped_movies=[])
+        db = _FakeSession([settings])
+        await history.drop_movie(
+            body=SimpleNamespace(media_id=42, tmdb_id=None),
+            db=db, current_user=SimpleNamespace(id=1),
+        )
+        self.assertEqual(settings.dropped_movies, [42])
+
+    async def test_drop_by_tmdb_id_uses_existing_media_row(self):
+        settings = SimpleNamespace(dropped_movies=[])
+        db = _FakeSession([settings, SimpleNamespace(id=99)])
+        await history.drop_movie(
+            body=SimpleNamespace(media_id=None, tmdb_id=550),
+            db=db, current_user=SimpleNamespace(id=1),
+        )
+        self.assertEqual(settings.dropped_movies, [99])
+
+    async def test_drop_by_tmdb_id_creates_media_row_when_missing(self):
+        settings = SimpleNamespace(dropped_movies=[])
+        db = _FakeSession([settings, None])
+        with patch("routers.media.get_user_tmdb_key", new_callable=AsyncMock, return_value="k"), \
+             patch("routers.history.tmdb.get_movie", new_callable=AsyncMock, return_value={"title": "Fight Club"}), \
+             patch("routers.history.create_media_safely", new_callable=AsyncMock,
+                   return_value=(SimpleNamespace(id=123), True)), \
+             patch("routers.history.enrich_media", new_callable=AsyncMock):
+            await history.drop_movie(
+                body=SimpleNamespace(media_id=None, tmdb_id=550),
+                db=db, current_user=SimpleNamespace(id=1),
+            )
+        self.assertEqual(settings.dropped_movies, [123])
+
+    async def test_drop_with_neither_id_is_400(self):
+        db = _FakeSession([SimpleNamespace(dropped_movies=[])])
+        with self.assertRaises(HTTPException) as ctx:
+            await history.drop_movie(
+                body=SimpleNamespace(media_id=None, tmdb_id=None),
+                db=db, current_user=SimpleNamespace(id=1),
+            )
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    async def test_undrop_by_tmdb_id_removes_the_resolved_row_without_creating(self):
+        settings = SimpleNamespace(dropped_movies=[99, 5])
+        db = _FakeSession([settings, SimpleNamespace(id=99)])
+        await history.undrop_movie(
+            media_id=None, tmdb_id=550, db=db, current_user=SimpleNamespace(id=1),
+        )
+        self.assertEqual(settings.dropped_movies, [5])
+
+
+class ListDroppedTests(unittest.IsolatedAsyncioTestCase):
+    """#330: GET /history/dropped feeds the dedicated Dropped page."""
+
+    async def test_returns_shows_and_movies_newest_first_skipping_unknown_ids(self):
+        settings = SimpleNamespace(dropped_shows=[10, 20, 99], dropped_movies=[5])
+        show10 = SimpleNamespace(id=10, tmdb_id=1399, tvdb_id=None, title="GoT",
+                                 poster_path="/got.jpg", first_air_date="2011-04-17", status="Ended")
+        show20 = SimpleNamespace(id=20, tmdb_id=None, tvdb_id=555, title="Old Show",
+                                 poster_path=None, first_air_date=None, status=None)
+        movie5 = SimpleNamespace(id=5, tmdb_id=550, title="Fight Club",
+                                 poster_path="/fc.jpg", release_date="1999-10-15")
+        db = _FakeSession([settings, [show10, show20], [movie5]])
+
+        out = await history.list_dropped(db=db, current_user=SimpleNamespace(id=1))
+
+        # id 99 has no Show row -> skipped; the rest come back newest-drop-first.
+        self.assertEqual([s["id"] for s in out["shows"]], [20, 10])
+        self.assertEqual(out["shows"][1]["year"], "2011")
+        self.assertEqual(out["shows"][0]["tvdb_id"], 555)
+        self.assertEqual(out["movies"], [
+            {"id": 5, "tmdb_id": 550, "title": "Fight Club", "poster_path": "/fc.jpg", "year": "1999"},
+        ])
+
+    async def test_empty_when_nothing_dropped(self):
+        db = _FakeSession([SimpleNamespace(dropped_shows=[], dropped_movies=None)])
+        out = await history.list_dropped(db=db, current_user=SimpleNamespace(id=1))
+        self.assertEqual(out, {"shows": [], "movies": []})
 
 
 class RatePromptTests(unittest.IsolatedAsyncioTestCase):
