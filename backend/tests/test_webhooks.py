@@ -19,6 +19,7 @@ from routers.webhooks import (
     _episode_for_progress,
     _is_duplicate_webhook_delivery,
     _maybe_bingebase_scrobble,
+    _maybe_simkl_scrobble,
     _resolve_plex_progress,
     _resolve_tvdb_episode_to_tmdb_position,
     _write_watch_event,
@@ -853,6 +854,77 @@ class TestBingebaseScrobble(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs["json"]["Event"], "playback.stop")
             self.assertEqual(kwargs["json"]["Item"]["ProviderIds"]["Tmdb"], "550")
             self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret-token")
+
+
+class SimklScrobbleFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """#328: a Simkl /scrobble/stop that 404s (absolute-numbered anime past
+    the first cour) must not silently lose the watch - fall back to
+    /sync/history, which maps TMDB numbering onto Simkl's split entries."""
+
+    def _settings(self):
+        return SimpleNamespace(
+            simkl_scrobble=True, simkl_access_token="tok", simkl_client_id="cid",
+        )
+
+    def _episode(self):
+        return SimpleNamespace(
+            media_type=MediaType.episode, season_number=1, episode_number=25,
+            tmdb_id=4562708, show_id=1,
+            show=SimpleNamespace(tmdb_id=95479, title="JUJUTSU KAISEN"),
+        )
+
+    async def test_successful_stop_does_not_touch_history(self):
+        with (
+            patch.object(webhooks.simkl_client, "stop_scrobble_episode", AsyncMock()),
+            patch.object(webhooks.simkl_client, "add_episode_to_history", AsyncMock()) as add_hist,
+        ):
+            await _maybe_simkl_scrobble(self._settings(), self._episode(), "stop", 1.0)
+        add_hist.assert_not_awaited()
+
+    async def test_failed_stop_at_watched_progress_falls_back_to_history(self):
+        with (
+            patch.object(webhooks.simkl_client, "stop_scrobble_episode",
+                         AsyncMock(side_effect=RuntimeError("404 Not Found"))),
+            patch.object(webhooks.simkl_client, "add_episode_to_history", AsyncMock()) as add_hist,
+        ):
+            await _maybe_simkl_scrobble(self._settings(), self._episode(), "stop", 1.0)
+        add_hist.assert_awaited_once_with("cid", "tok", 95479, 1, 25)
+
+    async def test_failed_stop_below_watched_progress_does_not_fall_back(self):
+        with (
+            patch.object(webhooks.simkl_client, "stop_scrobble_episode",
+                         AsyncMock(side_effect=RuntimeError("404"))),
+            patch.object(webhooks.simkl_client, "add_episode_to_history", AsyncMock()) as add_hist,
+        ):
+            await _maybe_simkl_scrobble(self._settings(), self._episode(), "stop", 0.30)
+        add_hist.assert_not_awaited()
+
+    async def test_failed_start_does_not_fall_back(self):
+        with (
+            patch.object(webhooks.simkl_client, "checkin_episode",
+                         AsyncMock(side_effect=RuntimeError("404"))),
+            patch.object(webhooks.simkl_client, "add_episode_to_history", AsyncMock()) as add_hist,
+        ):
+            await _maybe_simkl_scrobble(self._settings(), self._episode(), "start", 0.05)
+        add_hist.assert_not_awaited()
+
+    async def test_failed_movie_stop_falls_back_to_movie_history(self):
+        movie = SimpleNamespace(
+            media_type=MediaType.movie, tmdb_id=550, title="Fight Club", release_date="1999-10-15",
+        )
+        with (
+            patch.object(webhooks.simkl_client, "stop_scrobble_movie",
+                         AsyncMock(side_effect=RuntimeError("500"))),
+            patch.object(webhooks.simkl_client, "add_movie_to_history", AsyncMock()) as add_hist,
+        ):
+            await _maybe_simkl_scrobble(self._settings(), movie, "stop", 0.95)
+        add_hist.assert_awaited_once_with("cid", "tok", 550)
+
+    async def test_disabled_does_nothing(self):
+        s = SimpleNamespace(simkl_scrobble=False, simkl_access_token="tok", simkl_client_id="cid")
+        with patch.object(webhooks.simkl_client, "stop_scrobble_episode", AsyncMock()) as stop:
+            await _maybe_simkl_scrobble(s, self._episode(), "stop", 1.0)
+        stop.assert_not_awaited()
 
 
 class BackfillPlexRuntimeTests(IsolatedAsyncioTestCase):

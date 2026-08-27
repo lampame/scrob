@@ -106,6 +106,12 @@ async def _maybe_trakt_scrobble(
         logging.getLogger(__name__).warning("[Trakt scrobble] %s failed: %s", action, exc)
 
 
+# Simkl finalises a /scrobble/stop as watched at >= this progress (see
+# core/simkl.py). A stop at or above it is a real completed watch, so it must
+# still reach Simkl even if the live scrobble call fails.
+_SIMKL_WATCHED_PROGRESS = 80.0
+
+
 async def _maybe_simkl_scrobble(
     settings: UserSettings | None,
     media: "Media",
@@ -117,16 +123,47 @@ async def _maybe_simkl_scrobble(
     action is 'start' (play/resume) or 'stop'. Simkl has no pause concept.
     'start' fires a fire-and-forget checkin (Simkl runtime-extrapolates progress
     from there); 'stop' calls /scrobble/stop with the real progress, since
-    there's no separate cancel/delete endpoint to end a checkin otherwise."""
+    there's no separate cancel/delete endpoint to end a checkin otherwise.
+
+    Simkl's /scrobble endpoints identify an episode only by show tmdb id +
+    season + episode number, using Simkl's own layout - so an absolute-numbered
+    anime episode past the first cour (TMDB keeps one season, Simkl splits it)
+    404s and the watch is lost. When a completed-watch stop fails, fall back to
+    /sync/history, which does map TMDB anime numbering onto Simkl's entries (#328)."""
     if not (settings and settings.simkl_scrobble and settings.simkl_access_token and settings.simkl_client_id):
         return
 
     from sqlalchemy import inspect as sa_inspect
+    import logging
+    log = logging.getLogger(__name__)
 
     progress = min(100.0, round(progress_percent * 100, 1))
+    cid, token = settings.simkl_client_id, settings.simkl_access_token
+
+    is_movie = media.media_type == MediaType.movie and media.tmdb_id
+    is_episode = (
+        media.media_type == MediaType.episode
+        and media.season_number is not None
+        and media.episode_number is not None
+    )
+
+    show = None
+    if is_episode:
+        try:
+            unloaded = sa_inspect(media).unloaded
+        except Exception:
+            unloaded = ()
+        if "show" in unloaded:
+            show = await db.get(Show, media.show_id) if db and media.show_id else None
+        else:
+            show = getattr(media, "show", None)
+        if not (show and show.tmdb_id):
+            return
+    elif not is_movie:
+        return
 
     try:
-        if media.media_type == MediaType.movie and media.tmdb_id:
+        if is_movie:
             if action == "start":
                 year: int | None = None
                 if media.release_date:
@@ -135,45 +172,47 @@ async def _maybe_simkl_scrobble(
                     except (ValueError, TypeError):
                         pass
                 await simkl_client.checkin_movie(
-                    settings.simkl_client_id, settings.simkl_access_token,
-                    tmdb_id=media.tmdb_id,
-                    title=media.title,
-                    year=year,
+                    cid, token, tmdb_id=media.tmdb_id, title=media.title, year=year, progress=progress,
+                )
+            elif action == "stop":
+                await simkl_client.stop_scrobble_movie(cid, token, tmdb_id=media.tmdb_id, progress=progress)
+        else:
+            if action == "start":
+                await simkl_client.checkin_episode(
+                    cid, token,
+                    show_tmdb_id=show.tmdb_id,
+                    season_number=media.season_number,
+                    episode_number=media.episode_number,
+                    show_title=show.title,
                     progress=progress,
                 )
             elif action == "stop":
-                await simkl_client.stop_scrobble_movie(
-                    settings.simkl_client_id, settings.simkl_access_token,
-                    tmdb_id=media.tmdb_id,
+                await simkl_client.stop_scrobble_episode(
+                    cid, token,
+                    show_tmdb_id=show.tmdb_id,
+                    season_number=media.season_number,
+                    episode_number=media.episode_number,
                     progress=progress,
                 )
-        elif media.media_type == MediaType.episode and media.season_number is not None and media.episode_number is not None:
-            state = sa_inspect(media)
-            if "show" in state.unloaded:
-                show = await db.get(Show, media.show_id) if db and media.show_id else None
-            else:
-                show = media.show
-            if show and show.tmdb_id:
-                if action == "start":
-                    await simkl_client.checkin_episode(
-                        settings.simkl_client_id, settings.simkl_access_token,
-                        show_tmdb_id=show.tmdb_id,
-                        season_number=media.season_number,
-                        episode_number=media.episode_number,
-                        show_title=show.title,
-                        progress=progress,
-                    )
-                elif action == "stop":
-                    await simkl_client.stop_scrobble_episode(
-                        settings.simkl_client_id, settings.simkl_access_token,
-                        show_tmdb_id=show.tmdb_id,
-                        season_number=media.season_number,
-                        episode_number=media.episode_number,
-                        progress=progress,
-                    )
     except Exception as exc:
-        import logging
-        logging.getLogger(__name__).warning("[Simkl scrobble] %s failed: %s", action, exc)
+        if action == "stop" and progress >= _SIMKL_WATCHED_PROGRESS:
+            try:
+                if is_movie:
+                    await simkl_client.add_movie_to_history(cid, token, media.tmdb_id)
+                else:
+                    await simkl_client.add_episode_to_history(
+                        cid, token, show.tmdb_id, media.season_number, media.episode_number,
+                    )
+                log.info(
+                    "[Simkl scrobble] stop call failed (%s) - recorded the watch via /sync/history instead", exc,
+                )
+            except Exception as fallback_exc:
+                log.warning(
+                    "[Simkl scrobble] stop failed (%s) and the /sync/history fallback also failed: %s",
+                    exc, fallback_exc,
+                )
+        else:
+            log.warning("[Simkl scrobble] %s failed: %s", action, exc)
 
 
 async def _maybe_mdblist_scrobble(
