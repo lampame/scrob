@@ -506,15 +506,17 @@ async def _push_season_list_item_to_trakt(
         return
 
     from core import trakt as trakt_client
+    from routers.trakt import ensure_valid_trakt_token
     try:
+        token = await ensure_valid_trakt_token(db, settings)
         if remove:
             await trakt_client.remove_season_from_list(
-                settings.trakt_client_id, settings.trakt_access_token,
+                settings.trakt_client_id, token,
                 list_trakt_slug, season_tmdb_id,
             )
         else:
             await trakt_client.add_season_to_list(
-                settings.trakt_client_id, settings.trakt_access_token,
+                settings.trakt_client_id, token,
                 list_trakt_slug, season_tmdb_id,
             )
     except Exception as exc:
@@ -548,27 +550,29 @@ async def _push_list_item_to_trakt(
         return
 
     from core import trakt as trakt_client
+    from routers.trakt import ensure_valid_trakt_token
     try:
+        token = await ensure_valid_trakt_token(db, settings)
         if list_trakt_slug in ("__watchlist__", "__watchlist_movies__", "__watchlist_shows__"):
             if remove:
                 await trakt_client.remove_from_watchlist(
-                    settings.trakt_client_id, settings.trakt_access_token,
+                    settings.trakt_client_id, token,
                     trakt_type, media.tmdb_id,
                 )
             else:
                 await trakt_client.add_to_watchlist(
-                    settings.trakt_client_id, settings.trakt_access_token,
+                    settings.trakt_client_id, token,
                     trakt_type, media.tmdb_id,
                 )
         else:
             if remove:
                 await trakt_client.remove_from_list(
-                    settings.trakt_client_id, settings.trakt_access_token,
+                    settings.trakt_client_id, token,
                     list_trakt_slug, trakt_type, media.tmdb_id,
                 )
             else:
                 await trakt_client.add_to_list(
-                    settings.trakt_client_id, settings.trakt_access_token,
+                    settings.trakt_client_id, token,
                     list_trakt_slug, trakt_type, media.tmdb_id,
                 )
     except Exception as exc:

@@ -44,6 +44,81 @@ TMDB_CONCURRENCY = 10
 TRAKT_HISTORY_OVERLAP = timedelta(minutes=5)
 TRAKT_HISTORY_PUSH_BATCH_SIZE = 100
 
+# Trakt device-auth access tokens live 7 days. Refresh once we're within this
+# of expiry so a job (or scrobble) that starts near the boundary doesn't race it.
+_TRAKT_TOKEN_REFRESH_SKEW = timedelta(days=1)
+
+
+class TraktTokenError(Exception):
+    """The stored Trakt token is unusable and can't be refreshed automatically -
+    the user needs to reconnect Trakt in Settings. The message is safe to show."""
+
+
+async def ensure_valid_trakt_token(
+    db: AsyncSession, settings: UserSettings | None, *, force_check: bool = False
+) -> str:
+    """Return a usable Trakt access token, refreshing and persisting it first if
+    it's expired or close to it. Raises TraktTokenError when Trakt isn't
+    connected or a needed refresh isn't possible / fails.
+
+    EVERY path that calls Trakt with the stored token must go through this. The
+    scheduled push used to skip it entirely and 401-loop for days once a week -
+    until a Settings-page visit happened to refresh the token as a side effect
+    (GitHub #326). The sync/pull path and the Settings status check did their
+    own inline validate-and-refresh; this consolidates all three.
+
+    force_check skips the "expiry is comfortably far off, trust it" fast path and
+    always hits Trakt - used by the Settings status check so a token revoked on
+    trakt.tv still shows as disconnected before it expires.
+    """
+    if not settings or not settings.trakt_access_token or not settings.trakt_client_id:
+        raise TraktTokenError("Trakt is not connected.")
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    expires_at = settings.trakt_token_expires_at
+    # Comfortably before a known expiry: trust the token, skip the round trip.
+    if not force_check and expires_at and expires_at - now > _TRAKT_TOKEN_REFRESH_SKEW.total_seconds():
+        return settings.trakt_access_token
+
+    if await trakt_client.validate_token(settings.trakt_client_id, settings.trakt_access_token):
+        return settings.trakt_access_token
+
+    if not (settings.trakt_refresh_token and settings.trakt_client_secret):
+        raise TraktTokenError("Trakt token expired. Please reconnect Trakt in Settings.")
+
+    try:
+        token_data = await trakt_client.refresh_access_token(
+            settings.trakt_client_id,
+            settings.trakt_client_secret,
+            settings.trakt_refresh_token,
+        )
+    except Exception as exc:
+        logger.warning("Trakt token refresh failed for user %s: %s", settings.user_id, exc)
+        raise TraktTokenError(f"Trakt token expired and the automatic refresh failed: {exc}") from exc
+
+    settings.trakt_access_token = token_data["access_token"]
+    settings.trakt_refresh_token = token_data["refresh_token"]
+    settings.trakt_token_expires_at = token_data.get("expires_in", 0) + int(
+        datetime.now(timezone.utc).timestamp()
+    )
+    await db.commit()
+    logger.info("Refreshed Trakt access token for user %s", settings.user_id)
+    return settings.trakt_access_token
+
+
+async def ensure_valid_trakt_token_for_user(user_id: int) -> str:
+    """ensure_valid_trakt_token with its own short-lived session. For callers
+    that run inside a concurrently-gathered push task or otherwise can't have a
+    token refresh commit their request session (the webhook scrobble path, the
+    sync fan-out) - same reasoning as _record_plex_pending_push in routers/sync.
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async with maker() as db:
+        settings = (
+            await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
+        ).scalar_one_or_none()
+        return await ensure_valid_trakt_token(db, settings)
+
 
 def _normalize_history_time(value: datetime | None) -> datetime | None:
     if value is None:
@@ -1123,32 +1198,15 @@ async def run_trakt_sync(user_id: int, job_id: int, full_resync: bool = False):
                 await db.commit()
                 return
 
-            # Refresh the access token if it has expired
-            if not await trakt_client.validate_token(settings.trakt_client_id, settings.trakt_access_token):
-                if settings.trakt_refresh_token and settings.trakt_client_secret:
-                    try:
-                        token_data = await trakt_client.refresh_access_token(
-                            settings.trakt_client_id,
-                            settings.trakt_client_secret,
-                            settings.trakt_refresh_token,
-                        )
-                        settings.trakt_access_token = token_data["access_token"]
-                        settings.trakt_refresh_token = token_data["refresh_token"]
-                        settings.trakt_token_expires_at = token_data.get("expires_in", 0) + int(datetime.now(timezone.utc).timestamp())
-                        await db.commit()
-                    except Exception as exc:
-                        err = f"Trakt token expired and refresh failed: {exc}"
-                        await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.failed, error_message=err))
-                        await db.commit()
-                        return
-                else:
-                    err = "Trakt token expired. Please reconnect Trakt in Settings."
-                    await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.failed, error_message=err))
-                    await db.commit()
-                    return
+            # Validate / refresh the access token (see ensure_valid_trakt_token).
+            try:
+                access_token = await ensure_valid_trakt_token(db, settings)
+            except TraktTokenError as exc:
+                await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.failed, error_message=str(exc)))
+                await db.commit()
+                return
 
             client_id = settings.trakt_client_id
-            access_token = settings.trakt_access_token
             _gs_result = await db.execute(select(GlobalSettings).where(GlobalSettings.id == 1))
             _gs = _gs_result.scalar_one_or_none()
             api_key = settings.tmdb_api_key or (_gs.tmdb_api_key if _gs else None)
@@ -1473,11 +1531,17 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                 select(UserSettings).where(UserSettings.user_id == user_id)
             )
             settings = settings_result.scalar_one_or_none()
-            if not settings or not settings.trakt_access_token or not settings.trakt_client_id:
+            # Validate / refresh the token before pushing. Skipping this is what
+            # made scheduled pushes 401-loop for days every 7 days (#326); the
+            # helper mutates settings.trakt_access_token in place on refresh, so
+            # the token reads further down pick up the new one automatically.
+            try:
+                await ensure_valid_trakt_token(db, settings)
+            except TraktTokenError as exc:
                 await db.execute(
                     update(SyncJob)
                     .where(SyncJob.id == job_id)
-                    .values(status=SyncStatus.failed, error_message="Trakt is not connected")
+                    .values(status=SyncStatus.failed, error_message=str(exc))
                 )
                 await db.commit()
                 return

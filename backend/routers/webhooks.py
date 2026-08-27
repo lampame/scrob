@@ -57,6 +57,18 @@ async def _maybe_trakt_scrobble(
 
     progress = min(100.0, round(progress_percent * 100, 1))
 
+    # Refresh the token if needed before scrobbling - real-time scrobbles used
+    # the stored token as-is and broke for a week at a time when it expired
+    # (#326). Uses its own session so a refresh's commit can't touch the
+    # webhook request's in-flight transaction.
+    from routers.trakt import ensure_valid_trakt_token_for_user
+    try:
+        access_token = await ensure_valid_trakt_token_for_user(settings.user_id)
+    except Exception as exc:  # scrobbles are best-effort - never raise
+        import logging
+        logging.getLogger(__name__).warning("[Trakt scrobble] %s skipped: %s", action, exc)
+        return
+
     try:
         if media.media_type == MediaType.movie:
             year: int | None = None
@@ -66,7 +78,7 @@ async def _maybe_trakt_scrobble(
                 except (ValueError, TypeError):
                     pass
             await trakt_client.scrobble_movie(
-                settings.trakt_client_id, settings.trakt_access_token,
+                settings.trakt_client_id, access_token,
                 action=action,
                 tmdb_id=media.tmdb_id,
                 progress=progress,
@@ -80,7 +92,7 @@ async def _maybe_trakt_scrobble(
             else:
                 show = media.show
             await trakt_client.scrobble_episode(
-                settings.trakt_client_id, settings.trakt_access_token,
+                settings.trakt_client_id, access_token,
                 action=action,
                 season_number=media.season_number,
                 episode_number=media.episode_number,

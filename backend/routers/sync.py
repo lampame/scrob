@@ -1234,6 +1234,18 @@ async def _fan_out_changes_to_other_connections(
     push_trakt_collection = settings and exclude_cloud_source != CollectionSource.trakt and settings.trakt_push_collection and settings.trakt_access_token and settings.trakt_client_id
 
     if (push_trakt_watched or push_trakt_ratings or push_trakt_collection) and all_changed_ids:
+        # Validate / refresh the token before the fan-out (own session - this
+        # runs amid concurrently-gathered push tasks). Skipping this let the
+        # token expire unnoticed and stall Trakt pushes for days (#326). On
+        # failure, disable every Trakt sub-push below.
+        from routers.trakt import ensure_valid_trakt_token_for_user
+        try:
+            trakt_access_token = await ensure_valid_trakt_token_for_user(user_id)
+        except Exception as exc:  # best-effort fan-out - don't fail the whole sync
+            logger.warning("Skipping Trakt fan-out for user %s: %s", user_id, exc)
+            trakt_access_token = None
+            push_trakt_watched = push_trakt_ratings = push_trakt_collection = False
+
         trakt_history_movies: list[tuple[int, datetime | None]] = []
         trakt_history_episodes: list[tuple[int, int, int, datetime | None]] = []
         if push_trakt_watched:
@@ -1252,7 +1264,7 @@ async def _fan_out_changes_to_other_connections(
 
         if trakt_history_movies or trakt_history_episodes:
             push_tasks.append(trakt_client.add_to_history_batch(
-                settings.trakt_client_id, settings.trakt_access_token,
+                settings.trakt_client_id, trakt_access_token,
                 trakt_history_movies, trakt_history_episodes,
             ))
 
@@ -1272,7 +1284,7 @@ async def _fan_out_changes_to_other_connections(
 
             if trakt_collection_add_movies or trakt_collection_add_episodes:
                 push_tasks.append(trakt_client.add_to_collection_batch(
-                    settings.trakt_client_id, settings.trakt_access_token,
+                    settings.trakt_client_id, trakt_access_token,
                     trakt_collection_add_movies, trakt_collection_add_episodes,
                 ))
 
@@ -1291,7 +1303,7 @@ async def _fan_out_changes_to_other_connections(
 
             if trakt_collection_remove_movies or trakt_collection_remove_episodes:
                 push_tasks.append(trakt_client.remove_from_collection_batch(
-                    settings.trakt_client_id, settings.trakt_access_token,
+                    settings.trakt_client_id, trakt_access_token,
                     trakt_collection_remove_movies, trakt_collection_remove_episodes,
                 ))
 
@@ -1322,7 +1334,7 @@ async def _fan_out_changes_to_other_connections(
             push_tasks.append(
                 trakt_client.set_ratings_batch(
                     settings.trakt_client_id,
-                    settings.trakt_access_token,
+                    trakt_access_token,
                     trakt_movie_ratings,
                     trakt_show_ratings,
                     trakt_season_ratings,
@@ -1349,7 +1361,7 @@ async def _fan_out_changes_to_other_connections(
                 push_tasks.append(
                     trakt_client.remove_ratings_batch(
                         settings.trakt_client_id,
-                        settings.trakt_access_token,
+                        trakt_access_token,
                         removed_trakt_movies,
                         removed_trakt_shows,
                         removed_trakt_seasons,

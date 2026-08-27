@@ -1125,26 +1125,14 @@ async def get_connection_status(
         return {"configured": True, "connected": True, "quality_profiles": quality_profiles, "root_folders": root_folders, "tags": tags}
 
     async def check_trakt():
-        from core import trakt as trakt_client
-        from datetime import datetime, timezone
+        from routers.trakt import TraktTokenError, ensure_valid_trakt_token
         if not user_settings or not (user_settings.trakt_access_token and user_settings.trakt_client_id):
             return {"configured": False, "connected": False}
-        connected = await trakt_client.validate_token(user_settings.trakt_client_id, user_settings.trakt_access_token)
-        if not connected and user_settings.trakt_refresh_token and user_settings.trakt_client_secret:
-            try:
-                token_data = await trakt_client.refresh_access_token(
-                    user_settings.trakt_client_id,
-                    user_settings.trakt_client_secret,
-                    user_settings.trakt_refresh_token,
-                )
-                user_settings.trakt_access_token = token_data["access_token"]
-                user_settings.trakt_refresh_token = token_data["refresh_token"]
-                user_settings.trakt_token_expires_at = token_data.get("expires_in", 0) + int(datetime.now(timezone.utc).timestamp())
-                await db.commit()
-                connected = True
-            except Exception:
-                pass
-        return {"configured": True, "connected": connected}
+        try:
+            await ensure_valid_trakt_token(db, user_settings, force_check=True)
+            return {"configured": True, "connected": True}
+        except TraktTokenError:
+            return {"configured": True, "connected": False}
 
     async def check_media_server(conn):
         from core import arvio, jellyfin, nuvio, plex, stremio

@@ -562,6 +562,58 @@ class PushWatchStateEchoSuppressionTests(unittest.IsolatedAsyncioTestCase):
         reg.assert_not_called()
 
 
+class PushWatchStateTraktTokenTests(unittest.IsolatedAsyncioTestCase):
+    """#326: the Trakt history fan-out on a manual mark-watched must go through
+    ensure_valid_trakt_token, not use the stored token blindly."""
+
+    def _settings(self, **overrides):
+        base = dict(
+            trakt_push_watched=True,
+            trakt_access_token="tok",
+            trakt_client_id="cid",
+            trakt_client_secret=None,
+            trakt_refresh_token=None,
+            trakt_token_expires_at=9_999_999_999,
+            trakt_push_collection=False,
+            trakt_push_ratings=False,
+            simkl_push_watched=False,
+            simkl_access_token=None,
+            simkl_client_id=None,
+            mdblist_push_watched=False,
+            mdblist_api_key=None,
+        )
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def _movie(self):
+        return SimpleNamespace(
+            id=5, tmdb_id=550, media_type=MediaType.movie,
+            show_id=None, season_number=None, episode_number=None, tmdb_data=None,
+        )
+
+    async def test_valid_token_is_passed_to_the_trakt_history_push(self):
+        db = _FakeSession([[], self._settings(), [self._movie()]])
+        add_movie = AsyncMock()
+        with patch("routers.history.trakt_client.add_movie_to_history", add_movie):
+            await history._push_watch_state(
+                db, user_id=1, media_ids=[5], watched=True,
+                watched_at_by_media={5: datetime(2024, 1, 1)},
+            )
+        add_movie.assert_awaited_once()
+        self.assertEqual(add_movie.await_args.args[1], "tok")
+
+    async def test_unrefreshable_token_skips_the_trakt_push(self):
+        db = _FakeSession([[], self._settings(trakt_token_expires_at=1), [self._movie()]])
+        add_movie = AsyncMock()
+        with patch("routers.history.trakt_client.add_movie_to_history", add_movie), \
+             patch("routers.trakt.trakt_client.validate_token", AsyncMock(return_value=False)):
+            await history._push_watch_state(
+                db, user_id=1, media_ids=[5], watched=True,
+                watched_at_by_media={5: datetime(2024, 1, 1)},
+            )
+        add_movie.assert_not_awaited()
+
+
 class RatePromptTests(unittest.IsolatedAsyncioTestCase):
     """#177: /history/rate-prompt decides whether the homepage shows a
     "rate it now" popup when a session drops off the Now Playing bar."""

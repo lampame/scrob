@@ -167,7 +167,15 @@ async def _push_watch_state(
                     else:
                         tasks.append((f"simkl remove episode {show.tmdb_id} S{media.season_number}E{media.episode_number}", simkl_client.remove_episode_from_history(settings.simkl_client_id, settings.simkl_access_token, show.tmdb_id, media.season_number, media.episode_number)))
 
+    trakt_token: str | None = None
     if push_trakt and settings.trakt_client_id:
+        from routers.trakt import TraktTokenError, ensure_valid_trakt_token
+        try:
+            trakt_token = await ensure_valid_trakt_token(db, settings)
+        except TraktTokenError as exc:
+            logger.warning("Skipping Trakt history push for user %s: %s", user_id, exc)
+
+    if trakt_token:
         media_res = await db.execute(
             select(Media).where(Media.id.in_(media_ids))
         )
@@ -177,17 +185,17 @@ async def _push_watch_state(
                 continue
             if media.media_type == MediaType.movie:
                 if watched:
-                    tasks.append((f"trakt add movie {media.tmdb_id}", trakt_client.add_movie_to_history(settings.trakt_client_id, settings.trakt_access_token, media.tmdb_id, resolved_watched_at.get(media.id))))
+                    tasks.append((f"trakt add movie {media.tmdb_id}", trakt_client.add_movie_to_history(settings.trakt_client_id, trakt_token, media.tmdb_id, resolved_watched_at.get(media.id))))
                 else:
-                    tasks.append((f"trakt remove movie {media.tmdb_id}", trakt_client.remove_movie_from_history(settings.trakt_client_id, settings.trakt_access_token, media.tmdb_id)))
+                    tasks.append((f"trakt remove movie {media.tmdb_id}", trakt_client.remove_movie_from_history(settings.trakt_client_id, trakt_token, media.tmdb_id)))
             elif media.media_type == MediaType.episode and media.show_id and media.season_number is not None and media.episode_number is not None:
                 show_res = await db.execute(select(Show).where(Show.id == media.show_id))
                 show = show_res.scalar_one_or_none()
                 if show and show.tmdb_id:
                     if watched:
-                        tasks.append((f"trakt add episode {show.tmdb_id} S{media.season_number}E{media.episode_number}", trakt_client.add_episode_to_history(settings.trakt_client_id, settings.trakt_access_token, show.tmdb_id, media.season_number, media.episode_number, resolved_watched_at.get(media.id))))
+                        tasks.append((f"trakt add episode {show.tmdb_id} S{media.season_number}E{media.episode_number}", trakt_client.add_episode_to_history(settings.trakt_client_id, trakt_token, show.tmdb_id, media.season_number, media.episode_number, resolved_watched_at.get(media.id))))
                     else:
-                        tasks.append((f"trakt remove episode {show.tmdb_id} S{media.season_number}E{media.episode_number}", trakt_client.remove_episode_from_history(settings.trakt_client_id, settings.trakt_access_token, show.tmdb_id, media.season_number, media.episode_number)))
+                        tasks.append((f"trakt remove episode {show.tmdb_id} S{media.season_number}E{media.episode_number}", trakt_client.remove_episode_from_history(settings.trakt_client_id, trakt_token, show.tmdb_id, media.season_number, media.episode_number)))
 
     if push_mdblist:
         from core import mdblist as mdblist_client
@@ -1276,17 +1284,19 @@ async def unhide_next_up_show(
     return {"status": "ok"}
 
 
-async def _push_show_dropped_to_providers(settings: UserSettings, tmdb_id: int, *, remove: bool) -> None:
+async def _push_show_dropped_to_providers(db: AsyncSession, settings: UserSettings, tmdb_id: int, *, remove: bool) -> None:
     """Best-effort push of a show's dropped state to Trakt/MDBList - never
     raises, mirrors _push_list_item_to_trakt's error-swallowing pattern
     (routers/lists.py) since a failed provider push shouldn't block the local
     drop/undrop action itself."""
     if settings.trakt_push_dropped and settings.trakt_access_token and settings.trakt_client_id:
         try:
+            from routers.trakt import ensure_valid_trakt_token
+            token = await ensure_valid_trakt_token(db, settings)
             if remove:
-                await trakt_client.remove_from_hidden(settings.trakt_client_id, settings.trakt_access_token, "dropped", tmdb_id)
+                await trakt_client.remove_from_hidden(settings.trakt_client_id, token, "dropped", tmdb_id)
             else:
-                await trakt_client.add_to_hidden(settings.trakt_client_id, settings.trakt_access_token, "dropped", tmdb_id)
+                await trakt_client.add_to_hidden(settings.trakt_client_id, token, "dropped", tmdb_id)
         except Exception as exc:
             logger.warning("Failed to push dropped show to Trakt (tmdb_id=%s, remove=%s): %s", tmdb_id, remove, exc)
 
@@ -1331,7 +1341,7 @@ async def drop_show(
     show_result = await db.execute(select(Show).where(Show.id == body.show_id))
     show = show_result.scalar_one_or_none()
     if show and show.tmdb_id:
-        await _push_show_dropped_to_providers(settings, show.tmdb_id, remove=False)
+        await _push_show_dropped_to_providers(db, settings, show.tmdb_id, remove=False)
     return {"status": "ok"}
 
 
@@ -1355,7 +1365,7 @@ async def undrop_show(
     show_result = await db.execute(select(Show).where(Show.id == show_id))
     show = show_result.scalar_one_or_none()
     if show and show.tmdb_id:
-        await _push_show_dropped_to_providers(settings, show.tmdb_id, remove=True)
+        await _push_show_dropped_to_providers(db, settings, show.tmdb_id, remove=True)
     return {"status": "ok"}
 
 
