@@ -504,6 +504,64 @@ class ClearHistoryTests(unittest.IsolatedAsyncioTestCase):
         db.commit.assert_awaited_once()
 
 
+class PushWatchStateEchoSuppressionTests(unittest.IsolatedAsyncioTestCase):
+    """#324: a manual mark-watched with a backdated date got duplicated - the
+    Jellyfin/Emby push echoes straight back via UserDataSaved, and the
+    backdated watched_at slips past _write_watch_event's recent-event guard.
+    Fix: register the push with mark_pushed_watched so the echo is caught."""
+
+    def _fixture(self, conn_type):
+        conn = SimpleNamespace(id=1, type=conn_type, url="http://srv.local",
+                               token="t", server_user_id="u1")
+        cf = SimpleNamespace(source=CollectionSource[conn_type], source_id="item-1")
+        # query order: 1. connections, 2. settings, 3. collection files
+        return _FakeSession([[conn], None, [(cf, 42)]])
+
+    async def test_jellyfin_watched_push_registers_for_echo_suppression(self):
+        registered: list[tuple[int, int]] = []
+
+        async def fake_mark_watched(url, token, user_id, source_id):
+            return True
+
+        with patch("routers.history.jellyfin_client.mark_watched", fake_mark_watched), \
+             patch("routers.webhooks.mark_pushed_watched",
+                   side_effect=lambda uid, mid: registered.append((uid, mid))):
+            await history._push_watch_state(
+                self._fixture("jellyfin"), user_id=7, media_ids=[42], watched=True,
+                watched_at_by_media={42: datetime(2020, 1, 1)},
+            )
+
+        self.assertEqual(registered, [(7, 42)])
+
+    async def test_emby_watched_push_registers_for_echo_suppression(self):
+        registered: list[tuple[int, int]] = []
+
+        async def fake_mark_watched(url, token, user_id, source_id):
+            return True
+
+        with patch("routers.history.emby_client.mark_watched", fake_mark_watched), \
+             patch("routers.webhooks.mark_pushed_watched",
+                   side_effect=lambda uid, mid: registered.append((uid, mid))):
+            await history._push_watch_state(
+                self._fixture("emby"), user_id=7, media_ids=[42], watched=True,
+                watched_at_by_media={42: datetime(2020, 1, 1)},
+            )
+
+        self.assertEqual(registered, [(7, 42)])
+
+    async def test_unwatch_push_does_not_register(self):
+        async def fake_mark_unwatched(url, token, user_id, source_id):
+            return True
+
+        with patch("routers.history.jellyfin_client.mark_unwatched", fake_mark_unwatched), \
+             patch("routers.webhooks.mark_pushed_watched") as reg:
+            await history._push_watch_state(
+                self._fixture("jellyfin"), user_id=7, media_ids=[42], watched=False,
+            )
+
+        reg.assert_not_called()
+
+
 class RatePromptTests(unittest.IsolatedAsyncioTestCase):
     """#177: /history/rate-prompt decides whether the homepage shows a
     "rate it now" popup when a session drops off the Now Playing bar."""

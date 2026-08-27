@@ -93,6 +93,13 @@ async def _push_watch_state(
             await _record_plex_pending_push(uid, mid)
         return ok
 
+    # Jellyfin/Emby's UserDataSaved webhook echoes an outbound mark-watched
+    # straight back, and a backdated watched_at slips past _write_watch_event's
+    # recent-event guard - so each such push is registered here so the echo is
+    # recognised as our own, not a second play stamped "now" (GitHub #324).
+    # Mirrors the same registration in routers/sync.py's fan-out.
+    from routers.webhooks import mark_pushed_watched
+
     if connections:
         files_result = await db.execute(
             select(CollectionFile, Collection.media_id)
@@ -122,12 +129,14 @@ async def _push_watch_state(
                 elif coll_file.source == CollectionSource.jellyfin:
                     label = f"jellyfin connection {conn.id}"
                     if watched:
+                        mark_pushed_watched(user_id, coll_media_id)
                         tasks.append((label, jellyfin_client.mark_watched(conn.url, conn.token, conn.server_user_id, coll_file.source_id)))
                     else:
                         tasks.append((label, jellyfin_client.mark_unwatched(conn.url, conn.token, conn.server_user_id, coll_file.source_id)))
                 elif coll_file.source == CollectionSource.emby:
                     label = f"emby connection {conn.id}"
                     if watched:
+                        mark_pushed_watched(user_id, coll_media_id)
                         tasks.append((label, emby_client.mark_watched(conn.url, conn.token, conn.server_user_id, coll_file.source_id)))
                     else:
                         tasks.append((label, emby_client.mark_unwatched(conn.url, conn.token, conn.server_user_id, coll_file.source_id)))
