@@ -178,6 +178,8 @@ const originalLanguage = show?.original_language
                   requestEnabled={show.request_enabled ?? false}
                   requestStatus={show.request_status ?? null}
                   userRating={show.user_rating ?? null}
+                  ratingTitle={show.title}
+                  ratingPosterPath={show.poster_path}
                   showRewatch={true}
                   rewatch={show.rewatch ?? null}
                   showDrop={true}
@@ -317,6 +319,9 @@ const originalLanguage = show?.original_language
                         hideRequest={true}
                         hideLists={false}
                         userRating={seasonState.user_rating ?? null}
+                        ratingTitle={show.title}
+                        ratingSubtitle={s.name || `Season ${seasonNum}`}
+                        ratingPosterPath={poster}
                       />
                     )}
                   </div>

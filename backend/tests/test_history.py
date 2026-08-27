@@ -542,15 +542,25 @@ class RatePromptTests(unittest.IsolatedAsyncioTestCase):
         out = await self._call([self._movie(), self._settings(movies=True), 99, 5])
         self.assertFalse(out["should_prompt"])
 
-    async def test_episode_uses_show_title_and_poster(self):
+    async def test_episode_uses_show_title_and_still_then_show_poster(self):
         episode = SimpleNamespace(
             id=10, tmdb_id=42, media_type=MediaType.episode, title="Pilot",
-            season_number=1, episode_number=1, poster_path="/ep.jpg",
+            season_number=1, episode_number=1, poster_path="/ep-still.jpg",
             show=SimpleNamespace(title="The Show", poster_path="/show.jpg"),
         )
         out = await self._call([episode, self._settings(episodes=True), 99, None])
         self.assertTrue(out["should_prompt"])
         self.assertEqual(out["media"]["show_title"], "The Show")
+        # Episode still first, show poster only as fallback.
+        self.assertEqual(out["media"]["poster_path"], "/ep-still.jpg")
+
+    async def test_episode_falls_back_to_show_poster_without_still(self):
+        episode = SimpleNamespace(
+            id=10, tmdb_id=42, media_type=MediaType.episode, title="Pilot",
+            season_number=1, episode_number=1, poster_path=None,
+            show=SimpleNamespace(title="The Show", poster_path="/show.jpg"),
+        )
+        out = await self._call([episode, self._settings(episodes=True), 99, None])
         self.assertEqual(out["media"]["poster_path"], "/show.jpg")
 
 

@@ -30,6 +30,14 @@ const rating = item?.tmdb_rating ? item.tmdb_rating.toFixed(1) : null;
 const isEpisode = item?.type === "episode";
 const isMovie = item?.type === "movie";
 const collection = item?.collection;
+
+// Header for the shared rating popover (shown once the modal dims the page).
+// ActionBar prefixes the SxxExx itself, so pass just the episode name here.
+const rateTitle = isEpisode ? (item?.show_title ?? item?.title) : item?.title;
+const rateSubtitle = isEpisode ? (item?.title ?? "") : "";
+// Episode: the landscape still (ActionBar flags episodes landscape), show
+// poster as fallback. Movie: its poster.
+const ratePosterPath = isEpisode ? (item?.poster_path ?? item?.show_poster_path) : item?.poster_path;
 const showRefreshBtn = !!user && item?.in_library && (item.type === "movie" || (isEpisode && !!item.show_tmdb_id));
 
 const today = new Date();
@@ -230,6 +238,9 @@ const refreshUrl = isEpisode
                   requestStatus={item.request_status ?? null}
                   mediaId={item.id}
                   userRating={item.user_rating ?? null}
+                  ratingTitle={rateTitle}
+                  ratingSubtitle={rateSubtitle}
+                  ratingPosterPath={ratePosterPath}
                   showDrop={item.type === 'movie'}
                   dropped={item.dropped ?? false}
                 />

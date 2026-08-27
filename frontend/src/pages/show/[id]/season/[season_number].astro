@@ -153,6 +153,9 @@ const show = season?.show;
                   requestEnabled={false}
                   hideLists={false}
                   userRating={season.season_user_rating ?? null}
+                  ratingTitle={show?.title}
+                  ratingSubtitle={season.name || `Season ${season_number}`}
+                  ratingPosterPath={season.poster_path || show?.poster_path}
                 />
               </div>
             )}
@@ -270,6 +273,9 @@ const show = season?.show;
                       hideRequest={true}
                       userRating={ep.user_rating}
                       airDate={ep.air_date}
+                      ratingTitle={show?.title}
+                      ratingSubtitle={ep.title}
+                      ratingPosterPath={ep.poster_path || season.poster_path || show?.poster_path}
                     />
                   </div>
                 )}

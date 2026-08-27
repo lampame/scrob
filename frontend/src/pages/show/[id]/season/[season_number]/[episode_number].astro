@@ -179,6 +179,9 @@ const thumbnail = episode?.still_path || show?.poster_path || null;
                   episodeNumber={Number(episode_number)}
                   mediaId={episode.id ?? null}
                   userRating={episode.user_rating ?? null}
+                  ratingTitle={show?.title}
+                  ratingSubtitle={episode.title}
+                  ratingPosterPath={episode.still_path || episode.season?.poster_path || show?.poster_path}
                 />
               </div>
             )}

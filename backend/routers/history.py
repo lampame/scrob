@@ -571,6 +571,9 @@ async def rate_prompt(
         return none_response
 
     show = media.show if media.media_type == MediaType.episode else None
+    # Episodes: the still (media.poster_path) shown landscape in the popup, show
+    # poster as the fallback. Movies: their own poster.
+    poster = media.poster_path or (show.poster_path if show else None)
     return {
         "should_prompt": True,
         "media": {
@@ -581,7 +584,7 @@ async def rate_prompt(
             "show_title": show.title if show else None,
             "season_number": media.season_number,
             "episode_number": media.episode_number,
-            "poster_path": (show.poster_path if show else None) or media.poster_path,
+            "poster_path": poster,
         },
     }
 

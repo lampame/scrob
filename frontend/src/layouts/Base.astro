@@ -328,7 +328,7 @@ const bottomNavItem = (active: boolean) =>
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
-      <div id="rating-popover-item" class="hidden px-5 py-4 border-b border-zinc-800 flex items-center gap-3">
+      <div id="rating-popover-item" class="hidden px-5 py-4 border-b border-zinc-800 flex items-center gap-4">
         <img id="rating-popover-poster" src="" alt="" class="hidden shrink-0 w-10 h-14 rounded object-cover bg-zinc-800" />
         <div class="min-w-0">
           <p id="rating-popover-item-title" class="text-sm font-semibold text-zinc-100 truncate"></p>
@@ -945,7 +945,7 @@ const bottomNavItem = (active: boolean) =>
       currentRating: number | null,
       seasonNumber: number | null = null,
       episodeOrder: string = 'tmdb',
-      itemInfo: { title?: string; subtitle?: string; posterUrl?: string } | null = null,
+      itemInfo: { title?: string; subtitle?: string; posterUrl?: string; landscape?: boolean } | null = null,
     ) {
       _activeRatingBtn = btn;
       const popover = document.getElementById('rating-popover')!;
@@ -964,10 +964,13 @@ const bottomNavItem = (active: boolean) =>
         itemSubEl.classList.toggle('hidden', !itemInfo.subtitle);
         if (itemInfo.posterUrl) {
           itemPosterEl.src = itemInfo.posterUrl;
-          itemPosterEl.classList.remove('hidden');
+          // Episodes use a landscape still; everything else a portrait poster.
+          itemPosterEl.className = itemInfo.landscape
+            ? 'shrink-0 w-[4.75rem] h-[2.75rem] rounded object-cover bg-zinc-800'
+            : 'shrink-0 w-10 h-14 rounded object-cover bg-zinc-800';
         } else {
           itemPosterEl.removeAttribute('src');
-          itemPosterEl.classList.add('hidden');
+          itemPosterEl.className = 'hidden';
         }
         itemEl.classList.remove('hidden');
       } else {
@@ -1061,11 +1064,11 @@ const bottomNavItem = (active: boolean) =>
     // rated); we just render it. sessionStorage stops a re-poll from re-asking.
     function ratingPosterUrl(path: string | null | undefined): string | undefined {
       if (!path) return undefined;
-      if (path.startsWith('http://') || path.startsWith('https://')) {
-        const m = /image\.tmdb\.org\/t\/p\/([^/]+)(\/.+)$/.exec(path);
-        return m ? `/api/proxy/media/image/${m[1]}${m[2]}` : path;
-      }
-      return `/api/proxy/media/image/w185${path.startsWith('/') ? path : '/' + path}`;
+      // Pass full URLs straight through: detail pages render posters/stills
+      // from the same image.tmdb.org URL, so an untouched value here is a
+      // browser cache hit instead of a fresh fetch of a proxied copy.
+      if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('/api/proxy/')) return path;
+      return `https://image.tmdb.org/t/p/w500${path.startsWith('/') ? path : '/' + path}`;
     }
 
     function showRatePromptPopover(m: any) {
@@ -1077,6 +1080,7 @@ const bottomNavItem = (active: boolean) =>
         title: isEpisode ? (m.show_title ?? m.title) : m.title,
         subtitle: isEpisode ? [sxe, m.title].filter(Boolean).join(' · ') : undefined,
         posterUrl: ratingPosterUrl(m.poster_path),
+        landscape: isEpisode,
       });
     }
 
@@ -2026,8 +2030,19 @@ const bottomNavItem = (active: boolean) =>
       } else if (action === 'rate') {
         const currentRating = btn.dataset.userRating ? Number(btn.dataset.userRating) : null;
         const ratingSeason = (mediaType === 'series' && card.dataset.season) ? Number(card.dataset.season) : null;
+        // Cards (MediaCard/EpisodeCard) and detail-page ActionBars set data-rate-*
+        // so the popover header can name what's being rated once the modal dims
+        // the page. Absent = no header, same as before.
+        const rateInfo = card.dataset.rateTitle
+          ? {
+              title: card.dataset.rateTitle,
+              subtitle: card.dataset.rateSubtitle || undefined,
+              posterUrl: ratingPosterUrl(card.dataset.ratePoster),
+              landscape: card.dataset.rateLandscape === 'true',
+            }
+          : null;
         if (document.getElementById('rating-popover')!.classList.contains('hidden') || _activeRatingBtn !== btn) {
-          openRatingPopover(btn, tmdbId, mediaType, currentRating, ratingSeason, episodeOrder);
+          openRatingPopover(btn, tmdbId, mediaType, currentRating, ratingSeason, episodeOrder, rateInfo);
         } else {
           closeRatingPopover();
         }

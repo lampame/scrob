@@ -28,6 +28,11 @@ interface Props {
   showDrop?: boolean;
   showId?: number | null;
   dropped?: boolean;
+  // Poster + title/subtitle shown in the shared rating popover's header, so
+  // it's clear what's being rated once the modal dims the page behind it.
+  ratingTitle?: string;
+  ratingSubtitle?: string;
+  ratingPosterPath?: string | null;
 }
 
 const {
@@ -59,11 +64,23 @@ const {
   showDrop = false,
   showId = null,
   dropped = false,
+  ratingTitle,
+  ratingSubtitle,
+  ratingPosterPath,
 } = Astro.props;
 
 const isSeries = mediaType === "series";
 const showRequest = !hideRequest && requestEnabled && (mediaType === "movie" || mediaType === "series");
 const ratingLabel = userRating != null ? userRating.toFixed(1) : "Rate";
+
+// Rating-popover header subtitle: callers pass the episode/season name in
+// ratingSubtitle; for an episode we prefix the SxxExx from the numbers we
+// already have so every call site stays a one-liner.
+const _rateSeason = displaySeasonNumber ?? seasonNumber;
+const _rateSxe = mediaType === "episode" && _rateSeason != null && episodeNumber != null
+  ? `S${String(_rateSeason).padStart(2, "0")}E${String(episodeNumber).padStart(2, "0")}`
+  : null;
+const ratingSubtitleFull = [_rateSxe, ratingSubtitle].filter(Boolean).join(" · ");
 
 // Shared button classes
 const btn = "flex flex-col items-center justify-center gap-0.5 md:gap-1.5 px-2 py-3 md:py-3.5 transition-all cursor-pointer";
@@ -135,6 +152,10 @@ const dropTitle = dropped
   data-tvdb-id={tvdbId != null ? String(tvdbId) : ""}
   data-display-season={displaySeasonNumber != null ? String(displaySeasonNumber) : ""}
   data-media-id={mediaId != null ? String(mediaId) : ""}
+  data-rate-title={ratingTitle ?? ""}
+  data-rate-subtitle={ratingSubtitleFull}
+  data-rate-poster={ratingPosterPath ?? ""}
+  data-rate-landscape={mediaType === "episode" ? "true" : ""}
   class="flex w-fit"
 >
   <div class="flex flex-row rounded-2xl overflow-hidden border border-zinc-800 shadow-lg min-h-[52px] md:min-h-[64px] w-fit">

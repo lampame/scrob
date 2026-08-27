@@ -156,6 +156,9 @@ const seasonTitle = season
                   requestEnabled={false}
                   hideLists={false}
                   userRating={season.season_user_rating}
+                  ratingTitle={show?.title}
+                  ratingSubtitle={seasonTitle}
+                  ratingPosterPath={season.poster_path || show?.poster_path}
                 />
               </div>
             )}
@@ -272,6 +275,9 @@ const seasonTitle = season
                         tvdbId={Number(id)}
                         hideRequest={true}
                         userRating={ep.user_rating}
+                        ratingTitle={show?.title}
+                        ratingSubtitle={ep.name || `Episode ${ep.episode_number}`}
+                        ratingPosterPath={ep.image_url || season?.poster_path || show?.poster_path}
                       />
                     )}
                   </div>
