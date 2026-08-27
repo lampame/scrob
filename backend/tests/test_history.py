@@ -504,5 +504,55 @@ class ClearHistoryTests(unittest.IsolatedAsyncioTestCase):
         db.commit.assert_awaited_once()
 
 
+class RatePromptTests(unittest.IsolatedAsyncioTestCase):
+    """#177: /history/rate-prompt decides whether the homepage shows a
+    "rate it now" popup when a session drops off the Now Playing bar."""
+
+    def _settings(self, *, movies=False, episodes=False):
+        return SimpleNamespace(rate_prompt_movies=movies, rate_prompt_episodes=episodes)
+
+    def _movie(self):
+        return SimpleNamespace(
+            id=10, tmdb_id=550, media_type=MediaType.movie, title="Fight Club",
+            season_number=None, episode_number=None, poster_path="/fc.jpg", show=None,
+        )
+
+    async def _call(self, results):
+        with patch("routers.history.is_unmapped_tvdb_episode", return_value=False):
+            return await history.rate_prompt(
+                media_id=10, db=_FakeSession(results), current_user=SimpleNamespace(id=7),
+            )
+
+    async def test_prompts_for_opted_in_recent_unrated_movie(self):
+        out = await self._call([self._movie(), self._settings(movies=True), 99, None])
+        self.assertTrue(out["should_prompt"])
+        self.assertEqual(out["media"]["tmdb_id"], 550)
+        self.assertEqual(out["media"]["type"], "movie")
+
+    async def test_no_prompt_when_opted_out(self):
+        out = await self._call([self._movie(), self._settings(movies=False), 99, None])
+        self.assertFalse(out["should_prompt"])
+        self.assertIsNone(out["media"])
+
+    async def test_no_prompt_without_recent_completion(self):
+        out = await self._call([self._movie(), self._settings(movies=True), None, None])
+        self.assertFalse(out["should_prompt"])
+
+    async def test_no_prompt_when_already_rated(self):
+        out = await self._call([self._movie(), self._settings(movies=True), 99, 5])
+        self.assertFalse(out["should_prompt"])
+
+    async def test_episode_uses_show_title_and_poster(self):
+        episode = SimpleNamespace(
+            id=10, tmdb_id=42, media_type=MediaType.episode, title="Pilot",
+            season_number=1, episode_number=1, poster_path="/ep.jpg",
+            show=SimpleNamespace(title="The Show", poster_path="/show.jpg"),
+        )
+        out = await self._call([episode, self._settings(episodes=True), 99, None])
+        self.assertTrue(out["should_prompt"])
+        self.assertEqual(out["media"]["show_title"], "The Show")
+        self.assertEqual(out["media"]["poster_path"], "/show.jpg")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -141,6 +141,10 @@ class UserSettings(Base):
     dropped_shows  : Mapped[Optional[list[int]]] = mapped_column(JSONB, server_default="'[]'")
     dropped_movies : Mapped[Optional[list[int]]] = mapped_column(JSONB, server_default="'[]'")
     hide_watched_from_recently_added : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Prompt to rate an item right after it finishes playing (homepage Now
+    # Playing bar drops the session -> star-rating popup), separately per type (#177).
+    rate_prompt_movies   : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    rate_prompt_episodes : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     # MDBList — API key authentication
     mdblist_api_key: Mapped[Optional[str]] = mapped_column(String(255))

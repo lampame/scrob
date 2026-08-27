@@ -328,6 +328,13 @@ const bottomNavItem = (active: boolean) =>
           <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
+      <div id="rating-popover-item" class="hidden px-5 py-4 border-b border-zinc-800 flex items-center gap-3">
+        <img id="rating-popover-poster" src="" alt="" class="hidden shrink-0 w-10 h-14 rounded object-cover bg-zinc-800" />
+        <div class="min-w-0">
+          <p id="rating-popover-item-title" class="text-sm font-semibold text-zinc-100 truncate"></p>
+          <p id="rating-popover-item-sub" class="hidden text-xs text-zinc-400 truncate mt-0.5"></p>
+        </div>
+      </div>
       <div class="px-6 py-7">
         <div id="rating-stars" class="flex items-center justify-center gap-2"></div>
       </div>
@@ -737,6 +744,11 @@ const bottomNavItem = (active: boolean) =>
       });
     }
 
+    // session_key -> media, from the previous poll. A key that was here and is
+    // now gone means that playback session just ended - the trigger for the
+    // "rate it now" prompt (#177), handled by a listener in the module script.
+    let _npPrev = new Map();
+
     async function pollNowPlaying() {
       const container = document.getElementById('now-playing-section');
       if (!container) return;
@@ -746,8 +758,18 @@ const bottomNavItem = (active: boolean) =>
         });
         if (!res.ok) return;
         const data = await res.json();
-        const html = renderNowPlaying(data.now_playing ?? []);
-        container.innerHTML = html;
+        const sessions = data.now_playing ?? [];
+        container.innerHTML = renderNowPlaying(sessions);
+
+        const liveKeys = new Set(sessions.map(s => s.session_key));
+        for (const [key, media] of _npPrev) {
+          if (!liveKeys.has(key)) {
+            document.dispatchEvent(new CustomEvent('scrob:playback-ended', { detail: { media } }));
+          }
+        }
+        _npPrev = new Map(
+          sessions.filter(s => s.session_key).map(s => [s.session_key, s.media]),
+        );
       } catch { /* ignore */ }
     }
 
@@ -901,17 +923,56 @@ const bottomNavItem = (active: boolean) =>
 
     // ── Rating popover ─────────────────────────────────────────────────────────
     let _activeRatingBtn: HTMLElement | null = null;
+    // A post-watch rate prompt (#177) waiting for a user-opened rating popover
+    // to close first. Latest-wins: at most one held, since finishing two
+    // episodes while you have a rating dialog open by hand is vanishingly rare.
+    let _pendingRatePrompt: any = null;
 
     function closeRatingPopover() {
       document.getElementById('rating-popover')!.classList.add('hidden');
       _activeRatingBtn = null;
+      if (_pendingRatePrompt) {
+        const m = _pendingRatePrompt;
+        _pendingRatePrompt = null;
+        setTimeout(() => showRatePromptPopover(m), 150);
+      }
     }
 
-    function openRatingPopover(btn: HTMLElement, tmdbId: string, mediaType: string, currentRating: number | null, seasonNumber: number | null = null, episodeOrder: string = 'tmdb') {
+    function openRatingPopover(
+      btn: HTMLElement | null,
+      tmdbId: string,
+      mediaType: string,
+      currentRating: number | null,
+      seasonNumber: number | null = null,
+      episodeOrder: string = 'tmdb',
+      itemInfo: { title?: string; subtitle?: string; posterUrl?: string } | null = null,
+    ) {
       _activeRatingBtn = btn;
       const popover = document.getElementById('rating-popover')!;
       const starsEl = document.getElementById('rating-stars')!;
       const removeBtn = document.getElementById('rating-remove')!;
+
+      // Item header - only shown when a caller has no on-page context for what's
+      // being rated (e.g. the post-watch prompt fired from the Now Playing bar).
+      const itemEl = document.getElementById('rating-popover-item')!;
+      const itemTitleEl = document.getElementById('rating-popover-item-title')!;
+      const itemSubEl = document.getElementById('rating-popover-item-sub')!;
+      const itemPosterEl = document.getElementById('rating-popover-poster') as HTMLImageElement;
+      if (itemInfo && itemInfo.title) {
+        itemTitleEl.textContent = itemInfo.title;
+        itemSubEl.textContent = itemInfo.subtitle ?? '';
+        itemSubEl.classList.toggle('hidden', !itemInfo.subtitle);
+        if (itemInfo.posterUrl) {
+          itemPosterEl.src = itemInfo.posterUrl;
+          itemPosterEl.classList.remove('hidden');
+        } else {
+          itemPosterEl.removeAttribute('src');
+          itemPosterEl.classList.add('hidden');
+        }
+        itemEl.classList.remove('hidden');
+      } else {
+        itemEl.classList.add('hidden');
+      }
 
       removeBtn.classList.toggle('hidden', currentRating == null);
 
@@ -938,39 +999,46 @@ const bottomNavItem = (active: boolean) =>
             if (seasonNumber !== null) ratingBody.season_number = seasonNumber;
             if (seasonNumber !== null && episodeOrder === 'tvdb') ratingBody.episode_order = 'tvdb';
             await apiFetch('/ratings', 'POST', ratingBody);
-            btn.dataset.userRating = String(i);
-            btn.dataset.state = 'active';
-            btn.classList.remove('bg-zinc-800', 'text-zinc-500', 'hover:bg-amber-500/10', 'hover:text-amber-400');
-            btn.classList.add('bg-amber-500/20', 'text-amber-400', 'hover:bg-amber-500/40');
-            btn.querySelector('svg')!.setAttribute('fill', 'currentColor');
-            btn.querySelector('span')!.textContent = i.toFixed(1);
-            btn.title = `Your rating: ${i.toFixed(1)}/10`;
+            if (btn) {
+              btn.dataset.userRating = String(i);
+              btn.dataset.state = 'active';
+              btn.classList.remove('bg-zinc-800', 'text-zinc-500', 'hover:bg-amber-500/10', 'hover:text-amber-400');
+              btn.classList.add('bg-amber-500/20', 'text-amber-400', 'hover:bg-amber-500/40');
+              btn.querySelector('svg')!.setAttribute('fill', 'currentColor');
+              btn.querySelector('span')!.textContent = i.toFixed(1);
+              btn.title = `Your rating: ${i.toFixed(1)}/10`;
+            }
             closeRatingPopover();
           } catch { /* ignore */ }
         });
         starsEl.appendChild(half);
       }
-      starsEl.addEventListener('mouseleave', () => {
+      // Assigned (not addEventListener) so re-opening the popover - which the
+      // post-watch prompt does repeatedly, once per finished episode - replaces
+      // this handler instead of stacking a new one every time.
+      starsEl.onmouseleave = () => {
         const saved = currentRating ?? 0;
         starsEl.querySelectorAll<HTMLElement>('[data-value]').forEach(s => {
           s.className = Number(s.dataset.value) <= saved
             ? 'w-5 h-5 transition-colors cursor-pointer text-amber-400'
             : 'w-5 h-5 transition-colors cursor-pointer text-zinc-400';
         });
-      });
+      };
 
       removeBtn.onclick = async () => {
         try {
           const seasonQuery = seasonNumber !== null ? `&season_number=${seasonNumber}` : '';
           const orderQuery = seasonNumber !== null && episodeOrder === 'tvdb' ? '&episode_order=tvdb' : '';
           await apiFetch(`/ratings?tmdb_id=${tmdbId}&media_type=${mediaType}${seasonQuery}${orderQuery}`, 'DELETE');
-          btn.dataset.userRating = '';
-          btn.dataset.state = 'inactive';
-          btn.classList.remove('bg-amber-500/20', 'text-amber-400', 'hover:bg-amber-500/40');
-          btn.classList.add('bg-zinc-800', 'text-zinc-500', 'hover:bg-amber-500/10', 'hover:text-amber-400');
-          btn.querySelector('svg')!.setAttribute('fill', 'none');
-          btn.querySelector('span')!.textContent = 'Rate';
-          btn.title = 'Rate this';
+          if (btn) {
+            btn.dataset.userRating = '';
+            btn.dataset.state = 'inactive';
+            btn.classList.remove('bg-amber-500/20', 'text-amber-400', 'hover:bg-amber-500/40');
+            btn.classList.add('bg-zinc-800', 'text-zinc-500', 'hover:bg-amber-500/10', 'hover:text-amber-400');
+            btn.querySelector('svg')!.setAttribute('fill', 'none');
+            btn.querySelector('span')!.textContent = 'Rate';
+            btn.title = 'Rate this';
+          }
           closeRatingPopover();
         } catch { /* ignore */ }
       };
@@ -984,6 +1052,55 @@ const bottomNavItem = (active: boolean) =>
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') closeRatingPopover();
+    });
+
+    // ── Prompt to rate after watching (#177) ──────────────────────────────────
+    // The Now Playing poller (inline script above) fires this when a session
+    // drops off the bar. The backend decides whether a popup is warranted
+    // (user opted in for this type, a completed play landed recently, not yet
+    // rated); we just render it. sessionStorage stops a re-poll from re-asking.
+    function ratingPosterUrl(path: string | null | undefined): string | undefined {
+      if (!path) return undefined;
+      if (path.startsWith('http://') || path.startsWith('https://')) {
+        const m = /image\.tmdb\.org\/t\/p\/([^/]+)(\/.+)$/.exec(path);
+        return m ? `/api/proxy/media/image/${m[1]}${m[2]}` : path;
+      }
+      return `/api/proxy/media/image/w185${path.startsWith('/') ? path : '/' + path}`;
+    }
+
+    function showRatePromptPopover(m: any) {
+      const isEpisode = m.type === 'episode';
+      const sxe = m.season_number != null && m.episode_number != null
+        ? `S${String(m.season_number).padStart(2, '0')}E${String(m.episode_number).padStart(2, '0')}`
+        : null;
+      openRatingPopover(null, String(m.tmdb_id), m.type, null, null, 'tmdb', {
+        title: isEpisode ? (m.show_title ?? m.title) : m.title,
+        subtitle: isEpisode ? [sxe, m.title].filter(Boolean).join(' · ') : undefined,
+        posterUrl: ratingPosterUrl(m.poster_path),
+      });
+    }
+
+    document.addEventListener('scrob:playback-ended', (e) => {
+      const media = (e as CustomEvent).detail?.media;
+      if (!media || media.id == null) return;
+      const seenKey = `scrob_rate_prompt_${media.id}`;
+      try { if (sessionStorage.getItem(seenKey)) return; } catch { /* ignore */ }
+      (async () => {
+        try {
+          const data = await apiFetch(`/history/rate-prompt?media_id=${media.id}`);
+          if (!data?.should_prompt || !data.media) return;
+          try { sessionStorage.setItem(seenKey, '1'); } catch { /* ignore */ }
+          const popoverOpen = !document.getElementById('rating-popover')!.classList.contains('hidden');
+          if (popoverOpen && _activeRatingBtn !== null) {
+            // A rating popover the user opened by hand - wait for them to close it.
+            _pendingRatePrompt = data.media;
+            return;
+          }
+          // Nothing open, or a previous post-watch prompt still showing: just
+          // swap in the newer one (openRatingPopover repopulates in place).
+          showRatePromptPopover(data.media);
+        } catch { /* ignore */ }
+      })();
     });
 
     // ── List popover ───────────────────────────────────────────────────────────

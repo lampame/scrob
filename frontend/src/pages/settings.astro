@@ -195,6 +195,40 @@ if (me.totp_enabled) {
           </div>
           <div class="flex items-start justify-between gap-6 p-4 bg-zinc-900/60 rounded-xl border border-zinc-800">
             <div>
+              <p class="text-sm font-semibold text-zinc-100 mb-1">Prompt to rate after watching</p>
+              <p class="text-xs text-zinc-400">When something finishes playing and drops off the Now Playing bar on the homepage, show a quick star-rating popup for it. Skipped for anything you've already rated.</p>
+            </div>
+            <div class="flex flex-col gap-3 shrink-0 mt-0.5">
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-zinc-400 w-16 text-right">Movies</span>
+                <label class="relative inline-flex items-center shrink-0 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    name="rate_prompt_movies"
+                    id="rate-prompt-movies-toggle"
+                    class="sr-only peer"
+                    checked={settings.rate_prompt_movies === true}
+                  />
+                  <div class="w-11 h-6 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                </label>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-zinc-400 w-16 text-right">Episodes</span>
+                <label class="relative inline-flex items-center shrink-0 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    name="rate_prompt_episodes"
+                    id="rate-prompt-episodes-toggle"
+                    class="sr-only peer"
+                    checked={settings.rate_prompt_episodes === true}
+                  />
+                  <div class="w-11 h-6 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                </label>
+              </div>
+            </div>
+          </div>
+          <div class="flex items-start justify-between gap-6 p-4 bg-zinc-900/60 rounded-xl border border-zinc-800">
+            <div>
               <p class="text-sm font-semibold text-zinc-100 mb-1">Blur explicit content</p>
               <p class="text-xs text-zinc-400">Blur posters flagged as adult content by TMDB. Click a blurred poster to reveal it.</p>
             </div>
@@ -1607,6 +1641,22 @@ if (me.totp_enabled) {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${tok}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ hide_watched_from_recently_added: hideWatchedRecentlyAddedToggle.checked }),
+      });
+    });
+  }
+
+  for (const [id, key] of [
+    ['rate-prompt-movies-toggle', 'rate_prompt_movies'],
+    ['rate-prompt-episodes-toggle', 'rate_prompt_episodes'],
+  ] as const) {
+    const el = document.getElementById(id) as HTMLInputElement | null;
+    if (!el) continue;
+    el.addEventListener('change', async () => {
+      const tok = (document.getElementById('app-data') as HTMLElement | null)?.dataset.token ?? '';
+      await fetch('/api/proxy/auth/settings', {
+        method: 'PATCH',
+        headers: { 'Authorization': `Bearer ${tok}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ [key]: el.checked }),
       });
     });
   }

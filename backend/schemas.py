@@ -169,6 +169,8 @@ class UserSettings(BaseModel):
     shuffle_next_up: Optional[bool] = None
     minimalist_next_up: Optional[bool] = None
     hide_watched_from_recently_added: Optional[bool] = None
+    rate_prompt_movies: Optional[bool] = None
+    rate_prompt_episodes: Optional[bool] = None
 
     class Config:
         from_attributes = True

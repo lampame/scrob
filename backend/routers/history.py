@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +19,7 @@ from models.users import UserSettings
 from models.connections import MediaServerConnection
 from models.episode_order import EpisodeOrderMapping, UserShowEpisodeOrder
 from models.rewatch import ShowRewatch, RewatchProgress
+from models.ratings import Rating
 from routers.media import enrich_with_state, get_user_tmdb_key, check_tmdb_key, _attach_episode_order_fields
 from core.translations import get_user_metadata_language, get_media_translations, apply_media_translations
 from core.rewatch import get_active_rewatch, record_rewatch_progress, get_already_watched_for_bulk_mark, capped_season_episode_counts
@@ -506,6 +507,83 @@ async def clear_now_playing_sessions(
     )
     await db.commit()
     return {"status": "ok"}
+
+
+# How recently a completed WatchEvent must have landed for the "rate it now"
+# popup to still be worth showing when a session drops off the Now Playing bar.
+RATE_PROMPT_WINDOW = timedelta(minutes=15)
+
+
+@router.get("/rate-prompt")
+async def rate_prompt(
+    media_id: int = Query(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_or_api_key),
+):
+    """Should the homepage show a "rate this" popup for a just-finished item? (#177)
+
+    Called by the Now Playing poller when a session disappears from the bar.
+    Returns should_prompt=True only when the user opted in for this media type,
+    a completed WatchEvent for it landed within RATE_PROMPT_WINDOW, and they
+    have not already rated it. The media block feeds the popup's poster/title.
+    """
+    none_response = {"should_prompt": False, "media": None}
+
+    media = (await db.execute(
+        select(Media).options(selectinload(Media.show)).where(Media.id == media_id)
+    )).scalar_one_or_none()
+    if media is None or not media.tmdb_id or is_unmapped_tvdb_episode(media):
+        return none_response
+
+    settings_row = (await db.execute(
+        select(UserSettings).where(UserSettings.user_id == current_user.id)
+    )).scalar_one_or_none()
+    if media.media_type == MediaType.movie:
+        opted_in = bool(settings_row and settings_row.rate_prompt_movies)
+    elif media.media_type == MediaType.episode:
+        opted_in = bool(settings_row and settings_row.rate_prompt_episodes)
+    else:
+        opted_in = False
+    if not opted_in:
+        return none_response
+
+    recent_completion = (await db.execute(
+        select(WatchEvent.id).where(
+            WatchEvent.user_id == current_user.id,
+            WatchEvent.media_id == media_id,
+            WatchEvent.completed == True,
+            WatchEvent.watched_at >= datetime.utcnow() - RATE_PROMPT_WINDOW,
+        ).limit(1)
+    )).scalar_one_or_none()
+    if recent_completion is None:
+        return none_response
+
+    # Movie and episode ratings are both stored with season_number NULL
+    # (submit_rating collapses an episode's season to None), so one check covers both.
+    already_rated = (await db.execute(
+        select(Rating.id).where(
+            Rating.media_id == media_id,
+            Rating.user_id == current_user.id,
+            Rating.season_number.is_(None),
+        ).limit(1)
+    )).scalar_one_or_none()
+    if already_rated is not None:
+        return none_response
+
+    show = media.show if media.media_type == MediaType.episode else None
+    return {
+        "should_prompt": True,
+        "media": {
+            "id": media.id,
+            "tmdb_id": media.tmdb_id,
+            "type": media.media_type.value,
+            "title": media.title,
+            "show_title": show.title if show else None,
+            "season_number": media.season_number,
+            "episode_number": media.episode_number,
+            "poster_path": (show.poster_path if show else None) or media.poster_path,
+        },
+    }
 
 
 @router.get("/continue-watching")

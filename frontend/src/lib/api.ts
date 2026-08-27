@@ -459,6 +459,8 @@ export interface UserSettings {
   use_hls_player: boolean;
   shuffle_next_up: boolean;
   minimalist_next_up: boolean;
+  rate_prompt_movies: boolean;
+  rate_prompt_episodes: boolean;
 }
 
 export interface MediaServerConnection {
