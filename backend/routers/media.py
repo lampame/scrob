@@ -42,6 +42,7 @@ from dependencies import get_current_user, get_current_user_or_api_key, get_opti
 from models.users import User, UserSettings
 from models.show import Show as ShowModel
 from models.global_settings import GlobalSettings
+from models.calendar_cache import UserCalendarCache
 
 router = APIRouter()
 _PLAYABLE_COLLECTION_SOURCES = {
@@ -1649,16 +1650,37 @@ async def airing_today_collected(
     if not check_tmdb_key(tmdb_key):
         return {"results": []}
 
-    from routers.calendar import _load_or_compute, _server_today
+    from routers.calendar import (
+        _background_compute,
+        _is_cache_fresh,
+        _is_cache_usable,
+        _load_or_compute,
+        _server_today,
+    )
 
-    cache = await _load_or_compute(db, effective_user_id, force=False)
-    calendar = cache["calendar"]
-    # The real current date, not calendar["today"] - that field is stamped
-    # at cache-compute time, so it's only ever as fresh as the last refresh.
-    # _load_or_compute now recomputes on a calendar-day rollover regardless
-    # of the raw TTL, but reading the live date here too means this widget
-    # can never show yesterday's "today" even for the split second before
-    # that recompute lands.
+    # First load after local midnight would otherwise block this widget on a
+    # full calendar recompute (two TMDB calls per still-running show).
+    # Yesterday's cached payload already has a 14-day forward window that
+    # covers today, so serve it immediately and recompute in the background -
+    # the next load picks up the fresh row. Fall back to a blocking compute
+    # only when there is no usable cache at all (new user, schema bump, or
+    # >48h stale). #194
+    row = (
+        await db.execute(
+            select(UserCalendarCache).where(UserCalendarCache.user_id == effective_user_id)
+        )
+    ).scalars().first()
+    fresh = _is_cache_fresh(row)
+    if fresh or _is_cache_usable(row):
+        calendar = row.payload
+        if not fresh:
+            asyncio.create_task(_background_compute(effective_user_id))
+    else:
+        calendar = (await _load_or_compute(db, effective_user_id, force=False))["calendar"]
+    # The real current date, not calendar["today"] - that field is stamped at
+    # cache-compute time, and the payload served here can be up to ~48h stale,
+    # so filtering entries by the live date is what keeps the widget from
+    # showing yesterday's row as "today".
     today = _server_today().isoformat()
 
     results = [

@@ -220,6 +220,23 @@ def _is_cache_fresh(row: UserCalendarCache | None) -> bool:
     return payload.get("today") == _server_today().isoformat()
 
 
+def _is_cache_usable(
+    row: UserCalendarCache | None, max_age: timedelta = timedelta(hours=48)
+) -> bool:
+    """A cache row good enough to show immediately even when _is_cache_fresh
+    rejected it for the calendar-day rollover.
+
+    Any payload computed in the last couple of days still has a 14-day forward
+    window that covers today, so the airing-today widget can serve it right
+    away and recompute in the background instead of blocking its first load
+    after local midnight on a full TMDB fan-out (#194). Deliberately ignores
+    the day-match and the 24h TTL - staleness within max_age is the point.
+    """
+    if not row or (datetime.utcnow() - row.computed_at) >= max_age:
+        return False
+    return (row.payload or {}).get("schema") == CALENDAR_SCHEMA
+
+
 async def _load_or_compute(db: AsyncSession, user_id: int, force: bool) -> dict:
     row = (
         await db.execute(select(UserCalendarCache).where(UserCalendarCache.user_id == user_id))
