@@ -438,12 +438,13 @@ class _Result:
         return iter(self._rows)
 
 class _FakeSession:
-    def __init__(self, settings, watch_rows, media, shows, incomplete_watch_rows=()):
+    def __init__(self, settings, watch_rows, media, shows, incomplete_watch_rows=(), rating_rows=()):
         self.settings = settings
         self.watch_rows = watch_rows
         self.incomplete_watch_rows = incomplete_watch_rows
         self.media = media
         self.shows = shows
+        self.rating_rows = rating_rows
         self.commit = AsyncMock()
         self.added: list = []
         self.job_updates: list = []
@@ -479,6 +480,8 @@ class _FakeSession:
             if "watch_events.completed" not in sql:
                 rows = [*rows, *self.incomplete_watch_rows]
             return _Result(rows=rows)
+        if "FROM ratings" in sql:
+            return _Result(rows=self.rating_rows)
         if "FROM media" in sql:
             return _Result(scalars=self.media)
         if "FROM shows" in sql:
@@ -904,6 +907,98 @@ class TraktHistorySafetyTests(unittest.IsolatedAsyncioTestCase):
         # window, so the remote-dedup fetch falls back to unbounded.
         self.assertIsNone(get_movies.await_args.kwargs["start_at"])
         self.assertIsNone(get_movies.await_args.kwargs["end_at"])
+
+
+class TraktRatingsPushTests(unittest.IsolatedAsyncioTestCase):
+    """#327: the ratings push must batch into /sync/ratings array requests and
+    dedup against what Trakt already has, not fire one POST per rating."""
+
+    def _settings(self):
+        return SimpleNamespace(
+            trakt_access_token="access-token",
+            trakt_client_id="client-id",
+            trakt_token_expires_at=9_999_999_999,
+            trakt_push_watched=False,
+            trakt_push_collection=False,
+            trakt_push_ratings=True,
+        )
+
+    def _media(self):
+        return [
+            Media(id=10, tmdb_id=550, media_type=MediaType.movie, title="Fight Club"),
+            Media(id=11, tmdb_id=1399, media_type=MediaType.series, title="GoT"),
+        ]
+
+    async def _run(self, *, remote, rating_rows, set_batch):
+        session = _FakeSession(self._settings(), [], self._media(), [], rating_rows=rating_rows)
+        per_item = AsyncMock(side_effect=AssertionError("per-item rating call must not happen"))
+        with (
+            patch.object(trakt_router, "async_sessionmaker", return_value=lambda: session),
+            patch.object(trakt_router.trakt_client, "get_ratings", AsyncMock(return_value=remote)),
+            patch.object(trakt_router.trakt_client, "set_ratings_batch", set_batch),
+            patch.object(trakt_router.trakt_client, "set_movie_rating", per_item),
+            patch.object(trakt_router.trakt_client, "set_show_rating", per_item),
+            patch.object(trakt_router.trakt_client, "set_season_rating", per_item),
+            patch("routers.sync._resolve_tmdb_season_ids", AsyncMock(return_value={})),
+            patch("routers.sync._get_effective_tmdb_key", AsyncMock(return_value="k")),
+            patch.object(trakt_router.asyncio, "sleep", AsyncMock()),
+        ):
+            await trakt_router._run_trakt_push(user_id=1, job_id=40)
+
+    async def test_ratings_are_sent_in_one_batched_request(self):
+        set_batch = AsyncMock()
+        await self._run(
+            remote={"movies": [], "shows": [], "seasons": [], "episodes": []},
+            rating_rows=[(10, None, 8.0), (11, None, 9.0)],
+            set_batch=set_batch,
+        )
+        set_batch.assert_awaited_once()
+        _cid, _tok, movie_ratings, show_ratings, season_ratings = set_batch.await_args.args
+        self.assertEqual(movie_ratings, [(550, 8.0)])
+        self.assertEqual(show_ratings, [(1399, 9.0)])
+        self.assertEqual(season_ratings, [])
+
+    async def test_ratings_already_on_trakt_are_skipped(self):
+        set_batch = AsyncMock()
+        await self._run(
+            remote={
+                "movies": [{"rating": 8, "movie": {"ids": {"tmdb": 550}}}],
+                "shows": [], "seasons": [], "episodes": [],
+            },
+            rating_rows=[(10, None, 8.0), (11, None, 9.0)],
+            set_batch=set_batch,
+        )
+        set_batch.assert_awaited_once()
+        _cid, _tok, movie_ratings, show_ratings, _seasons = set_batch.await_args.args
+        self.assertEqual(movie_ratings, [])            # 550 @ 8 already present
+        self.assertEqual(show_ratings, [(1399, 9.0)])
+
+    async def test_nothing_pushed_when_all_ratings_present(self):
+        set_batch = AsyncMock()
+        await self._run(
+            remote={
+                "movies": [{"rating": 8, "movie": {"ids": {"tmdb": 550}}}],
+                "shows": [{"rating": 9, "show": {"ids": {"tmdb": 1399}}}],
+                "seasons": [], "episodes": [],
+            },
+            rating_rows=[(10, None, 8.0), (11, None, 9.0)],
+            set_batch=set_batch,
+        )
+        set_batch.assert_not_awaited()
+
+    async def test_changed_rating_is_re_sent(self):
+        set_batch = AsyncMock()
+        await self._run(
+            remote={
+                "movies": [{"rating": 5, "movie": {"ids": {"tmdb": 550}}}],  # was 5, now 8
+                "shows": [], "seasons": [], "episodes": [],
+            },
+            rating_rows=[(10, None, 8.0)],
+            set_batch=set_batch,
+        )
+        set_batch.assert_awaited_once()
+        _cid, _tok, movie_ratings, *_ = set_batch.await_args.args
+        self.assertEqual(movie_ratings, [(550, 8.0)])
 
 
 class TraktSourceAdapterTests(unittest.IsolatedAsyncioTestCase):

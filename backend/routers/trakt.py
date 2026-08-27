@@ -43,6 +43,11 @@ router = APIRouter()
 TMDB_CONCURRENCY = 10
 TRAKT_HISTORY_OVERLAP = timedelta(minutes=5)
 TRAKT_HISTORY_PUSH_BATCH_SIZE = 100
+TRAKT_RATINGS_PUSH_BATCH_SIZE = 100
+# Trakt throttles authenticated writes to ~1/s (429 beyond). Run the push queue
+# one request at a time with this gap so a big push can't 429-storm itself or
+# starve the user's real-time scrobbles, which share the same quota (#327).
+TRAKT_PUSH_REQUEST_GAP = 1.0
 
 # Trakt device-auth access tokens live 7 days. Refresh once we're within this
 # of expiry so a job (or scrobble) that starts near the boundary doesn't race it.
@@ -1608,6 +1613,7 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
 
             push_tasks: list[tuple[str, int, "Coroutine"]] = []
             watched_already_present = 0
+            ratings_already_present = 0
 
             if settings.trakt_push_watched:
                 movie_candidates: list[tuple[tuple, int, datetime]] = []
@@ -1739,7 +1745,7 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                         ),
                     ))
 
-            if settings.trakt_push_ratings:
+            if settings.trakt_push_ratings and ratings_map:
                 from routers.sync import _get_effective_tmdb_key, _resolve_tmdb_season_ids
 
                 season_tmdb_ids = await _resolve_tmdb_season_ids(
@@ -1747,60 +1753,96 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                     set(ratings_map),
                     await _get_effective_tmdb_key(db, settings),
                 )
+
+                # Dedup against what Trakt already has, keyed by (kind, tmdb id,
+                # season number, rounded rating) - so a steady-state push sends
+                # nothing instead of re-POSTing every rating hourly (#327).
+                remote_rating_keys: set[tuple] = set()
+                try:
+                    remote_ratings = await trakt_client.get_ratings(
+                        settings.trakt_client_id, settings.trakt_access_token
+                    )
+                    for it in remote_ratings.get("movies", []):
+                        tid = ((it.get("movie") or {}).get("ids") or {}).get("tmdb")
+                        if tid is not None:
+                            remote_rating_keys.add(("movie", tid, None, int(it["rating"])))
+                    for it in remote_ratings.get("shows", []):
+                        tid = ((it.get("show") or {}).get("ids") or {}).get("tmdb")
+                        if tid is not None:
+                            remote_rating_keys.add(("show", tid, None, int(it["rating"])))
+                    for it in remote_ratings.get("seasons", []):
+                        show_tid = ((it.get("show") or {}).get("ids") or {}).get("tmdb")
+                        snum = (it.get("season") or {}).get("number")
+                        if show_tid is not None and snum is not None:
+                            remote_rating_keys.add(("season", show_tid, snum, int(it["rating"])))
+                except Exception as exc:
+                    # No dedup this run - still safe, just re-sends (batched).
+                    logger.warning("Trakt push job %s: could not fetch remote ratings: %s", job_id, exc)
+
+                movie_ratings: list[tuple[int, float]] = []
+                show_ratings: list[tuple[int, float]] = []
+                season_ratings: list[tuple[int, float]] = []
                 for key, rating in ratings_map.items():
                     media_id, season_number = key
                     media = media_by_id.get(media_id)
                     if not media or not media.tmdb_id:
                         continue
+                    rounded = max(1, min(10, round(rating)))
                     if season_number is not None:
-                        if season_tmdb_id := season_tmdb_ids.get(key):
-                            push_tasks.append((
-                                "ratings",
-                                1,
-                                trakt_client.set_season_rating(
-                                    settings.trakt_client_id,
-                                    settings.trakt_access_token,
-                                    season_tmdb_id,
-                                    rating,
-                                ),
-                            ))
+                        season_tmdb_id = season_tmdb_ids.get(key)
+                        if not season_tmdb_id:
+                            continue
+                        if ("season", media.tmdb_id, season_number, rounded) in remote_rating_keys:
+                            ratings_already_present += 1
+                            continue
+                        season_ratings.append((season_tmdb_id, rating))
                     elif media.media_type == MediaType.movie:
-                        push_tasks.append((
-                            "ratings",
-                            1,
-                            trakt_client.set_movie_rating(
-                                settings.trakt_client_id,
-                                settings.trakt_access_token,
-                                media.tmdb_id,
-                                rating,
-                            ),
-                        ))
+                        if ("movie", media.tmdb_id, None, rounded) in remote_rating_keys:
+                            ratings_already_present += 1
+                            continue
+                        movie_ratings.append((media.tmdb_id, rating))
                     elif media.media_type == MediaType.series:
-                        push_tasks.append((
-                            "ratings",
-                            1,
-                            trakt_client.set_show_rating(
-                                settings.trakt_client_id,
-                                settings.trakt_access_token,
-                                media.tmdb_id,
-                                rating,
-                            ),
-                        ))
+                        if ("show", media.tmdb_id, None, rounded) in remote_rating_keys:
+                            ratings_already_present += 1
+                            continue
+                        show_ratings.append((media.tmdb_id, rating))
+
+                # One /sync/ratings POST per chunk (arrays of movies/shows/
+                # seasons), not one per rating.
+                pending_ratings: list[tuple[str, tuple]] = (
+                    [("movie", p) for p in movie_ratings]
+                    + [("show", p) for p in show_ratings]
+                    + [("season", p) for p in season_ratings]
+                )
+                for index in range(0, len(pending_ratings), TRAKT_RATINGS_PUSH_BATCH_SIZE):
+                    chunk = pending_ratings[index:index + TRAKT_RATINGS_PUSH_BATCH_SIZE]
+                    push_tasks.append((
+                        "ratings",
+                        len(chunk),
+                        trakt_client.set_ratings_batch(
+                            settings.trakt_client_id,
+                            settings.trakt_access_token,
+                            [p for k, p in chunk if k == "movie"],
+                            [p for k, p in chunk if k == "show"],
+                            [p for k, p in chunk if k == "season"],
+                        ),
+                    ))
 
             total = sum(item_count for _, item_count, _ in push_tasks)
+            already_present = watched_already_present + ratings_already_present
             await db.execute(
                 update(SyncJob).where(SyncJob.id == job_id).values(total_items=total)
             )
             await db.commit()
 
             if not push_tasks:
-                print(f"Trakt push job {job_id}: all watched events already exist remotely.")
+                print(f"Trakt push job {job_id}: nothing to push - everything already on Trakt.")
                 await db.execute(
                     update(SyncJob)
                     .where(SyncJob.id == job_id)
                     .values(
                         status=SyncStatus.completed,
-                        stats={"succeeded": 0, "failed": 0, "skipped": watched_already_present},
+                        stats={"succeeded": 0, "failed": 0, "skipped": already_present},
                         processed_items=0,
                     )
                 )
@@ -1813,31 +1855,27 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
             print(
                 f"Trakt push job {job_id}: queued "
                 + ", ".join(f"{count} {category}" for category, count in queued_counts.items())
-                + f" ({total} total, {watched_already_present} already present)."
+                + f" ({total} total, {already_present} already present)."
             )
 
-            request_batch_size = 50
+            # One request at a time, spaced by TRAKT_PUSH_REQUEST_GAP - Trakt's
+            # write limit is ~1/s and it's shared with real-time scrobbles (#327).
             succeeded = 0
             failed = 0
             succeeded_by_category: dict[str, int] = {}
             failed_by_category: dict[str, int] = {}
-            for index in range(0, len(push_tasks), request_batch_size):
-                batch = push_tasks[index:index + request_batch_size]
-                results = await asyncio.gather(
-                    *[task for _, _, task in batch],
-                    return_exceptions=True,
-                )
-                for (category, item_count, _), result in zip(batch, results):
-                    if isinstance(result, Exception):
-                        failed += item_count
-                        failed_by_category[category] = (
-                            failed_by_category.get(category, 0) + item_count
-                        )
-                    else:
-                        succeeded += item_count
-                        succeeded_by_category[category] = (
-                            succeeded_by_category.get(category, 0) + item_count
-                        )
+            for i, (category, item_count, task) in enumerate(push_tasks):
+                try:
+                    await task
+                    succeeded += item_count
+                    succeeded_by_category[category] = succeeded_by_category.get(category, 0) + item_count
+                except Exception as exc:
+                    logger.warning(
+                        "Trakt push job %s: a %s batch (%s items) failed: %s",
+                        job_id, category, item_count, exc,
+                    )
+                    failed += item_count
+                    failed_by_category[category] = failed_by_category.get(category, 0) + item_count
                 await db.execute(
                     update(SyncJob)
                     .where(SyncJob.id == job_id)
@@ -1845,6 +1883,8 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                 )
                 await db.commit()
                 await _raise_if_cancelled(db, job_id)
+                if i + 1 < len(push_tasks):
+                    await asyncio.sleep(TRAKT_PUSH_REQUEST_GAP)
             breakdown = ", ".join(
                 f"{category}: {succeeded_by_category.get(category, 0)} succeeded"
                 + (
@@ -1856,7 +1896,7 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
             )
             print(
                 f"Trakt push job {job_id} completed. {breakdown}. "
-                f"Total: {succeeded}/{total} succeeded, {watched_already_present} skipped."
+                f"Total: {succeeded}/{total} succeeded, {already_present} skipped."
             )
 
             await db.execute(
@@ -1867,7 +1907,7 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                     stats={
                         "succeeded": succeeded,
                         "failed": failed,
-                        "skipped": watched_already_present,
+                        "skipped": already_present,
                     },
                     processed_items=succeeded + failed,
                 )
