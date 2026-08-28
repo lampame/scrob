@@ -287,10 +287,13 @@ class MediaServerConnectionBase(BaseModel):
     watchlist_monitored_users: Optional[list[str]] = None
     plex_sync_watchlist: bool = False
     plex_push_watchlist: bool = False
+    plex_account_id: Optional[str] = None
+    plex_machine_identifier: Optional[str] = None
 
 
 class MediaServerConnectionCreate(MediaServerConnectionBase):
-    pass
+    # Account-level token from "Login with Plex"; never echoed back in responses.
+    plex_auth_token: Optional[str] = None
 
 
 class MediaServerConnectionUpdate(BaseModel):

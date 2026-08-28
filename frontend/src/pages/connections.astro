@@ -340,6 +340,23 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
                         <option value="stremio">Stremio</option>
                       </select>
                     </div>
+                    <div id="new-plex-login-row" class="hidden rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 space-y-3">
+                      <p class="text-sm text-zinc-300">Sign in with Plex to fill in the server URL and token automatically.</p>
+                      <button type="button" id="plex-login-btn" class="text-sm bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg transition-colors cursor-pointer">Login with Plex</button>
+                      <div id="plex-login-server-wrap" class="hidden space-y-2">
+                        <label for="plex-login-server" class="block text-sm font-medium text-zinc-400">Server</label>
+                        <select id="plex-login-server" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-amber-500 transition-all cursor-pointer"></select>
+                      </div>
+                      <div id="plex-login-connection-wrap" class="hidden space-y-2">
+                        <label for="plex-login-connection" class="block text-sm font-medium text-zinc-400">Connection</label>
+                        <select id="plex-login-connection" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-amber-500 transition-all cursor-pointer"></select>
+                        <p class="text-xs text-zinc-500">Pick the address Scrob should use to reach this server. Reachable ones are marked; you can also edit the URL field directly.</p>
+                      </div>
+                      <p id="plex-login-status" class="text-xs text-zinc-500 hidden"></p>
+                      <input type="hidden" id="new-plex-auth-token" />
+                      <input type="hidden" id="new-plex-account-id" />
+                      <input type="hidden" id="new-plex-machine-id" />
+                    </div>
                     <div id="new-conn-url-row" class="space-y-2">
                       <label id="new-conn-url-label" for="new-conn-url" class="block text-sm font-medium text-zinc-400">Server URL</label>
                       <input type="url" id="new-conn-url" placeholder="http://192.168.1.100:8096" class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all disabled:opacity-70" />
@@ -4405,6 +4422,68 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
     const cancelBtn = document.getElementById('cancel-add-connection-btn');
     const connectStremioBtn = document.getElementById('connect-stremio-btn') as HTMLButtonElement | null;
     let stremioPollTimer: number | null = null;
+
+    // Login with Plex (auto-fills the URL / token / username fields)
+    const plexLoginBtn = document.getElementById('plex-login-btn') as HTMLButtonElement | null;
+    const plexServerWrap = document.getElementById('plex-login-server-wrap');
+    const plexServerSelect = document.getElementById('plex-login-server') as HTMLSelectElement | null;
+    const plexConnWrap = document.getElementById('plex-login-connection-wrap');
+    const plexConnSelect = document.getElementById('plex-login-connection') as HTMLSelectElement | null;
+    const plexLoginStatus = document.getElementById('plex-login-status');
+    let plexPollTimer: number | null = null;
+    type PlexLoginConn = { uri: string; local: boolean; relay: boolean; reachable: boolean; label: string };
+    let plexLoginServers: Array<{ name: string; machine_identifier: string; owned: boolean; url: string; token: string; connections: PlexLoginConn[] }> = [];
+
+    const setPlexStatus = (msg: string) => {
+      if (!plexLoginStatus) return;
+      plexLoginStatus.textContent = msg;
+      plexLoginStatus.classList.toggle('hidden', !msg);
+    };
+
+    const applyPlexConnection = () => {
+      const server = plexLoginServers[plexServerSelect ? plexServerSelect.selectedIndex : 0];
+      const conn = server?.connections[plexConnSelect ? plexConnSelect.selectedIndex : 0];
+      const urlEl = document.getElementById('new-conn-url') as HTMLInputElement | null;
+      if (urlEl && conn) urlEl.value = conn.uri;
+    };
+    plexConnSelect?.addEventListener('change', applyPlexConnection);
+
+    const applyPlexServer = () => {
+      const server = plexLoginServers[plexServerSelect ? plexServerSelect.selectedIndex : 0];
+      if (!server) return;
+      const tokenEl = document.getElementById('new-conn-token') as HTMLInputElement | null;
+      const machineEl = document.getElementById('new-plex-machine-id') as HTMLInputElement | null;
+      if (tokenEl) tokenEl.value = server.token;
+      if (machineEl) machineEl.value = server.machine_identifier;
+      const nameEl = document.getElementById('new-conn-name') as HTMLInputElement | null;
+      if (nameEl && !nameEl.value.trim()) nameEl.value = server.name;
+      if (plexConnSelect) {
+        plexConnSelect.innerHTML = server.connections
+          .map((c) => `<option>${esc(c.label)}${c.reachable ? ' (reachable)' : ''}</option>`)
+          .join('');
+        const recommendedIdx = Math.max(0, server.connections.findIndex((c) => c.uri === server.url));
+        plexConnSelect.selectedIndex = recommendedIdx;
+      }
+      plexConnWrap?.classList.toggle('hidden', server.connections.length <= 1);
+      applyPlexConnection();
+    };
+    plexServerSelect?.addEventListener('change', applyPlexServer);
+
+    const resetPlexLogin = () => {
+      if (plexPollTimer !== null) { window.clearTimeout(plexPollTimer); plexPollTimer = null; }
+      plexLoginServers = [];
+      plexServerWrap?.classList.add('hidden');
+      plexConnWrap?.classList.add('hidden');
+      if (plexServerSelect) plexServerSelect.innerHTML = '';
+      if (plexConnSelect) plexConnSelect.innerHTML = '';
+      setPlexStatus('');
+      for (const id of ['new-plex-auth-token', 'new-plex-account-id', 'new-plex-machine-id']) {
+        const el = document.getElementById(id) as HTMLInputElement | null;
+        if (el) el.value = '';
+      }
+      if (plexLoginBtn) { plexLoginBtn.disabled = false; plexLoginBtn.textContent = 'Login with Plex'; }
+    };
+
     if (addBtn && addForm) {
       addBtn.addEventListener('click', () => {
         addForm.classList.toggle('hidden');
@@ -4422,6 +4501,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
           connectStremioBtn.disabled = false;
           connectStremioBtn.textContent = 'Connect Stremio';
         }
+        resetPlexLogin?.();
       });
     }
 
@@ -4454,6 +4534,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
       nuvioEmailRow?.classList.toggle('hidden', !(isNuvio || isArvio));
       nuvioProfileRow?.classList.toggle('hidden', !(isNuvio || isArvio));
       stremioLinkRow?.classList.toggle('hidden', !isStremio);
+      document.getElementById('new-plex-login-row')?.classList.toggle('hidden', !isPlex);
       urlRow?.classList.toggle('hidden', isStremio);
       tokenRow?.classList.toggle('hidden', isStremio);
       document.getElementById('create-connection-btn')?.classList.toggle('hidden', isStremio);
@@ -4507,6 +4588,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
           stremioPollTimer = null;
           document.getElementById('stremio-link-details')?.classList.add('hidden');
         }
+        resetPlexLogin?.();
       }
       previousType = type;
     };
@@ -4656,6 +4738,81 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
       }
     });
 
+    // Login with Plex - helpers declared with the Add Connection toggle above
+    plexLoginBtn?.addEventListener('click', async () => {
+      resetPlexLogin();
+      plexLoginBtn.disabled = true;
+      plexLoginBtn.textContent = 'Starting…';
+      try {
+        const startRes = await fetch('/api/proxy/auth/plex/pin/start', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        const start = await startRes.json();
+        if (!startRes.ok) throw new Error(start.detail || 'Could not start the Plex login.');
+        window.open(start.auth_url, '_blank', 'noopener,noreferrer');
+        setPlexStatus('Waiting for you to authorize in Plex…');
+        plexLoginBtn.textContent = 'Waiting…';
+        const expiresAt = Date.now() + 14 * 60 * 1000;
+        const intervalMs = Math.max(1, Number(start.interval) || 2) * 1000;
+
+        const poll = async () => {
+          try {
+            if (Date.now() >= expiresAt) throw new Error('Plex login expired. Try again.');
+            const pollRes = await fetch('/api/proxy/auth/plex/pin/poll', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${token}` },
+            });
+            const result = await pollRes.json();
+            if (!pollRes.ok) throw new Error(result.detail || 'Plex login failed.');
+            if (result.status === 'pending') {
+              plexPollTimer = window.setTimeout(poll, intervalMs);
+              return;
+            }
+            plexPollTimer = null;
+            plexLoginServers = result.servers || [];
+            const username: string = result.account?.username || '';
+            const usernameEl = document.getElementById('new-conn-username') as HTMLInputElement | null;
+            if (usernameEl && username) usernameEl.value = username;
+            const authTokenEl = document.getElementById('new-plex-auth-token') as HTMLInputElement | null;
+            if (authTokenEl) authTokenEl.value = result.auth_token || '';
+            const accountIdEl = document.getElementById('new-plex-account-id') as HTMLInputElement | null;
+            if (accountIdEl) accountIdEl.value = result.account?.id || '';
+
+            if (!plexLoginServers.length) {
+              setPlexStatus(`Signed in as ${username || 'your Plex account'}, but no reachable servers were found. Enter the server URL and token manually.`);
+              plexLoginBtn.disabled = false;
+              plexLoginBtn.textContent = 'Login with Plex';
+              return;
+            }
+            if (plexServerSelect) {
+              plexServerSelect.innerHTML = plexLoginServers
+                .map((s, i) => `<option value="${i}">${esc(s.name)}${s.owned ? '' : ' (shared)'}</option>`)
+                .join('');
+            }
+            plexServerWrap?.classList.remove('hidden');
+            applyPlexServer();
+            setPlexStatus(`Signed in as ${username || 'your Plex account'}. Pick a server, then press Add.`);
+            plexLoginBtn.disabled = false;
+            plexLoginBtn.textContent = 'Use a different account';
+          } catch (error: any) {
+            plexPollTimer = null;
+            setPlexStatus(error.message);
+            showMessage(error.message, 'error');
+            plexLoginBtn.disabled = false;
+            plexLoginBtn.textContent = 'Login with Plex';
+          }
+        };
+        plexPollTimer = window.setTimeout(poll, intervalMs);
+      } catch (error: any) {
+        plexPollTimer = null;
+        setPlexStatus(error.message);
+        showMessage(error.message, 'error');
+        plexLoginBtn.disabled = false;
+        plexLoginBtn.textContent = 'Login with Plex';
+      }
+    });
+
     // Test new connection button
     const testNewBtn = document.getElementById('test-new-connection-btn');
     if (testNewBtn) {
@@ -4734,8 +4891,17 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
               return value ? parseFloat(value) : null;
             })(),
           };
-          if (type === 'plex') body.server_username = username;
-          else body.server_user_id = userId;
+          if (type === 'plex') {
+            body.server_username = username;
+            const authTok = (document.getElementById('new-plex-auth-token') as HTMLInputElement)?.value.trim();
+            const acctId = (document.getElementById('new-plex-account-id') as HTMLInputElement)?.value.trim();
+            const machineId = (document.getElementById('new-plex-machine-id') as HTMLInputElement)?.value.trim();
+            if (authTok) body.plex_auth_token = authTok;
+            if (acctId) body.plex_account_id = acctId;
+            if (machineId) body.plex_machine_identifier = machineId;
+          } else {
+            body.server_user_id = userId;
+          }
 
           const res = await fetch('/api/proxy/auth/connections', {
             method: 'POST',

@@ -568,7 +568,7 @@ async def _watchlist_poller():
                                     log.error(f"Watchlist: Sonarr error for tvdb:{tvdb_id}: {e}")
 
                         # Admin's own watchlist via REST (returns GUIDs directly)
-                        own_watchlist = await plex_client.get_watchlist(conn.token)
+                        own_watchlist = await plex_client.get_watchlist(conn.plex_account_token)
                         for item in own_watchlist:
                             item_type = item.get("type")
                             guids = plex_client.get_guids(item)
@@ -580,11 +580,11 @@ async def _watchlist_poller():
 
                         # Friends' watchlists via GraphQL (requires per-item enrichment for GUIDs)
                         if conn.watchlist_all_users:
-                            all_friends = await plex_client.get_all_friends(conn.token)
+                            all_friends = await plex_client.get_all_friends(conn.plex_account_token)
                             monitored = set(conn.watchlist_monitored_users or [])
                             friends = [f for f in all_friends if f["watchlist_id"] in monitored] if monitored else []
                             for friend in friends:
-                                friend_items = await plex_client.get_friend_watchlist(conn.token, friend["watchlist_id"])
+                                friend_items = await plex_client.get_friend_watchlist(conn.plex_account_token, friend["watchlist_id"])
                                 for fi in friend_items:
                                     plex_id = fi.get("id")
                                     if not plex_id:
@@ -592,7 +592,7 @@ async def _watchlist_poller():
                                     cache_key = f"plex:{plex_id}"
                                     if cache_key in synced or cache_key in newly_synced:
                                         continue
-                                    enriched = await plex_client.enrich_plex_item(conn.token, plex_id)
+                                    enriched = await plex_client.enrich_plex_item(conn.plex_account_token, plex_id)
                                     if not enriched:
                                         continue
                                     item_type = fi.get("type", "").lower()

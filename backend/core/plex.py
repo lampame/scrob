@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import httpx
 import xmltodict
@@ -308,7 +309,205 @@ async def get_account_id(url: str, token: str, username: str) -> Optional[int]:
 METADATA_BASE = "https://metadata.provider.plex.tv"
 DISCOVER_BASE = "https://discover.provider.plex.tv"
 PLEX_TV_BASE  = "https://plex.tv"
+APP_AUTH_BASE = "https://app.plex.tv/auth"
 COMMUNITY_BASE = "https://community.plex.tv"
+
+
+# ── plex.tv account auth (PIN / "Login with Plex") ─────────────────────────────
+
+def _plextv_headers(client_id: str, token: Optional[str] = None) -> Dict:
+    headers = {
+        "Accept": "application/json",
+        "X-Plex-Product": "Scrob",
+        "X-Plex-Version": "1.0",
+        "X-Plex-Client-Identifier": client_id,
+        "X-Plex-Device": "Scrob",
+        "X-Plex-Device-Name": "Scrob",
+        "X-Plex-Platform": "Web",
+    }
+    if token:
+        headers["X-Plex-Token"] = token
+    return headers
+
+
+async def create_auth_pin(client_id: str) -> Dict:
+    """Create a plex.tv auth PIN. Returns {id, code}.
+
+    The user then visits build_auth_url(client_id, code) and signs in; once they
+    do, poll_auth_pin() returns the account auth token.
+    """
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0), follow_redirects=True) as client:
+        res = await client.post(
+            f"{PLEX_TV_BASE}/api/v2/pins",
+            headers=_plextv_headers(client_id),
+            params={"strong": "true"},
+        )
+        res.raise_for_status()
+        data = res.json()
+        return {"id": data["id"], "code": data["code"]}
+
+
+async def poll_auth_pin(client_id: str, pin_id: int) -> Optional[str]:
+    """Return the account auth token once the PIN has been claimed, else None."""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0), follow_redirects=True) as client:
+        res = await client.get(
+            f"{PLEX_TV_BASE}/api/v2/pins/{pin_id}",
+            headers=_plextv_headers(client_id),
+        )
+        res.raise_for_status()
+        return res.json().get("authToken") or None
+
+
+def build_auth_url(client_id: str, code: str) -> str:
+    """The app.plex.tv URL the user opens to authorize the PIN."""
+    from urllib.parse import urlencode
+
+    params = {
+        "clientID": client_id,
+        "code": code,
+        "context[device][product]": "Scrob",
+        "context[device][device]": "Scrob",
+        "context[device][platform]": "Web",
+    }
+    return f"{APP_AUTH_BASE}#?{urlencode(params)}"
+
+
+async def get_account(client_id: str, token: str) -> Optional[Dict]:
+    """Fetch the signed-in plex.tv account. Returns {id, username, title, email}."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0), follow_redirects=True) as client:
+            res = await client.get(
+                f"{PLEX_TV_BASE}/api/v2/user",
+                headers=_plextv_headers(client_id, token),
+            )
+            if res.status_code >= 400:
+                return None
+            d = res.json()
+        return {
+            "id": str(d.get("id") or ""),
+            "username": d.get("username") or d.get("title") or "",
+            "title": d.get("title") or "",
+            "email": d.get("email") or "",
+        }
+    except Exception:
+        return None
+
+
+async def get_servers(client_id: str, token: str) -> List[Dict]:
+    """List the Plex Media Servers this account can reach.
+
+    Each entry: {name, machine_identifier, owned, access_token, connections:
+    [{uri, local, relay, protocol}]}. The per-server access_token is scoped to
+    that server and is what belongs in MediaServerConnection.token.
+    """
+    async with httpx.AsyncClient(timeout=httpx.Timeout(20.0), follow_redirects=True) as client:
+        res = await client.get(
+            f"{PLEX_TV_BASE}/api/v2/resources",
+            headers=_plextv_headers(client_id, token),
+            params={"includeHttps": 1, "includeRelay": 1},
+        )
+        res.raise_for_status()
+        resources = res.json()
+
+    servers: List[Dict] = []
+    for r in resources:
+        provides = (r.get("provides") or "").split(",")
+        if "server" not in provides:
+            continue
+        conns = [
+            {
+                "uri": c.get("uri"),
+                "local": bool(c.get("local")),
+                "relay": bool(c.get("relay")),
+                "protocol": c.get("protocol"),
+            }
+            for c in (r.get("connections") or [])
+            if c.get("uri")
+        ]
+        servers.append({
+            "name": r.get("name") or "Plex Server",
+            "machine_identifier": r.get("clientIdentifier") or "",
+            "owned": bool(r.get("owned")),
+            "access_token": r.get("accessToken") or token,
+            "connections": conns,
+        })
+    return servers
+
+
+def _connection_rank(conn: Dict) -> int:
+    if conn.get("relay"):
+        return 2
+    if conn.get("local"):
+        return 0
+    return 1
+
+
+def connection_label(conn: Dict) -> str:
+    """Human label for a Plex connection URI, e.g. 'Local · https://10-0-0-2.plex.direct:32400'."""
+    if conn.get("relay"):
+        kind = "Relay"
+    elif conn.get("local"):
+        kind = "Local"
+    else:
+        kind = "Remote"
+    return f"{kind} · {conn.get('uri', '')}"
+
+
+async def _probe_connection(client: httpx.AsyncClient, uri: str, token: str, want_mid: Optional[str]) -> bool:
+    try:
+        r = await client.get(
+            f"{uri.rstrip('/')}/identity",
+            headers={"X-Plex-Token": token, "Accept": "application/json"},
+        )
+        if r.status_code != 200:
+            return False
+        got = r.json().get("MediaContainer", {}).get("machineIdentifier")
+        return not want_mid or got == want_mid
+    except Exception:
+        return False
+
+
+async def resolve_connections(server: Dict) -> Dict:
+    """Probe every advertised connection for a server and return them all, ordered
+    local → remote → relay, each tagged with a `reachable` flag and a display
+    `label`. `recommended` is the first reachable URI, or the best-ranked one if
+    none respond (the user can still pick another or edit the field).
+
+    URIs that resolve to a blocked (cloud-metadata) range are dropped entirely -
+    a Plex server can advertise arbitrary custom-access URLs and the backend
+    fetches these, so they go through the same SSRF filter as manual entry."""
+    from core.url_validator import is_safe_service_url
+
+    candidates = sorted(server.get("connections") or [], key=_connection_rank)
+    ordered = [
+        c for c in candidates
+        if c.get("uri") and await is_safe_service_url(c["uri"])
+    ]
+    if not ordered:
+        return {"recommended": None, "connections": []}
+
+    want_mid = server.get("machine_identifier")
+    token = server.get("access_token")
+    async with httpx.AsyncClient(timeout=httpx.Timeout(4.0), follow_redirects=False) as client:
+        flags = await asyncio.gather(
+            *(_probe_connection(client, c["uri"], token, want_mid) for c in ordered)
+        )
+
+    conns = [
+        {
+            "uri": c["uri"],
+            "local": c["local"],
+            "relay": c["relay"],
+            "protocol": c.get("protocol"),
+            "reachable": bool(ok),
+            "label": connection_label(c),
+        }
+        for c, ok in zip(ordered, flags)
+    ]
+    recommended = next((c["uri"] for c in conns if c["reachable"]), conns[0]["uri"])
+    return {"recommended": recommended, "connections": conns}
+
+
 _CLOUD_HEADERS = {
     "Accept": "application/json",
     "X-Plex-Product": "Scrob",

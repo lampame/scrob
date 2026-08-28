@@ -517,9 +517,45 @@ export interface MediaServerConnectionCreate {
   push_ratings?: boolean;
   auto_sync_interval?: number | null;
   auto_push_interval?: number | null;
+  plex_auth_token?: string | null;
+  plex_account_id?: string | null;
+  plex_machine_identifier?: string | null;
 }
 
 export type MediaServerConnectionUpdate = Partial<Omit<MediaServerConnectionCreate, "type">>;
+
+export interface PlexPinStart {
+  pin_id: number;
+  auth_url: string;
+  interval: number;
+}
+
+export interface PlexLoginConnection {
+  uri: string;
+  local: boolean;
+  relay: boolean;
+  protocol: string | null;
+  reachable: boolean;
+  label: string;
+}
+
+export interface PlexLoginServer {
+  name: string;
+  machine_identifier: string;
+  owned: boolean;
+  url: string;
+  token: string;
+  connections: PlexLoginConnection[];
+}
+
+export type PlexPinPoll =
+  | { status: "pending" }
+  | {
+      status: "connected";
+      account: { id: string; username: string; title: string; email: string };
+      auth_token: string;
+      servers: PlexLoginServer[];
+    };
 
 export interface ScrobbleConnection {
   id: number;
@@ -1074,6 +1110,10 @@ export const api = {
       patch<MediaServerConnection>(`/auth/connections/${id}`, body, token),
     deleteConnection: (id: number, token: string) =>
       del<{ status: string }>(`/auth/connections/${id}`, token),
+    plexPinStart: (token: string) =>
+      post<PlexPinStart>("/auth/plex/pin/start", undefined, token),
+    plexPinPoll: (token: string) =>
+      post<PlexPinPoll>("/auth/plex/pin/poll", undefined, token),
     startStremioLink: (token: string) =>
       post<{ code: string; link: string; qrcode: string }>("/auth/stremio/link/start", undefined, token),
     pollStremioLink: (body: { code: string; name: string }, token: string) =>

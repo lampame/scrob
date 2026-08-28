@@ -131,6 +131,22 @@ img, a {
   -webkit-touch-callout: none;
 }
 
+/* Native <select> arrow sits jammed against the right border and can't be
+   spaced with padding. Replace it everywhere with a custom chevron that has real
+   breathing room. The [class] selector is only to out-specify Tailwind's px-*
+   utilities for padding-right (every <select> in the app carries a class). */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke-width='2' stroke='%2371717a'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' d='M19.5 8.25l-7.5 7.5-7.5-7.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.875rem center;
+  background-size: 1rem;
+}
+select[class] {
+  padding-right: 2.75rem;
+}
+
 /* Safe area for bottom nav on iOS */
 .safe-area-bottom {
   padding-bottom: env(safe-area-inset-bottom);

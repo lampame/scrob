@@ -106,3 +106,15 @@ async def validate_service_url(url: str, field_name: str = "URL") -> str:
         pass
 
     return url.rstrip("/")
+
+
+async def is_safe_service_url(url: str) -> bool:
+    """Non-raising form of validate_service_url. True when the URL is a well-formed
+    http(s) URL that doesn't resolve to a blocked (cloud-metadata) range. Use to
+    filter machine-supplied URL lists (e.g. Plex-advertised connection URIs)
+    before the backend makes requests to them."""
+    try:
+        await validate_service_url(url)
+        return True
+    except HTTPException:
+        return False

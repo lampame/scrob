@@ -20,6 +20,14 @@ class MediaServerConnection(Base):
     server_user_id   : Mapped[Optional[str]] = mapped_column(String(255))  # jellyfin/emby user ID
     server_username  : Mapped[Optional[str]] = mapped_column(String(255))  # plex username for webhook attribution
 
+    # Plex "Login with Plex" (PIN auth). NULL on manually-configured connections.
+    # plex_auth_token is the account-level token (needed for watchlist / Discover /
+    # community calls, which a scoped per-server token can't make); token stays the
+    # per-server token used for library reads and scrobbling.
+    plex_auth_token         : Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    plex_account_id         : Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    plex_machine_identifier : Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
     # Inbound sync flags (source → Scrob)
     sync_collection  : Mapped[bool] = mapped_column(Boolean, nullable=False, default=True,  server_default="true")
     sync_watched     : Mapped[bool] = mapped_column(Boolean, nullable=False, default=True,  server_default="true")
@@ -60,6 +68,14 @@ class MediaServerConnection(Base):
     plex_history_cursor_at : Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     created_at       : Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    @property
+    def plex_account_token(self) -> str:
+        """Token for account-scoped Plex calls (watchlist, Discover, community).
+
+        Uses the account-level token from "Login with Plex" when present, else
+        falls back to the stored server token (correct for owner-token setups)."""
+        return self.plex_auth_token or self.token
 
     @property
     def push_enabled(self) -> bool:
