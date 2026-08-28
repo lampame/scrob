@@ -113,6 +113,16 @@ jobs:
           BR="sync/${LATEST#upstream/}"
           git push origin "$BR"
 
+      - name: Ensure sync label exists
+        if: steps.check.outputs.already_merged == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create sync \
+            --color "0E8A16" \
+            --description "Automated upstream sync from ellite/scrob" \
+            || true
+
       - name: Create Pull Request
         if: steps.check.outputs.already_merged == 'false'
         env:
