@@ -10,6 +10,7 @@ from sqlalchemy import select, delete, func, or_
 from sqlalchemy.orm.exc import StaleDataError
 
 from db import get_db
+from dependencies import get_current_user_or_api_key
 from models.media import Media
 from models.show import Show
 from models.collection import Collection, CollectionFile
@@ -3012,12 +3013,7 @@ async def find_or_create_media_kodi(
     return media
 
 
-async def _handle_kodi_webhook(request: Request, db: AsyncSession, api_key: str):
-    user_result = await db.execute(select(User).where(User.api_key == api_key))
-    user = user_result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
+async def _handle_kodi_webhook(request: Request, db: AsyncSession, user: User):
     body = await request.body()
     if not body:
         return {"status": "ignored", "reason": "empty body"}
@@ -3106,21 +3102,16 @@ async def _handle_kodi_webhook(request: Request, db: AsyncSession, api_key: str)
 async def kodi_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    api_key: str = Query(..., description="Scrob user API key"),
+    user: User = Depends(get_current_user_or_api_key),
 ):
-    return await _handle_kodi_webhook(request, db, api_key)
+    return await _handle_kodi_webhook(request, db, user)
 
 
 @router.get("/kodi/history")
 async def kodi_library_history(
     db: AsyncSession = Depends(get_db),
-    api_key: str = Query(..., description="Scrob user API key"),
+    user: User = Depends(get_current_user_or_api_key),
 ):
-    user_result = await db.execute(select(User).where(User.api_key == api_key))
-    user = user_result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
     movie_rows = (await db.execute(
         select(Media.tmdb_id, func.sum(WatchEvent.play_count).label("play_count"))
         .join(WatchEvent, WatchEvent.media_id == Media.id)
@@ -3154,17 +3145,12 @@ async def kodi_library_history(
 @router.get("/kodi/ratings")
 async def kodi_library_ratings(
     db: AsyncSession = Depends(get_db),
-    api_key: str = Query(..., description="Scrob user API key"),
+    user: User = Depends(get_current_user_or_api_key),
 ):
     """Item-level ratings for the signed-in user, shaped for the Kodi add-on to
     mirror back into its local library as ``userrating``. Movie and episode
     ratings only - season/show-level rows (``Rating.season_number`` or
     ``episode_order`` set) are left out."""
-    user_result = await db.execute(select(User).where(User.api_key == api_key))
-    user = user_result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
     movie_rows = (await db.execute(
         select(Media.tmdb_id, Rating.rating)
         .join(Rating, Rating.media_id == Media.id)
@@ -3221,13 +3207,8 @@ class KodiRatingPayload(BaseModel):
 async def kodi_rating(
     payload: KodiRatingPayload,
     db: AsyncSession = Depends(get_db),
-    api_key: str = Query(..., description="Scrob user API key"),
+    user: User = Depends(get_current_user_or_api_key),
 ):
-    user_result = await db.execute(select(User).where(User.api_key == api_key))
-    user = user_result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
     settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == user.id))
     settings = settings_result.scalar_one_or_none()
     tmdb_key = await _get_tmdb_key(db, settings)
