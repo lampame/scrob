@@ -1,0 +1,118 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream release tag to sync (e.g. v2.7.0)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Sync with upstream
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout fork (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set git identity
+        run: |
+          git config user.email "ci@lampame.dev"
+          git config user.name "fork-ci"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/ellite/scrob.git || true
+          git fetch --no-tags upstream \
+            'refs/tags/v*:refs/tags/upstream/v*' \
+            '+refs/heads/main:refs/remotes/upstream/main'
+
+      - name: Resolve latest upstream tag
+        id: resolve
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            LATEST="upstream/${{ inputs.tag }}"
+          else
+            LATEST=$(git tag -l 'upstream/v*' --sort=-version:refname | head -1)
+          fi
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+          echo "Syncing from: $LATEST"
+
+      - name: Check if already merged
+        id: check
+        run: |
+          if git merge-base --is-ancestor "${{ steps.resolve.outputs.latest }}" main; then
+            echo "already_merged=true" >> $GITHUB_OUTPUT
+            echo "main already contains $LATEST — nothing to do"
+          else
+            echo "already_merged=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create sync branch and merge
+        if: steps.check.outputs.already_merged == 'false'
+        run: |
+          LATEST="${{ steps.resolve.outputs.latest }}"
+          BR="sync/${LATEST#upstream/}"
+          git switch -c "$BR" main
+          git merge "$LATEST" --no-edit
+
+      - name: Regenerate lock files
+        if: steps.check.outputs.already_merged == 'false'
+        run: |
+          cd backend && uv lock && cd ..
+          cd frontend && npm install --package-lock-only && cd ..
+          git add backend/uv.lock frontend/package-lock.json
+          git commit -m "chore: regenerate lock files for ${{ steps.resolve.outputs.latest }}" || echo "no lock changes"
+
+      - name: Alembic merge heads
+        if: steps.check.outputs.already_merged == 'false'
+        run: |
+          cd backend
+          HEADS=$(alembic heads | wc -l)
+          if [ "$HEADS" -gt 1 ]; then
+            alembic merge heads -m "merge upstream ${{ steps.resolve.outputs.latest }}"
+            git add migrations/versions/
+            git commit -m "chore: alembic merge upstream ${{ steps.resolve.outputs.latest }}" || echo "no migration merge needed"
+          else
+            echo "single alembic head — OK"
+          fi
+          cd ..
+
+      - name: Push sync branch
+        if: steps.check.outputs.already_merged == 'false'
+        run: |
+          BR="sync/${{ steps.resolve.outputs.latest#upstream/ }}"
+          git push origin "$BR"
+
+      - name: Create Pull Request
+        if: steps.check.outputs.already_merged == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BR="sync/${{ steps.resolve.outputs.latest#upstream/ }}"
+          gh pr create \
+            --base main \
+            --head "$BR" \
+            --title "sync: upstream ${{ steps.resolve.outputs.latest }}" \
+            --label "sync" \
+            --body "Automated upstream sync from \`${{ steps.resolve.outputs.latest }}\`.
+
+CI on this branch (push-triggered) must pass before manual merge.
+- Build backend + frontend
+- npm ci / uv sync --locked (lock consistency)
+- alembic upgrade head on test DB
+- customization tests
+- /health smoke test" || echo "PR already exists or creation skipped"
