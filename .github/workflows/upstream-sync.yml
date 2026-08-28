@@ -109,7 +109,8 @@ jobs:
       - name: Push sync branch
         if: steps.check.outputs.already_merged == 'false'
         run: |
-          BR="sync/${{ steps.resolve.outputs.latest#upstream/ }}"
+          LATEST="${{ steps.resolve.outputs.latest }}"
+          BR="sync/${LATEST#upstream/}"
           git push origin "$BR"
 
       - name: Create Pull Request
@@ -117,17 +118,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BR="sync/${{ steps.resolve.outputs.latest#upstream/ }}"
+          LATEST="${{ steps.resolve.outputs.latest }}"
+          BR="sync/${LATEST#upstream/}"
           gh pr create \
             --base main \
             --head "$BR" \
-            --title "sync: upstream ${{ steps.resolve.outputs.latest }}" \
+            --title "sync: upstream ${LATEST}" \
             --label "sync" \
-            --body "Automated upstream sync from \`${{ steps.resolve.outputs.latest }}\`.
+            --body "Automated upstream sync from \`${LATEST}\`.
 
-CI on this branch (push-triggered) must pass before manual merge.
-- Build backend + frontend
-- npm ci / uv sync --locked (lock consistency)
-- alembic upgrade head on test DB
-- customization tests
-- /health smoke test" || echo "PR already exists or creation skipped"
+          CI on this branch (push-triggered) must pass before manual merge.
+          - Build backend + frontend
+          - npm ci / uv sync --locked (lock consistency)
+          - alembic upgrade head on test DB
+          - customization tests
+          - /health smoke test" || echo "PR already exists or creation skipped"
