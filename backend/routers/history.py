@@ -436,6 +436,65 @@ async def get_history(
     }
 
 
+async def _build_now_playing_item(session: PlaybackSession, media: Media, db: AsyncSession) -> dict:
+    """Build a now-playing item dict for a session (shared by /now-playing and /session/{tmdb_id})."""
+    item: dict = {
+        "session_key": session.session_key,
+        "source": session.source,
+        "state": session.state,
+        "progress_percent": session.progress_percent,
+        "progress_seconds": session.progress_seconds,
+        "started_at": session.started_at.isoformat(),
+        "updated_at": session.updated_at.isoformat(),
+        "media": {
+            "id": media.id,
+            "tmdb_id": media.tmdb_id,
+            "type": media.media_type,
+            "title": media.title,
+            "poster_path": media.poster_path,
+            "backdrop_path": media.backdrop_path,
+            "season_number": media.season_number,
+            "episode_number": media.episode_number,
+            "runtime": media.runtime,
+            "tvdb_sourced": is_unmapped_tvdb_episode(media),
+            "has_mid_credits_scene": (media.tmdb_data or {}).get("has_mid_credits_scene", False),
+            "has_post_credits_scene": (media.tmdb_data or {}).get("has_post_credits_scene", False),
+        },
+    }
+    if media.media_type == MediaType.episode and media.show_id:
+        show_result = await db.execute(select(Show).where(Show.id == media.show_id))
+        show = show_result.scalar_one_or_none()
+        if show:
+            item["media"]["show_title"] = show.title
+            item["media"]["show_tmdb_id"] = show.tmdb_id
+            item["media"]["show_tvdb_id"] = show.tvdb_id
+            item["media"]["show_poster_path"] = show.poster_path
+            item["media"]["show_backdrop_path"] = show.backdrop_path
+    elif media.media_type == MediaType.episode:
+        hint = (media.tmdb_data or {}).get("show_title")
+        if hint:
+            item["media"]["show_title"] = hint
+    return item
+
+
+async def _apply_episode_order_to_sessions(sessions: list[dict], db: AsyncSession, user_id: int) -> None:
+    """Episode-order preference / TVDB position translation (#186) for a list of now-playing items."""
+    series_ids = {
+        s["media"]["show_tmdb_id"] for s in sessions if s["media"].get("show_tmdb_id")
+    }
+    if not series_ids:
+        return
+    episode_orders = await get_episode_orders_for_series(db, user_id, list(series_ids))
+    tvdb_series_ids = [
+        sid for sid, pref in episode_orders.items() if pref.episode_order == "tvdb"
+    ]
+    tmdb_to_tvdb = (
+        await get_tmdb_to_tvdb_positions(db, tvdb_series_ids) if tvdb_series_ids else {}
+    )
+    for s in sessions:
+        _attach_episode_order_fields(s["media"], episode_orders, tmdb_to_tvdb)
+
+
 @router.get("/now-playing")
 async def get_now_playing(
     db: AsyncSession = Depends(get_db),
@@ -450,66 +509,8 @@ async def get_now_playing(
         .order_by(desc(PlaybackSession.updated_at))
     )
     rows = result.all()
-    sessions = []
-    for session, media in rows:
-        item: dict = {
-            "session_key": session.session_key,
-            "source": session.source,
-            "state": session.state,
-            "progress_percent": session.progress_percent,
-            "progress_seconds": session.progress_seconds,
-            "started_at": session.started_at.isoformat(),
-            "updated_at": session.updated_at.isoformat(),
-            "media": {
-                "id": media.id,
-                "tmdb_id": media.tmdb_id,
-                "type": media.media_type,
-                "title": media.title,
-                "poster_path": media.poster_path,
-                "backdrop_path": media.backdrop_path,
-                "season_number": media.season_number,
-                "episode_number": media.episode_number,
-                "runtime": media.runtime,
-                "tvdb_sourced": is_unmapped_tvdb_episode(media),
-                "has_mid_credits_scene": (media.tmdb_data or {}).get("has_mid_credits_scene", False),
-                "has_post_credits_scene": (media.tmdb_data or {}).get("has_post_credits_scene", False),
-            },
-        }
-        if media.media_type == MediaType.episode and media.show_id:
-            show_result = await db.execute(select(Show).where(Show.id == media.show_id))
-            show = show_result.scalar_one_or_none()
-            if show:
-                item["media"]["show_title"] = show.title
-                item["media"]["show_tmdb_id"] = show.tmdb_id
-                item["media"]["show_tvdb_id"] = show.tvdb_id
-                item["media"]["show_poster_path"] = show.poster_path
-                item["media"]["show_backdrop_path"] = show.backdrop_path
-        elif media.media_type == MediaType.episode:
-            hint = (media.tmdb_data or {}).get("show_title")
-            if hint:
-                item["media"]["show_title"] = hint
-        sessions.append(item)
-
-    # Episode-order preference / TVDB position translation (#186) - this
-    # endpoint builds its own dict inline rather than going through
-    # enrich_with_state, so it needs the same batched lookups + attach step
-    # done separately, in a second pass now that every session's show_tmdb_id
-    # is known. Session counts here are always small (active playback only),
-    # so a second pass over `sessions` costs nothing.
-    series_ids = {
-        s["media"]["show_tmdb_id"] for s in sessions if s["media"].get("show_tmdb_id")
-    }
-    if series_ids:
-        episode_orders = await get_episode_orders_for_series(db, current_user.id, list(series_ids))
-        tvdb_series_ids = [
-            sid for sid, pref in episode_orders.items() if pref.episode_order == "tvdb"
-        ]
-        tmdb_to_tvdb = (
-            await get_tmdb_to_tvdb_positions(db, tvdb_series_ids) if tvdb_series_ids else {}
-        )
-        for s in sessions:
-            _attach_episode_order_fields(s["media"], episode_orders, tmdb_to_tvdb)
-
+    sessions = [await _build_now_playing_item(session, media, db) for session, media in rows]
+    await _apply_episode_order_to_sessions(sessions, db, current_user.id)
     return {"now_playing": sessions}
 
 
@@ -2577,13 +2578,29 @@ async def _get_or_create_media_for_session(
         except Exception:
             pass
     else:
-        # Episode: create a minimal row from request data
+        # Episode: reuse an existing row for this exact (show, season, episode)
+        # if one exists, otherwise create a minimal row from request data.
+        # Reusing avoids duplicate Media rows (which would break the frontend's
+        # now-playing match by media_id / tmdb_id) and keeps the canonical
+        # episode's runtime/title (design doc §4.1).
         show_id = None
         if body.show_tmdb_id:
             show_q = await db.execute(select(Show).where(Show.tmdb_id == body.show_tmdb_id))
             show = show_q.scalar_one_or_none()
             if show:
                 show_id = show.id
+        if show_id is not None and body.season_number is not None and body.episode_number is not None:
+            existing_q = await db.execute(
+                select(Media).where(
+                    Media.show_id == show_id,
+                    Media.season_number == body.season_number,
+                    Media.episode_number == body.episode_number,
+                    Media.media_type == MediaType.episode,
+                )
+            )
+            media = existing_q.scalars().first()
+            if media:
+                return media
         media, _created = await create_media_safely(
             db,
             body.tmdb_id,
@@ -2600,21 +2617,64 @@ async def _get_or_create_media_for_session(
     return media
 
 
+def _session_key(user_id: int, media: Media, show_tmdb: int | None) -> str:
+    """Deterministic session key from title identity (design doc §3.1).
+
+    Movie   -> manual-{user_id}-{tmdb_id}
+    Episode -> manual-{user_id}-{show_tmdb_id}-{season}-{episode}
+    """
+    if media.media_type == MediaType.movie:
+        return f"manual-{user_id}-{media.tmdb_id}"
+    return f"manual-{user_id}-{show_tmdb}-{media.season_number}-{media.episode_number}"
+
+
 @router.post("/session/start")
 async def start_manual_session(
     body: schemas.ManualSessionStart,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_or_api_key),
 ):
-    """Start a manual scrobble session for any movie or episode."""
+    """Start (or resume) a manual scrobble session for any movie or episode.
+
+    The session key is derived from the title identity (tmdb_id for movies,
+    show_tmdb_id+season+episode for episodes) so repeated starts for the same
+    title UPSERT the same session instead of resetting progress (design doc §3.1).
+    Pass reset=true to explicitly clear progress and restart from 0.
+    """
     media = await _get_or_create_media_for_session(db, body, current_user.id)
 
     if media.runtime is None and body.runtime:
         media.runtime = body.runtime
 
-    session_key = f"manual-{current_user.id}-{media.id}"
+    show_tmdb = body.show_tmdb_id
+    if media.media_type == MediaType.episode and show_tmdb is None and media.show_id:
+        show_res = await db.execute(select(Show.tmdb_id).where(Show.id == media.show_id))
+        show_tmdb = show_res.scalar_one_or_none()
+    session_key = _session_key(current_user.id, media, show_tmdb)
 
-    await db.execute(delete(PlaybackSession).where(PlaybackSession.session_key == session_key))
+    existing = (
+        await db.execute(
+            select(PlaybackSession).where(
+                PlaybackSession.session_key == session_key,
+                PlaybackSession.user_id == current_user.id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if existing:
+        if body.reset:
+            existing.progress_seconds = 0
+            existing.progress_percent = 0.0
+        existing.state = "playing"
+        existing.updated_at = datetime.utcnow()
+        await db.commit()
+        return {
+            "session_key": session_key,
+            "media_id": media.id,
+            "runtime": media.runtime,
+            "resumed": not body.reset,
+        }
+
     session = PlaybackSession(
         user_id=current_user.id,
         media_id=media.id,
@@ -2627,7 +2687,7 @@ async def start_manual_session(
     db.add(session)
     await db.commit()
 
-    return {"session_key": session_key, "media_id": media.id, "runtime": media.runtime}
+    return {"session_key": session_key, "media_id": media.id, "runtime": media.runtime, "resumed": False}
 
 
 @router.patch("/session/{session_key}")
@@ -2724,11 +2784,13 @@ async def auto_complete_manual_sessions(db: AsyncSession) -> None:
     completed: list[tuple[int, int]] = []  # (user_id, media_id)
     new_events: list[WatchEvent] = []
     for session, media in result.all():
-        runtime_seconds = (media.runtime or 0) * 60
-        if runtime_seconds <= 0:
-            continue
-        elapsed = session.progress_seconds + (now - session.updated_at).total_seconds()
-        if elapsed < runtime_seconds:
+        # Only finalize a session the client itself reported as essentially
+        # finished (last heartbeat >= 90%). Never drop a session just because
+        # wall-clock time elapsed since the last heartbeat — that wrongly
+        # completes/resumes sessions after a container restart or a paused
+        # client (design doc §3.5.2). Sessions below the threshold are left
+        # for the client to resume or complete explicitly.
+        if session.progress_percent < 0.90:
             continue
         await db.execute(delete(PlaybackSession).where(PlaybackSession.id == session.id))
         await db.execute(
@@ -2799,3 +2861,144 @@ async def complete_manual_session(
 
     await _push_watch_state(db, current_user.id, [media_id], watched=True)
     return {"status": "ok"}
+
+
+async def _upsert_session_progress(
+    db: AsyncSession,
+    current_user: User,
+    start_body: schemas.ManualSessionStart,
+    update_body: schemas.ManualSessionUpdate,
+) -> dict:
+    """Resolve/create the media for a title identity, then update (or lazily
+    create) its playback session and Continue-Watching progress (design doc §3.4)."""
+    media = await _get_or_create_media_for_session(db, start_body, current_user.id)
+    if media.runtime is None and start_body.runtime:
+        media.runtime = start_body.runtime
+
+    show_tmdb = start_body.show_tmdb_id
+    if media.media_type == MediaType.episode and show_tmdb is None and media.show_id:
+        show_res = await db.execute(select(Show.tmdb_id).where(Show.id == media.show_id))
+        show_tmdb = show_res.scalar_one_or_none()
+    session_key = _session_key(current_user.id, media, show_tmdb)
+
+    session = (
+        await db.execute(
+            select(PlaybackSession).where(
+                PlaybackSession.session_key == session_key,
+                PlaybackSession.user_id == current_user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not session:
+        session = PlaybackSession(
+            user_id=current_user.id,
+            media_id=media.id,
+            session_key=session_key,
+            source="manual",
+            state="playing",
+            progress_seconds=0,
+            progress_percent=0.0,
+        )
+        db.add(session)
+        await db.flush()
+
+    runtime_seconds = (media.runtime * 60) if media.runtime else 0
+    progress_pct = (update_body.progress_seconds / runtime_seconds) if runtime_seconds > 0 else 0.0
+    progress_pct = min(1.0, max(0.0, progress_pct))
+
+    session.progress_seconds = update_body.progress_seconds
+    session.progress_percent = progress_pct
+    if update_body.state in ("playing", "paused"):
+        session.state = update_body.state
+    session.updated_at = datetime.utcnow()
+
+    if 0.05 <= progress_pct < 0.90:
+        prog = (
+            await db.execute(
+                select(PlaybackProgress).where(
+                    PlaybackProgress.user_id == current_user.id,
+                    PlaybackProgress.media_id == media.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if prog:
+            prog.progress_seconds = update_body.progress_seconds
+            prog.progress_percent = progress_pct
+        else:
+            db.add(
+                PlaybackProgress(
+                    user_id=current_user.id,
+                    media_id=media.id,
+                    progress_seconds=update_body.progress_seconds,
+                    progress_percent=progress_pct,
+                )
+            )
+    else:
+        await db.execute(
+            delete(PlaybackProgress).where(
+                PlaybackProgress.user_id == current_user.id,
+                PlaybackProgress.media_id == media.id,
+            )
+        )
+
+    await db.commit()
+    return {"status": "ok", "session_key": session_key, "media_id": media.id}
+
+
+@router.get("/session/{tmdb_id}")
+async def get_sessions_for_title(
+    tmdb_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_or_api_key),
+):
+    """All unfinished (in-progress) playback sessions for a title.
+
+    tmdb_id matches Media.tmdb_id (a movie, or an episode with its own tmdb_id)
+    OR Media.show.tmdb_id (every in-progress episode of a show). Returns an
+    empty list when there are none (design doc §3.3).
+    """
+    result = await db.execute(
+        select(PlaybackSession, Media)
+        .join(Media, Media.id == PlaybackSession.media_id)
+        .outerjoin(Show, Show.id == Media.show_id)
+        .where(
+            PlaybackSession.user_id == current_user.id,
+            or_(Media.tmdb_id == tmdb_id, Show.tmdb_id == tmdb_id),
+        )
+        .order_by(desc(PlaybackSession.updated_at))
+    )
+    rows = result.all()
+    sessions = [await _build_now_playing_item(session, media, db) for session, media in rows]
+    await _apply_episode_order_to_sessions(sessions, db, current_user.id)
+    return {"now_playing": sessions}
+
+
+@router.put("/session/{tmdb_id}")
+async def update_session_by_tmdb(
+    tmdb_id: int,
+    body: schemas.ManualSessionUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_or_api_key),
+):
+    """Update a movie session by tmdb_id (lazy-create if missing). Design doc §3.4."""
+    start_body = schemas.ManualSessionStart(media_type=MediaType.movie, tmdb_id=tmdb_id)
+    return await _upsert_session_progress(db, current_user, start_body, body)
+
+
+@router.put("/session/{tmdb_id}/{season}/{episode}")
+async def update_session_by_tmdb_season_episode(
+    tmdb_id: int,
+    season: int,
+    episode: int,
+    body: schemas.ManualSessionUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_or_api_key),
+):
+    """Update an episode session by show_tmdb_id + season + episode (lazy-create if missing). Design doc §3.4."""
+    start_body = schemas.ManualSessionStart(
+        media_type=MediaType.episode,
+        show_tmdb_id=tmdb_id,
+        season_number=season,
+        episode_number=episode,
+    )
+    return await _upsert_session_progress(db, current_user, start_body, body)
