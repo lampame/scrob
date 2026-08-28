@@ -27,6 +27,7 @@ from routers.webhooks import (
     find_or_create_media_jellyfin_multi,
     mark_pushed_watched,
     parse_jellyfin_payload,
+    parse_kodi_payload,
 )
 
 
@@ -1144,6 +1145,75 @@ class BackfillCreditsStingersTests(IsolatedAsyncioTestCase):
         with patch("core.tmdb.get_movie", new_callable=AsyncMock, side_effect=RuntimeError("boom")):
             await _backfill_credits_stingers(db, media, "tmdb-key")
         self.assertNotIn("has_mid_credits_scene", media.tmdb_data)
+
+
+class ParseKodiPayloadTests(unittest.TestCase):
+    @staticmethod
+    def _hms(seconds: int) -> dict:
+        return {"hours": seconds // 3600, "minutes": (seconds % 3600) // 60, "seconds": seconds % 60}
+
+    def _stop_payload(self, *, position: int, total: int, end: bool) -> dict:
+        return {
+            "method": "Player.OnStop",
+            "item": {"type": "movie", "title": "The Matrix", "year": 1999,
+                     "uniqueid": {"tmdb": "603"}, "id": 7},
+            "player": {"time": self._hms(position), "totaltime": self._hms(total)},
+            "params": {"data": {"end": end}},
+        }
+
+    def test_unknown_method_is_ignored(self):
+        self.assertIsNone(parse_kodi_payload({"method": "System.OnWake"}))
+
+    def test_music_item_is_ignored(self):
+        payload = {"method": "Player.OnPlay", "item": {"type": "song", "title": "x"}}
+        self.assertIsNone(parse_kodi_payload(payload))
+
+    def test_play_maps_and_reads_ids(self):
+        payload = {
+            "method": "Player.OnPlay",
+            "item": {"type": "movie", "title": "The Matrix", "year": 1999,
+                     "uniqueid": {"tmdb": "603", "imdb": "tt0133093"}},
+            "player": {"time": self._hms(0), "totaltime": self._hms(8160)},
+        }
+        data = parse_kodi_payload(payload)
+        self.assertEqual(data["notification_type"], "play")
+        self.assertEqual(data["media_type"], "movie")
+        self.assertEqual(data["tmdb_id"], "603")
+        self.assertEqual(data["imdb_id"], "tt0133093")
+
+    def test_episode_carries_series_and_numbers(self):
+        payload = {
+            "method": "Player.OnPlay",
+            "item": {"type": "episode", "title": "Pilot", "showtitle": "Lost",
+                     "season": 1, "episode": 1, "uniqueid": {}},
+            "player": {"time": self._hms(60), "totaltime": self._hms(2520)},
+        }
+        data = parse_kodi_payload(payload)
+        self.assertEqual(data["media_type"], "episode")
+        self.assertEqual(data["series_name"], "Lost")
+        self.assertEqual((data["season_number"], data["episode_number"]), (1, 1))
+
+    def test_stop_near_end_reports_high_progress_even_without_end_flag(self):
+        # Issue #2: stopping in the credits (end flag false) should still land
+        # as a >= 90% watch so the stop handler marks it completed.
+        data = parse_kodi_payload(self._stop_payload(position=7350, total=7680, end=False))
+        self.assertFalse(data["ended"])
+        self.assertGreaterEqual(data["progress_percent"], 0.90)
+
+    def test_stop_with_end_flag_sets_ended(self):
+        data = parse_kodi_payload(self._stop_payload(position=0, total=7680, end=True))
+        self.assertTrue(data["ended"])
+
+    def test_stop_early_reports_low_progress(self):
+        data = parse_kodi_payload(self._stop_payload(position=120, total=7680, end=False))
+        self.assertLess(data["progress_percent"], 0.05)
+
+    def test_synthetic_mark_watched_payload_is_complete(self):
+        # Shape the add-on POSTs for a "mark as watched" (time == totaltime).
+        data = parse_kodi_payload(self._stop_payload(position=7680, total=7680, end=True))
+        self.assertTrue(data["ended"])
+        self.assertEqual(data["progress_percent"], 1.0)
+        self.assertEqual(data["session_id"], "7")
 
 
 if __name__ == "__main__":

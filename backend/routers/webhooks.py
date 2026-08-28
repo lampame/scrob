@@ -3151,6 +3151,59 @@ async def kodi_library_history(
     }
 
 
+@router.get("/kodi/ratings")
+async def kodi_library_ratings(
+    db: AsyncSession = Depends(get_db),
+    api_key: str = Query(..., description="Scrob user API key"),
+):
+    """Item-level ratings for the signed-in user, shaped for the Kodi add-on to
+    mirror back into its local library as ``userrating``. Movie and episode
+    ratings only - season/show-level rows (``Rating.season_number`` or
+    ``episode_order`` set) are left out."""
+    user_result = await db.execute(select(User).where(User.api_key == api_key))
+    user = user_result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    movie_rows = (await db.execute(
+        select(Media.tmdb_id, Rating.rating)
+        .join(Rating, Rating.media_id == Media.id)
+        .where(
+            Rating.user_id == user.id,
+            Rating.rating.isnot(None),
+            Rating.season_number.is_(None),
+            Rating.episode_order.is_(None),
+            Media.media_type == MediaType.movie,
+            Media.tmdb_id.isnot(None),
+        )
+    )).all()
+
+    episode_rows = (await db.execute(
+        select(Show.tmdb_id, Media.season_number, Media.episode_number, Rating.rating)
+        .join(Rating, Rating.media_id == Media.id)
+        .join(Show, Show.id == Media.show_id)
+        .where(
+            Rating.user_id == user.id,
+            Rating.rating.isnot(None),
+            Rating.season_number.is_(None),
+            Rating.episode_order.is_(None),
+            Media.media_type == MediaType.episode,
+            Media.season_number.isnot(None),
+            Media.episode_number.isnot(None),
+            Show.tmdb_id.isnot(None),
+        )
+    )).all()
+
+    return {
+        "movies": [{"tmdb_id": r.tmdb_id, "rating": r.rating} for r in movie_rows],
+        "episodes": [
+            {"show_tmdb_id": r.tmdb_id, "season_number": r.season_number,
+             "episode_number": r.episode_number, "rating": r.rating}
+            for r in episode_rows
+        ],
+    }
+
+
 class KodiRatingPayload(BaseModel):
     tmdb_id: Optional[str] = None
     tvdb_id: Optional[str] = None
