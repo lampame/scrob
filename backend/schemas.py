@@ -380,6 +380,7 @@ class ManualSessionStart(BaseModel):
     show_tmdb_id: Optional[int] = None  # episode context
     season_number: Optional[int] = None
     episode_number: Optional[int] = None
+    reset: bool = False                 # if True, clear existing progress and restart from 0
 
 
 class ManualSessionUpdate(BaseModel):
