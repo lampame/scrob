@@ -1421,6 +1421,8 @@ export const api = {
       patch<GlobalSettings>("/admin/settings", body, token),
     listUsers: (token: string) =>
       get<AdminUser[]>("/admin/users", undefined, token),
+    createUser: (body: { username: string; email: string; password: string; is_admin?: boolean }, token: string) =>
+      post<AdminUser>("/admin/users", body, token),
     toggleAdmin: (userId: number, token: string) =>
       patch<AdminUser>(`/admin/users/${userId}/toggle-admin`, undefined, token),
     deleteUser: (userId: number, token: string) =>

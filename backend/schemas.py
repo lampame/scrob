@@ -493,6 +493,13 @@ class MediaRequestOut(BaseModel):
         from_attributes = True
 
 
+class AdminUserCreate(BaseModel):
+    username : str
+    email    : EmailStr
+    password : str
+    is_admin : bool = False
+
+
 class AdminUser(BaseModel):
     id         : int
     username   : str

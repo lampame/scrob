@@ -1,6 +1,7 @@
 import gzip
 import io
 import json
+import secrets
 import struct
 from datetime import datetime
 
@@ -17,11 +18,12 @@ from models.global_settings import GlobalSettings
 from models.media import Media
 from models.collection import Collection
 from models.sync import SyncJob, SyncStatus
-from models.base import CollectionSource, MediaType
+from models.base import CollectionSource, MediaType, UserRole
 from models.media_request import MediaRequest, RequestStatus
 from models.users import UserSettings
 from dependencies import require_admin
 from core.url_validator import validate_service_url
+from core.security import get_password_hash
 from core.backup import asyncpg_conn, restore_backup
 import schemas
 
@@ -92,6 +94,37 @@ async def list_users(
         )
         for u, p in result.all()
     ]
+
+
+@router.post("/users", response_model=schemas.AdminUser, status_code=status.HTTP_201_CREATED)
+async def create_user(
+    body: schemas.AdminUserCreate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    result = await db.execute(
+        select(User).where((User.email == body.email) | (User.username == body.username))
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User with this email or username already exists",
+        )
+
+    new_user = User(
+        email=body.email,
+        username=body.username,
+        password_hash=get_password_hash(body.password),
+        api_key=secrets.token_urlsafe(32),
+        role=UserRole.admin if body.is_admin else UserRole.user,
+        is_admin=body.is_admin,
+        # Admin-created accounts are trusted, so skip e-mail activation.
+        email_confirmed=True,
+    )
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+    return new_user
 
 
 @router.patch("/users/{user_id}/toggle-admin", response_model=schemas.AdminUser)
