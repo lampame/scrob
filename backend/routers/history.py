@@ -2578,13 +2578,29 @@ async def _get_or_create_media_for_session(
         except Exception:
             pass
     else:
-        # Episode: create a minimal row from request data
+        # Episode: reuse an existing row for this exact (show, season, episode)
+        # if one exists, otherwise create a minimal row from request data.
+        # Reusing avoids duplicate Media rows (which would break the frontend's
+        # now-playing match by media_id / tmdb_id) and keeps the canonical
+        # episode's runtime/title (design doc §4.1).
         show_id = None
         if body.show_tmdb_id:
             show_q = await db.execute(select(Show).where(Show.tmdb_id == body.show_tmdb_id))
             show = show_q.scalar_one_or_none()
             if show:
                 show_id = show.id
+        if show_id is not None and body.season_number is not None and body.episode_number is not None:
+            existing_q = await db.execute(
+                select(Media).where(
+                    Media.show_id == show_id,
+                    Media.season_number == body.season_number,
+                    Media.episode_number == body.episode_number,
+                    Media.media_type == MediaType.episode,
+                )
+            )
+            media = existing_q.scalars().first()
+            if media:
+                return media
         media, _created = await create_media_safely(
             db,
             body.tmdb_id,
