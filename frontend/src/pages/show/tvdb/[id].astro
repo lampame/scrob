@@ -25,7 +25,8 @@ if (!show && !error) {
 }
 
 const seasons = (show?.seasons_meta ?? []).filter(
-  (season) => (season.season_number ?? 0) > 0 && (season.episode_count ?? 0) > 0
+  // Season 0 (Specials) is shown too - matches the TMDB show page (#335).
+  (season) => (season.season_number ?? -1) >= 0 && (season.episode_count ?? 0) > 0
 );
 const year = show?.first_air_date?.slice(0, 4) ?? null;
 const langNames = new Intl.DisplayNames(["en"], { type: "language" });
