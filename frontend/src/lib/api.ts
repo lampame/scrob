@@ -892,6 +892,7 @@ export interface TvdbShow {
   watched: boolean;
   watch_pct?: number;
   watch_started?: boolean;
+  dropped: boolean;
   in_lists: number[];
   collection_pct: number;
   is_monitored: boolean;
