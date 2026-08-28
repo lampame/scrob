@@ -10,7 +10,7 @@ jobs:
     name: Build & push fork image
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
@@ -65,3 +65,14 @@ jobs:
             ghcr.io/lampame/scrob:latest-omnibus
           cache-from: type=gha,scope=fork-release-omnibus
           cache-to: type=gha,mode=max,scope=fork-release-omnibus
+
+      - name: Create GitHub Release with linked commits
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Авто-нотатки: список комітів/PR між попереднім fork-тегом і новим,
+          # із активними посиланнями. Якщо попереднього тегу нема — бере всі коміти.
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            --latest
