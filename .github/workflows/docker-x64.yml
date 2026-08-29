@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-docker-x64:
-    if: github.repository == 'lampame/scrob'
+    if: github.repository == 'ellite/scrob'
     name: Build & Push Docker Image (amd64)
     runs-on: ubuntu-latest
     permissions:

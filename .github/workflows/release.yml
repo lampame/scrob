@@ -6,7 +6,7 @@ on:
 
 jobs:
   release:
-    if: github.repository == 'lampame/scrob'
+    if: github.repository == 'ellite/scrob'
     name: Semantic release
     runs-on: ubuntu-latest
     permissions:
@@ -77,12 +77,12 @@ jobs:
           build-args: |
             APP_VERSION=${{ needs.release.outputs.new_release_version }}
           tags: |
-            lampame/scrob:latest
-            lampame/scrob:main
-            lampame/scrob:${{ needs.release.outputs.new_release_version }}
-            ghcr.io/lampame/scrob:latest
-            ghcr.io/lampame/scrob:main
-            ghcr.io/lampame/scrob:${{ needs.release.outputs.new_release_version }}
+            bellamy/scrob:latest
+            bellamy/scrob:main
+            bellamy/scrob:${{ needs.release.outputs.new_release_version }}
+            ghcr.io/ellite/scrob:latest
+            ghcr.io/ellite/scrob:main
+            ghcr.io/ellite/scrob:${{ needs.release.outputs.new_release_version }}
           cache-from: type=gha,scope=scrob-release
           cache-to: type=gha,mode=max,scope=scrob-release
 
@@ -96,11 +96,11 @@ jobs:
           build-args: |
             APP_VERSION=${{ needs.release.outputs.new_release_version }}
           tags: |
-            lampame/scrob:latest-omnibus
-            lampame/scrob:main-omnibus
-            lampame/scrob:${{ needs.release.outputs.new_release_version }}-omnibus
-            ghcr.io/lampame/scrob:latest-omnibus
-            ghcr.io/lampame/scrob:main-omnibus
-            ghcr.io/lampame/scrob:${{ needs.release.outputs.new_release_version }}-omnibus
+            bellamy/scrob:latest-omnibus
+            bellamy/scrob:main-omnibus
+            bellamy/scrob:${{ needs.release.outputs.new_release_version }}-omnibus
+            ghcr.io/ellite/scrob:latest-omnibus
+            ghcr.io/ellite/scrob:main-omnibus
+            ghcr.io/ellite/scrob:${{ needs.release.outputs.new_release_version }}-omnibus
           cache-from: type=gha,scope=scrob-omnibus-release
           cache-to: type=gha,mode=max,scope=scrob-omnibus-release

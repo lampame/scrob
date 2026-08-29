@@ -6,7 +6,7 @@ on:
 
 jobs:
   build:
-    if: github.repository == 'lampame/scrob'
+    if: github.repository == 'ellite/scrob'
     name: Build branch image
     runs-on: ubuntu-latest
     permissions:
@@ -48,8 +48,8 @@ jobs:
           build-args: |
             APP_VERSION=${{ steps.branch.outputs.tag }}-dev
           tags: |
-            lampame/scrob:${{ steps.branch.outputs.tag }}
-            ghcr.io/lampame/scrob:${{ steps.branch.outputs.tag }}
+            bellamy/scrob:${{ steps.branch.outputs.tag }}
+            ghcr.io/ellite/scrob:${{ steps.branch.outputs.tag }}
           cache-from: type=gha,scope=scrob-${{ steps.branch.outputs.tag }}
           cache-to: type=gha,mode=max,scope=scrob-${{ steps.branch.outputs.tag }}
 
@@ -63,7 +63,7 @@ jobs:
           build-args: |
             APP_VERSION=${{ steps.branch.outputs.tag }}-dev
           tags: |
-            lampame/scrob:${{ steps.branch.outputs.tag }}-omnibus
-            ghcr.io/lampame/scrob:${{ steps.branch.outputs.tag }}-omnibus
+            bellamy/scrob:${{ steps.branch.outputs.tag }}-omnibus
+            ghcr.io/ellite/scrob:${{ steps.branch.outputs.tag }}-omnibus
           cache-from: type=gha,scope=scrob-omnibus-${{ steps.branch.outputs.tag }}
           cache-to: type=gha,mode=max,scope=scrob-omnibus-${{ steps.branch.outputs.tag }}
