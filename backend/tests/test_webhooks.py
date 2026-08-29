@@ -1018,6 +1018,21 @@ class SimklScrobbleFallbackTests(unittest.IsolatedAsyncioTestCase):
             await _maybe_simkl_scrobble(s, self._episode(), "stop", 1.0)
         stop.assert_not_awaited()
 
+    async def test_history_fallback_that_simkl_also_rejects_is_swallowed(self):
+        # #328 follow-up: /sync/history resolves the tmdb id to Simkl's own
+        # layout too, so the season-split mismatch comes back as not_found
+        # inside a 201. add_episode_to_history now raises on that; the webhook
+        # must log it, not crash and not claim success.
+        with (
+            patch.object(webhooks.simkl_client, "stop_scrobble_episode",
+                         AsyncMock(side_effect=RuntimeError("404 Not Found"))),
+            patch.object(webhooks.simkl_client, "add_episode_to_history",
+                         AsyncMock(side_effect=webhooks.simkl_client.SimklHistoryRejected("not_found"))),
+        ):
+            with self.assertLogs("routers.webhooks", level="WARNING") as logs:
+                await _maybe_simkl_scrobble(self._settings(), self._episode(), "stop", 1.0)
+        self.assertTrue(any("fallback also failed" in m for m in logs.output))
+
 
 class BackfillPlexRuntimeTests(IsolatedAsyncioTestCase):
     """Regression tests for #169: the Now Playing bar's live progress
