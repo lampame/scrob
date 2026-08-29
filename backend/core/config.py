@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Optional
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -11,6 +12,30 @@ class Settings(BaseSettings):
     postgres_db: Optional[str] = None
     postgres_host: str = "localhost"
     postgres_port: int = 5432
+
+    # ── DB connection pool tuning (optional, env-overridable) ───────────────
+    # All optional. If unset, the engine uses safe hardcoded defaults. Intended
+    # for constrained managed PostgreSQL (e.g. Aiven free tier: max_connections=20,
+    # no PgBouncer). See develop-eggs/DB-CONNECTION-POOL-LIMITS.md
+    db_pool_size: Optional[int] = None       # -> pool_size
+    db_max_overflow: Optional[int] = None    # -> max_overflow
+    db_pool_timeout: Optional[int] = None    # -> pool_timeout (seconds)
+    db_pool_recycle: Optional[int] = None    # -> pool_recycle (seconds)
+    db_pool_pre_ping: Optional[bool] = None  # -> pool_pre_ping
+
+    @field_validator("db_pool_size")
+    @classmethod
+    def _validate_pool_size(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 1:
+            raise ValueError("DB_POOL_SIZE must be >= 1")
+        return v
+
+    @field_validator("db_max_overflow", "db_pool_timeout", "db_pool_recycle")
+    @classmethod
+    def _validate_non_negative(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 0:
+            raise ValueError("must be >= 0")
+        return v
 
     secret_key: str
 
