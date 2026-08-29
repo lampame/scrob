@@ -1175,17 +1175,32 @@ async def _apply_dropped_shows_import(db: AsyncSession, user_id: int, dropped_it
     return len(new_ids)
 
 
-async def _local_dropped_show_tmdb_ids(db: AsyncSession, settings: UserSettings) -> set[int]:
+async def _local_dropped_show_tmdb_ids(
+    db: AsyncSession, settings: UserSettings, *, watched_by_user_id: int | None = None
+) -> set[int]:
     """TMDB ids of the shows the user has dropped locally. dropped_shows stores
     local Show.id values, so this resolves them; a dropped show with no tmdb_id
-    (TVDB-only) can't be pushed to Trakt/MDBList and is dropped from the set."""
+    (TVDB-only) can't be pushed to Trakt/MDBList and is dropped from the set.
+
+    When watched_by_user_id is given, only shows with at least one completed
+    WatchEvent for that user are returned. Trakt's hidden/dropped list is a
+    view over the progress / Up Next section, which only ever contains shows
+    you have started: POST /users/hidden/dropped accepts a never-watched show
+    (added: 1) but it never materializes in the GET, so the reconcile would
+    keep re-pushing it every run forever (#329)."""
     if not settings.dropped_shows:
         return set()
-    result = await db.execute(
-        select(Show.tmdb_id).where(
-            Show.id.in_(settings.dropped_shows), Show.tmdb_id.isnot(None)
-        )
+    query = select(Show.tmdb_id).where(
+        Show.id.in_(settings.dropped_shows), Show.tmdb_id.isnot(None)
     )
+    if watched_by_user_id is not None:
+        query = (
+            query.join(Media, Media.show_id == Show.id)
+            .join(WatchEvent, WatchEvent.media_id == Media.id)
+            .where(WatchEvent.user_id == watched_by_user_id, WatchEvent.completed == True)
+            .distinct()
+        )
+    result = await db.execute(query)
     return {row[0] for row in result.all()}
 
 
@@ -1576,7 +1591,9 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
             dropped_to_push: list[int] = []
             if settings.trakt_push_dropped:
                 try:
-                    local_dropped = await _local_dropped_show_tmdb_ids(db, settings)
+                    local_dropped = await _local_dropped_show_tmdb_ids(
+                        db, settings, watched_by_user_id=user_id
+                    )
                     if local_dropped:
                         remote_dropped = await trakt_client.get_dropped_shows(
                             settings.trakt_client_id, settings.trakt_access_token

@@ -461,13 +461,18 @@ class _Result:
         return iter(self._rows)
 
 class _FakeSession:
-    def __init__(self, settings, watch_rows, media, shows, incomplete_watch_rows=(), rating_rows=()):
+    def __init__(self, settings, watch_rows, media, shows, incomplete_watch_rows=(), rating_rows=(),
+                 dropped_shows_with_history=None):
         self.settings = settings
         self.watch_rows = watch_rows
         self.incomplete_watch_rows = incomplete_watch_rows
         self.media = media
         self.shows = shows
         self.rating_rows = rating_rows
+        # tmdb ids among `shows` that have a completed WatchEvent - the dropped-
+        # show reconcile query joins watch_events, so model that filter here
+        # (None = every row in `shows` counts as watched).
+        self.dropped_shows_with_history = dropped_shows_with_history
         self.commit = AsyncMock()
         self.added: list = []
         self.job_updates: list = []
@@ -508,7 +513,10 @@ class _FakeSession:
         if "FROM media" in sql:
             return _Result(scalars=self.media)
         if "FROM shows" in sql:
-            return _Result(scalars=self.shows)
+            rows = self.shows
+            if "watch_events" in sql and self.dropped_shows_with_history is not None:
+                rows = [r for r in self.shows if r[0] in self.dropped_shows_with_history]
+            return _Result(scalars=rows)
         return _Result()
 
 
@@ -949,8 +957,11 @@ class TraktDroppedReconcileTests(unittest.IsolatedAsyncioTestCase):
             dropped_shows=[1, 2],
         )
 
-    async def _run(self, *, local_show_tmdb, remote_dropped, add_hidden):
-        session = _FakeSession(self._settings(), [], [], list(local_show_tmdb))
+    async def _run(self, *, local_show_tmdb, remote_dropped, add_hidden, watched_tmdb=None):
+        session = _FakeSession(
+            self._settings(), [], [], list(local_show_tmdb),
+            dropped_shows_with_history=watched_tmdb,
+        )
         with (
             patch.object(trakt_router, "async_sessionmaker", return_value=lambda: session),
             patch.object(trakt_router.trakt_client, "get_dropped_shows",
@@ -966,6 +977,7 @@ class TraktDroppedReconcileTests(unittest.IsolatedAsyncioTestCase):
             local_show_tmdb=[(95479,), (1399,)],
             remote_dropped=[{"show": {"ids": {"tmdb": 1399}}}],  # 1399 already dropped on Trakt
             add_hidden=add_hidden,
+            watched_tmdb={95479, 1399},
         )
         add_hidden.assert_awaited_once_with("client-id", "access-token", "dropped", [95479])
 
@@ -975,12 +987,28 @@ class TraktDroppedReconcileTests(unittest.IsolatedAsyncioTestCase):
             local_show_tmdb=[(95479,)],
             remote_dropped=[{"show": {"ids": {"tmdb": 95479}}}],
             add_hidden=add_hidden,
+            watched_tmdb={95479},
+        )
+        add_hidden.assert_not_awaited()
+
+    async def test_never_watched_dropped_show_is_not_pushed(self):
+        # #329 follow-up: a dropped show with no Trakt watch history is accepted
+        # by POST /users/hidden/dropped but never materializes in the GET, so
+        # without this filter it re-enters local-minus-remote and re-pushes
+        # every run forever.
+        add_hidden = AsyncMock()
+        await self._run(
+            local_show_tmdb=[(3752,)],
+            remote_dropped=[],
+            add_hidden=add_hidden,
+            watched_tmdb=set(),
         )
         add_hidden.assert_not_awaited()
 
     async def test_reconcile_failure_does_not_fail_the_job(self):
         add_hidden = AsyncMock()
-        session = _FakeSession(self._settings(), [], [], [(95479,)])
+        session = _FakeSession(self._settings(), [], [], [(95479,)],
+                               dropped_shows_with_history={95479})
         with (
             patch.object(trakt_router, "async_sessionmaker", return_value=lambda: session),
             patch.object(trakt_router.trakt_client, "get_dropped_shows",
