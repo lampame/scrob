@@ -3,12 +3,12 @@
   <h1>Scrob</h1>
   <p>Open-source, self-hosted media tracking - your personal Letterboxd + Trakt.</p>
 
-  [![GitHub Stars](https://img.shields.io/github/stars/ellite/scrob?style=flat-square)](https://github.com/ellite/scrob/stargazers)
-  [![Docker Pulls](https://img.shields.io/docker/pulls/bellamy/scrob?style=flat-square)](https://hub.docker.com/r/bellamy/scrob)
-  [![GitHub Contributors](https://img.shields.io/github/contributors/ellite/scrob?style=flat-square)](https://github.com/ellite/scrob/graphs/contributors)
+  [![GitHub Stars](https://img.shields.io/github/stars/lampame/scrob?style=flat-square)](https://github.com/lampame/scrob/stargazers)
+  [![Docker Pulls](https://img.shields.io/docker/pulls/lampame/scrob?style=flat-square)](https://hub.docker.com/r/lampame/scrob)
+  [![GitHub Contributors](https://img.shields.io/github/contributors/lampame/scrob?style=flat-square)](https://github.com/lampame/scrob/graphs/contributors)
   [![GitHub Sponsors](https://img.shields.io/github/sponsors/ellite?style=flat-square)](https://github.com/sponsors/ellite)
-  [![Latest Release](https://img.shields.io/github/v/release/ellite/scrob?style=flat-square)](https://github.com/ellite/scrob/releases/latest)
-  [![Build](https://github.com/ellite/scrob/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/ellite/scrob/actions/workflows/release.yml)
+  [![Latest Release](https://img.shields.io/github/v/release/lampame/scrob?style=flat-square)](https://github.com/lampame/scrob/releases/latest)
+  [![Build](https://github.com/lampame/scrob/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/lampame/scrob/actions/workflows/release.yml)
 </div>
 
 ---
@@ -136,12 +136,12 @@ Scrob syncs your libraries from **Jellyfin**, **Plex**, **Emby**, **Nuvio**, **A
 
 ### Docker Compose
 
-> Images are hosted on **Docker Hub** (`bellamy/scrob`). A mirror is also available on GHCR (`ghcr.io/ellite/scrob`) if you prefer.
+> Images are hosted on **Docker Hub** (`lampame/scrob`). A mirror is also available on GHCR (`ghcr.io/lampame/scrob`) if you prefer.
 
 1. Download the compose file:
 
 ```bash
-curl -o docker-compose.yaml https://raw.githubusercontent.com/ellite/scrob/main/docker-compose.yaml
+curl -o docker-compose.yaml https://raw.githubusercontent.com/lampame/scrob/main/docker-compose.yaml
 ```
 
 2. Edit `docker-compose.yaml` and replace the required values:
@@ -166,7 +166,7 @@ services:
 
   scrob:
     container_name: scrob
-    image: bellamy/scrob:latest
+    image: lampame/scrob:latest
     restart: unless-stopped
     depends_on:
       scrob-db:
@@ -195,12 +195,12 @@ docker compose up -d
 
 The omnibus image bundles PostgreSQL inside the container - no separate database service needed. It's the simplest way to get started, especially on platforms like Unraid or Portainer where managing multiple containers is cumbersome.
 
-> **Image tags:** `bellamy/scrob:latest-omnibus` / `ghcr.io/ellite/scrob:latest-omnibus`
+> **Image tags:** `lampame/scrob:latest-omnibus` / `ghcr.io/lampame/scrob:latest-omnibus`
 
 1. Download the omnibus compose file:
 
 ```bash
-curl -o docker-compose.yml https://raw.githubusercontent.com/ellite/scrob/main/docker-compose.omnibus.yml
+curl -o docker-compose.yml https://raw.githubusercontent.com/lampame/scrob/main/docker-compose.omnibus.yml
 ```
 
 2. Edit it and set your `SECRET_KEY`:
@@ -250,7 +250,7 @@ docker run -d \
   -e SECRET_KEY="$(openssl rand -hex 32)" \
   -e TZ=UTC \
   -v scrob_data:/app/backend/data \
-  bellamy/scrob:latest
+  lampame/scrob:latest
 ```
 
 **Omnibus image** (PostgreSQL included - no separate container needed):
@@ -264,7 +264,7 @@ docker run -d \
   -e TZ=UTC \
   -v scrob_data:/app/backend/data \
   -v scrob_db:/app/postgres/data \
-  bellamy/scrob:latest-omnibus
+  lampame/scrob:latest-omnibus
 ```
 
 ### First Setup
@@ -636,8 +636,8 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ## Contributors
 
-<a href="https://github.com/ellite/scrob/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=ellite/scrob" />
+<a href="https://github.com/lampame/scrob/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=lampame/scrob" />
 </a>
 
 ## Development
@@ -654,7 +654,7 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 ### Setup
 
 ```bash
-git clone https://github.com/ellite/scrob.git
+git clone https://github.com/lampame/scrob.git
 cd scrob
 
 # Start a local database

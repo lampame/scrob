@@ -17,7 +17,7 @@ services:
 
   scrob:
     container_name: scrob
-    image: bellamy/scrob:latest
+    image: lampame/scrob:latest
     restart: unless-stopped
     depends_on:
       scrob-db:
