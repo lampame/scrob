@@ -199,6 +199,30 @@ class TraktClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ratings["episodes"]), 2)
         self.assertEqual(ratings["episodes"][1]["episode"]["number"], 2)
 
+    async def test_get_collection_fetches_movies_and_shows(self) -> None:
+        requested: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            kind = request.url.path.rsplit("/", 1)[-1]
+            requested.append(kind)
+            body = {
+                "movies": [{"movie": {"ids": {"tmdb": 550}}}],
+                "shows": [{"show": {"ids": {"tmdb": 1399}},
+                          "seasons": [{"number": 1, "episodes": [{"number": 1}]}]}],
+            }[kind]
+            return httpx.Response(200, json=body)
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            trakt.httpx, "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            collection = await trakt.get_collection("client-id", "access-token")
+
+        self.assertCountEqual(requested, ["movies", "shows"])
+        self.assertEqual(collection["movies"][0]["movie"]["ids"]["tmdb"], 550)
+        self.assertEqual(collection["shows"][0]["seasons"][0]["episodes"][0]["number"], 1)
+
     async def test_history_time_window_is_forwarded(self) -> None:
         requests: list[httpx.Request] = []
 
@@ -462,13 +486,14 @@ class _Result:
 
 class _FakeSession:
     def __init__(self, settings, watch_rows, media, shows, incomplete_watch_rows=(), rating_rows=(),
-                 dropped_shows_with_history=None):
+                 dropped_shows_with_history=None, collection_rows=()):
         self.settings = settings
         self.watch_rows = watch_rows
         self.incomplete_watch_rows = incomplete_watch_rows
         self.media = media
         self.shows = shows
         self.rating_rows = rating_rows
+        self.collection_rows = collection_rows
         # tmdb ids among `shows` that have a completed WatchEvent - the dropped-
         # show reconcile query joins watch_events, so model that filter here
         # (None = every row in `shows` counts as watched).
@@ -510,6 +535,8 @@ class _FakeSession:
             return _Result(rows=rows)
         if "FROM ratings" in sql:
             return _Result(rows=self.rating_rows)
+        if "FROM collections" in sql:
+            return _Result(rows=self.collection_rows)
         if "FROM media" in sql:
             return _Result(scalars=self.media)
         if "FROM shows" in sql:
@@ -873,11 +900,12 @@ class TraktHistorySafetyTests(unittest.IsolatedAsyncioTestCase):
         # same date is not the sentinel and must still parse normally.
         self.assertIsNotNone(trakt_router._parse_trakt_datetime("1970-01-01T00:00:01.000Z"))
 
-    def test_remote_history_keys_includes_unknown_dated_entries(self) -> None:
+    def test_remote_history_times_includes_unknown_dated_entries(self) -> None:
         # Covers both shapes: the literal sentinel (documented write value,
         # defensive-only since Trakt doesn't echo it back) and the Unix epoch
         # (what Trakt actually returns on read for the same entry, verified
-        # against the live API).
+        # against the live API). Both must land as a None timestamp under the
+        # item's identity so an unknown-dated local watch matches them.
         remote_movies = [
             {"watched_at": "unknown", "movie": {"ids": {"tmdb": 550}}},
             {"watched_at": "1970-01-01T00:00:00.000Z", "movie": {"ids": {"tmdb": 13}}},
@@ -888,11 +916,30 @@ class TraktHistorySafetyTests(unittest.IsolatedAsyncioTestCase):
             "episode": {"season": 1, "number": 3},
         }]
 
-        keys = trakt_router._remote_history_keys(remote_movies, remote_episodes)
+        times = trakt_router._remote_history_times(remote_movies, remote_episodes)
 
-        self.assertIn(("movie", 550, None), keys)
-        self.assertIn(("movie", 13, None), keys)
-        self.assertIn(("episode", 1396, 1, 3, None), keys)
+        self.assertEqual(times[("movie", 550)], [None])
+        self.assertEqual(times[("movie", 13)], [None])
+        self.assertEqual(times[("episode", 1396, 1, 3)], [None])
+
+    def test_history_play_seen_absorbs_second_level_drift_but_not_a_rewatch(self) -> None:
+        remote = {("episode", 1396, 1, 3): [datetime(2024, 3, 28, 6, 40, 0)]}
+        # 12s off - Trakt's receipt time vs the media server's - is the same watch.
+        self.assertTrue(trakt_router._history_play_seen(
+            remote, ("episode", 1396, 1, 3), datetime(2024, 3, 28, 6, 40, 12)
+        ))
+        # Hours later is a genuine rewatch and must still be pushed.
+        self.assertFalse(trakt_router._history_play_seen(
+            remote, ("episode", 1396, 1, 3), datetime(2024, 3, 28, 21, 0, 0)
+        ))
+        # Unknown-dated local watch matches any remote play of the same item.
+        self.assertTrue(trakt_router._history_play_seen(
+            remote, ("episode", 1396, 1, 3), None
+        ))
+        # Nothing remote for this item.
+        self.assertFalse(trakt_router._history_play_seen(
+            remote, ("movie", 999), datetime(2024, 3, 28, 6, 40, 0)
+        ))
 
     async def test_full_push_handles_mix_of_known_and_unknown_dates(self) -> None:
         """Regression test: before the None-guards, a single unknown-dated local
@@ -1112,6 +1159,94 @@ class TraktRatingsPushTests(unittest.IsolatedAsyncioTestCase):
         set_batch.assert_awaited_once()
         _cid, _tok, movie_ratings, *_ = set_batch.await_args.args
         self.assertEqual(movie_ratings, [(550, 8.0)])
+
+
+class RemoteCollectionKeyTests(unittest.TestCase):
+    def test_parses_movies_and_nested_show_episodes(self):
+        collection = {
+            "movies": [{"movie": {"ids": {"tmdb": 550}}}, {"movie": {"ids": {"imdb": "tt0"}}}],
+            "shows": [{
+                "show": {"ids": {"tmdb": 1399}},
+                "seasons": [{"number": 1, "episodes": [{"number": 1}, {"number": 2}]}],
+            }],
+        }
+        keys = trakt_router._remote_collection_keys(collection)
+        self.assertEqual(keys, {
+            ("movie", 550),
+            ("episode", 1399, 1, 1),
+            ("episode", 1399, 1, 2),
+        })
+
+
+class TraktCollectionPushTests(unittest.IsolatedAsyncioTestCase):
+    """#327: the collection push must dedup against GET /sync/collection so a
+    steady-state run re-sends nothing instead of re-POSTing the whole library."""
+
+    def _settings(self):
+        return SimpleNamespace(
+            trakt_access_token="access-token", trakt_client_id="client-id",
+            trakt_token_expires_at=9_999_999_999,
+            trakt_push_watched=False, trakt_push_ratings=False, trakt_push_dropped=False,
+            trakt_push_collection=True,
+        )
+
+    async def _run(self, *, media, collection_rows, remote_collection, add_batch, shows=()):
+        session = _FakeSession(
+            self._settings(), [], media, list(shows), collection_rows=collection_rows,
+        )
+        with (
+            patch.object(trakt_router, "async_sessionmaker", return_value=lambda: session),
+            patch.object(trakt_router.trakt_client, "get_collection",
+                         AsyncMock(return_value=remote_collection)),
+            patch.object(trakt_router.trakt_client, "add_to_collection_batch", add_batch),
+            patch.object(trakt_router.asyncio, "sleep", AsyncMock()),
+        ):
+            await trakt_router._run_trakt_push(user_id=1, job_id=60)
+
+    async def test_only_items_missing_from_trakt_are_pushed(self):
+        add_batch = AsyncMock()
+        await self._run(
+            media=[
+                Media(id=10, tmdb_id=550, media_type=MediaType.movie, title="Fight Club"),
+                Media(id=11, tmdb_id=680, media_type=MediaType.movie, title="Pulp Fiction"),
+            ],
+            collection_rows=[(10,), (11,)],
+            remote_collection={"movies": [{"movie": {"ids": {"tmdb": 550}}}], "shows": []},
+            add_batch=add_batch,
+        )
+        add_batch.assert_awaited_once()
+        _cid, _tok, movies, episodes = add_batch.await_args.args
+        self.assertEqual(movies, [680])   # 550 already collected on Trakt
+        self.assertEqual(episodes, [])
+
+    async def test_nothing_pushed_when_trakt_already_has_everything(self):
+        add_batch = AsyncMock()
+        await self._run(
+            media=[Media(id=10, tmdb_id=550, media_type=MediaType.movie, title="Fight Club")],
+            collection_rows=[(10,)],
+            remote_collection={"movies": [{"movie": {"ids": {"tmdb": 550}}}], "shows": []},
+            add_batch=add_batch,
+        )
+        add_batch.assert_not_awaited()
+
+    async def test_fetch_failure_falls_back_to_pushing_everything(self):
+        add_batch = AsyncMock()
+        session = _FakeSession(
+            self._settings(), [],
+            [Media(id=10, tmdb_id=550, media_type=MediaType.movie, title="Fight Club")],
+            [], collection_rows=[(10,)],
+        )
+        with (
+            patch.object(trakt_router, "async_sessionmaker", return_value=lambda: session),
+            patch.object(trakt_router.trakt_client, "get_collection",
+                         AsyncMock(side_effect=RuntimeError("500"))),
+            patch.object(trakt_router.trakt_client, "add_to_collection_batch", add_batch),
+            patch.object(trakt_router.asyncio, "sleep", AsyncMock()),
+        ):
+            await trakt_router._run_trakt_push(user_id=1, job_id=61)
+        add_batch.assert_awaited_once()
+        _cid, _tok, movies, _episodes = add_batch.await_args.args
+        self.assertEqual(movies, [550])
 
 
 class TraktSourceAdapterTests(unittest.IsolatedAsyncioTestCase):

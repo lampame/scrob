@@ -142,30 +142,77 @@ def _history_window(
     return start_at, cutoff
 
 
-def _remote_history_keys(
+def _remote_history_times(
     movies: list[dict],
     episodes: list[dict],
-) -> set[tuple]:
-    keys: set[tuple] = set()
+) -> dict[tuple, list[datetime | None]]:
+    """Group remote play timestamps by item identity (no timestamp in the key),
+    so the push dedup can match a local watch against a remote play of the same
+    item that lands a few seconds off - Trakt records its own receipt time, not
+    the media server's, so an exact-timestamp match misses and the event is
+    re-sent every push (#327)."""
+    out: dict[tuple, list[datetime | None]] = {}
     for item in movies:
         tmdb_id = item.get("movie", {}).get("ids", {}).get("tmdb")
-        watched_at = _parse_trakt_datetime(item.get("watched_at"))
         if tmdb_id:
-            keys.add(("movie", int(tmdb_id), _normalize_history_time(watched_at)))
+            out.setdefault(("movie", int(tmdb_id)), []).append(
+                _normalize_history_time(_parse_trakt_datetime(item.get("watched_at")))
+            )
     for item in episodes:
         show_tmdb_id = item.get("show", {}).get("ids", {}).get("tmdb")
         episode = item.get("episode", {})
         season = episode.get("season")
         number = episode.get("number")
-        watched_at = _parse_trakt_datetime(item.get("watched_at"))
         if show_tmdb_id and season is not None and number is not None:
-            keys.add((
-                "episode",
-                int(show_tmdb_id),
-                int(season),
-                int(number),
-                _normalize_history_time(watched_at),
-            ))
+            out.setdefault(("episode", int(show_tmdb_id), int(season), int(number)), []).append(
+                _normalize_history_time(_parse_trakt_datetime(item.get("watched_at")))
+            )
+    return out
+
+
+def _history_play_seen(
+    remote_times: dict[tuple, list[datetime | None]],
+    identity: tuple,
+    local_at: datetime | None,
+) -> bool:
+    """True if Trakt already has a play of `identity` that should count as the
+    same watch as a local one at `local_at`. An unknown-dated local watch
+    matches any remote play of the same item; a dated one matches a remote play
+    within TRAKT_HISTORY_OVERLAP (so second-level clock drift doesn't re-send it,
+    while a genuine rewatch hours/days later still gets pushed)."""
+    seen = remote_times.get(identity)
+    if not seen:
+        return False
+    if local_at is None:
+        return True
+    tolerance = TRAKT_HISTORY_OVERLAP.total_seconds()
+    return any(
+        remote_at is not None and abs((remote_at - local_at).total_seconds()) <= tolerance
+        for remote_at in seen
+    )
+
+
+def _remote_collection_keys(collection: dict) -> set[tuple]:
+    """Identity keys for everything already in the user's Trakt collection, so
+    the outbound collection push can skip them instead of re-POSTing the whole
+    library every run (#327)."""
+    keys: set[tuple] = set()
+    for item in collection.get("movies", []):
+        tmdb_id = (item.get("movie", {}).get("ids", {}) or {}).get("tmdb")
+        if tmdb_id is not None:
+            keys.add(("movie", int(tmdb_id)))
+    for item in collection.get("shows", []):
+        show_tmdb_id = (item.get("show", {}).get("ids", {}) or {}).get("tmdb")
+        if show_tmdb_id is None:
+            continue
+        for season in item.get("seasons", []) or []:
+            snum = season.get("number")
+            if snum is None:
+                continue
+            for episode in season.get("episodes", []) or []:
+                enum = episode.get("number")
+                if enum is not None:
+                    keys.add(("episode", int(show_tmdb_id), int(snum), int(enum)))
     return keys
 
 
@@ -1664,6 +1711,7 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
             push_tasks: list[tuple[str, int, "Coroutine"]] = []
             watched_already_present = 0
             ratings_already_present = 0
+            collection_already_present = 0
 
             if settings.trakt_push_watched:
                 movie_candidates: list[tuple[tuple, int, datetime]] = []
@@ -1731,17 +1779,20 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                             end_at=dedup_end_at,
                         ),
                     )
-                    remote_keys = _remote_history_keys(remote_movies, remote_episodes)
-                    watched_already_present = len(local_keys & remote_keys)
+                    remote_times = _remote_history_times(remote_movies, remote_episodes)
+                    watched_already_present = sum(
+                        1 for key in local_keys
+                        if _history_play_seen(remote_times, key[:-1], key[-1])
+                    )
                     pending: list[tuple[str, tuple]] = [
                         ("movie", (tmdb_id, watched_at))
                         for key, tmdb_id, watched_at in movie_candidates
-                        if key not in remote_keys
+                        if not _history_play_seen(remote_times, key[:-1], key[-1])
                     ]
                     pending.extend(
                         ("episode", (show_tmdb_id, season, episode_number, watched_at))
                         for key, show_tmdb_id, season, episode_number, watched_at in episode_candidates
-                        if key not in remote_keys
+                        if not _history_play_seen(remote_times, key[:-1], key[-1])
                     )
 
                     for index in range(0, len(pending), TRAKT_HISTORY_PUSH_BATCH_SIZE):
@@ -1760,6 +1811,23 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                         ))
 
             if settings.trakt_push_collection:
+                # Dedup against what Trakt already has - otherwise the entire
+                # library (often tens of thousands of episodes) is re-POSTed on
+                # every scheduled push, burning the write quota that real-time
+                # scrobbles share (#327). A failed fetch just means no dedup this
+                # run: still correct, Trakt no-ops the duplicates.
+                remote_collection_keys: set[tuple] = set()
+                try:
+                    remote_collection_keys = _remote_collection_keys(
+                        await trakt_client.get_collection(
+                            settings.trakt_client_id, settings.trakt_access_token
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Trakt push job %s: could not fetch remote collection: %s", job_id, exc
+                    )
+
                 collection_movies: list[int] = []
                 collection_episodes: list[tuple[int, int, int]] = []
                 for media_id in collected_ids:
@@ -1767,6 +1835,9 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                     if not media:
                         continue
                     if media.media_type == MediaType.movie and media.tmdb_id:
+                        if ("movie", media.tmdb_id) in remote_collection_keys:
+                            collection_already_present += 1
+                            continue
                         collection_movies.append(media.tmdb_id)
                     elif (
                         media.media_type == MediaType.episode
@@ -1777,6 +1848,11 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                     ):
                         show = shows_by_id.get(media.show_id)
                         if show and show.tmdb_id:
+                            if (
+                                "episode", show.tmdb_id, media.season_number, media.episode_number
+                            ) in remote_collection_keys:
+                                collection_already_present += 1
+                                continue
                             collection_episodes.append((
                                 show.tmdb_id,
                                 media.season_number,
@@ -1888,7 +1964,9 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                 ))
 
             total = sum(item_count for _, item_count, _ in push_tasks)
-            already_present = watched_already_present + ratings_already_present
+            already_present = (
+                watched_already_present + ratings_already_present + collection_already_present
+            )
             await db.execute(
                 update(SyncJob).where(SyncJob.id == job_id).values(total_items=total)
             )
