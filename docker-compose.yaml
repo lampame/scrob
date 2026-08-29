@@ -70,6 +70,12 @@ services:
       # ── Advanced ─────────────────────────────────────────────────────────────
       # Override the internal backend port (only needed if 7331 conflicts on bare metal installations)
       # BACKEND_PORT: "7331"
+      # Optional pool-tuning for low-connection managed PostgreSQL (e.g. Aiven free tier). Unset = app defaults.
+      # DB_POOL_SIZE: "20"
+      # DB_MAX_OVERFLOW: "10"
+      # DB_POOL_TIMEOUT: "30"
+      # DB_POOL_RECYCLE: "1800"
+      # DB_POOL_PRE_PING: "true"
     volumes:
       - scrob_data:/app/backend/data
 

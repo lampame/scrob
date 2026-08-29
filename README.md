@@ -319,6 +319,48 @@ Remove the `scrob-db` service and set `DATABASE_URL` to your existing instance:
 DATABASE_URL: postgresql+asyncpg://user:password@your-db-host:5432/scrob
 ```
 
+### Database connection pool
+
+By default Scrob can open up to `pool_size` (20) + `max_overflow` (10) = **30** PostgreSQL connections per instance. That's fine for the bundled Postgres, but managed providers cap connections far lower and usually provide no pooling of their own:
+
+- **Aiven free tier**: `max_connections = 20`, no PgBouncer/pooling.
+- **Neon free tier** and other low-tier managed Postgres have similar constraints.
+
+When the app's ceiling exceeds the provider's limit you'll hit `FATAL: sorry, too many clients already` / `remaining connection slots are reserved` errors under load.
+
+All five tuning variables below are **optional**. If unset, Scrob keeps its current defaults, so existing deployments are unchanged.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DB_POOL_SIZE` | `20` | SQLAlchemy `pool_size` (min `1`). |
+| `DB_MAX_OVERFLOW` | `10` | SQLAlchemy `max_overflow` (min `0`). |
+| `DB_POOL_TIMEOUT` | `30` | Seconds to wait for a free connection before raising (min `0`). |
+| `DB_POOL_RECYCLE` | `1800` | Recycle connections after this many seconds (min `0`). |
+| `DB_POOL_PRE_PING` | `true` | Run a liveness check before handing out a connection. |
+
+#### Recommended values for Aiven free tier
+
+With `max_connections = 20`, set a ceiling that leaves room for migrations, ad-hoc queries, and Aiven's own overhead:
+
+```yaml
+DB_POOL_SIZE: "10"
+DB_MAX_OVERFLOW: "5"   # ceiling = 15, ~5 connections in reserve
+```
+
+#### Horizontal scaling
+
+Total connections ≈ `replicas × (pool_size + max_overflow)` + ~5 reserve. If you run multiple replicas, divide the pool per instance — e.g. 2 replicas → `~8` each (`DB_POOL_SIZE=8`, `DB_MAX_OVERFLOW=0`) keeps the combined ceiling near 16–21.
+
+#### Aiven SSL
+
+Aiven requires TLS. Append `?ssl=require` to `DATABASE_URL` (asyncpg accepts it):
+
+```yaml
+DATABASE_URL: postgresql+asyncpg://user:password@your-aiven-host:5432/scrob?ssl=require
+```
+
+See [`develop-eggs/DB-CONNECTION-POOL-LIMITS.md`](develop-eggs/DB-CONNECTION-POOL-LIMITS.md) for the full business logic, the Aiven plan table, and the connection-budget formula.
+
 ## ARVIO Cloud Synchronization
 
 Scrob supports pull synchronization from **ARVIO Cloud** (`https://auth.arvio.tv/.netlify/functions`), importing watched movies, watched episodes, and continue watching playback progress per profile.
