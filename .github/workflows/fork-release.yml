@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*-fork*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag, e.g. v2.6.0-fork.2 (required for manual runs)'
+        required: true
+        type: string
 
 jobs:
   build:
@@ -12,6 +17,9 @@ jobs:
     permissions:
       contents: write
       packages: write
+
+    env:
+      APP_VERSION: ${{ github.event.inputs.version || github.ref_name }}
 
     steps:
       - name: Checkout
@@ -44,9 +52,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            APP_VERSION=${{ github.ref_name }}
+            APP_VERSION=${{ env.APP_VERSION }}
           tags: |
-            ghcr.io/lampame/scrob:${{ github.ref_name }}
+            ghcr.io/lampame/scrob:${{ env.APP_VERSION }}
             ghcr.io/lampame/scrob:latest
           cache-from: type=gha,scope=fork-release
           cache-to: type=gha,mode=max,scope=fork-release
@@ -59,9 +67,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            APP_VERSION=${{ github.ref_name }}
+            APP_VERSION=${{ env.APP_VERSION }}
           tags: |
-            ghcr.io/lampame/scrob:${{ github.ref_name }}-omnibus
+            ghcr.io/lampame/scrob:${{ env.APP_VERSION }}-omnibus
             ghcr.io/lampame/scrob:latest-omnibus
           cache-from: type=gha,scope=fork-release-omnibus
           cache-to: type=gha,mode=max,scope=fork-release-omnibus
@@ -72,7 +80,7 @@ jobs:
         run: |
           # Авто-нотатки: список комітів/PR між попереднім fork-тегом і новим,
           # із активними посиланнями. Якщо попереднього тегу нема — бере всі коміти.
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
+          gh release create "${{ env.APP_VERSION }}" \
+            --title "${{ env.APP_VERSION }}" \
             --generate-notes \
             --latest
