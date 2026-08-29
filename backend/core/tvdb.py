@@ -2,6 +2,12 @@
 
 Token-based auth: POST /login returns a 30-day Bearer token.
 We cache the token in memory (module-level) and refresh it when it expires.
+
+TheTVDB v4 has two credential types: a free *project* key (key only) and a
+*subscriber-supported* key, which must be sent together with the account's
+subscriber PIN on /login (see GitHub #322/#325). Callers that resolve a key
+from settings register its PIN via ``set_subscriber_pin`` so every downstream
+request for that key picks it up.
 """
 import asyncio
 import time
@@ -9,13 +15,28 @@ import httpx
 
 TVDB_BASE = "https://api4.thetvdb.com/v4"
 
-# In-memory token cache keyed by api_key
-_token_cache: dict[str, tuple[str, float]] = {}  # api_key -> (token, expires_at)
-_token_lock = asyncio.Lock()
-
 TVDB_IMAGE_BASE = "https://artworks.thetvdb.com"
 
 DEFAULT_CACHE_TTL = 1800  # 30 minutes - same rationale as core/tmdb.py's response cache
+
+# In-memory token cache keyed by (api_key, pin) - a PIN change must force a
+# fresh /login rather than reusing a token minted for the old credential.
+_token_cache: dict[tuple[str, str | None], tuple[str, float]] = {}
+_token_lock = asyncio.Lock()
+
+# api_key -> subscriber PIN, populated by callers as they resolve credentials.
+_subscriber_pins: dict[str, str] = {}
+
+
+def set_subscriber_pin(api_key: str | None, pin: str | None) -> None:
+    """Record (or clear) the subscriber PIN paired with an API key so
+    _get_token can include it on /login. A blank PIN clears any stored one."""
+    if not api_key:
+        return
+    if pin:
+        _subscriber_pins[api_key] = pin
+    else:
+        _subscriber_pins.pop(api_key, None)
 
 
 class _TTLCache:
@@ -95,20 +116,29 @@ def _image_url(path: str | None) -> str | None:
     return f"{TVDB_IMAGE_BASE}{path}"
 
 
-async def _get_token(api_key: str) -> str:
-    """Return a valid TVDB Bearer token, refreshing if necessary."""
+async def _get_token(api_key: str, pin: str | None = None) -> str:
+    """Return a valid TVDB Bearer token, refreshing if necessary.
+
+    ``pin`` overrides the PIN registered via set_subscriber_pin (used by the
+    settings "test key" path, which validates a key before it is stored)."""
+    if pin is None:
+        pin = _subscriber_pins.get(api_key)
+    cache_key = (api_key, pin)
     async with _token_lock:
-        cached = _token_cache.get(api_key)
+        cached = _token_cache.get(cache_key)
         if cached:
             token, expires_at = cached
             # Refresh 1 hour before expiry
             if time.time() < expires_at - 3600:
                 return token
 
+        body = {"apikey": api_key}
+        if pin:
+            body["pin"] = pin
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
             r = await client.post(
                 f"{TVDB_BASE}/login",
-                json={"apikey": api_key},
+                json=body,
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
             )
             r.raise_for_status()
@@ -117,7 +147,7 @@ async def _get_token(api_key: str) -> str:
         token = data["data"]["token"]
         # TVDB tokens last 30 days; cache for 29 days
         expires_at = time.time() + 29 * 86400
-        _token_cache[api_key] = (token, expires_at)
+        _token_cache[cache_key] = (token, expires_at)
         return token
 
 
@@ -153,11 +183,11 @@ async def _get(
         return data
 
 
-async def validate_api_key(api_key: str) -> bool:
+async def validate_api_key(api_key: str, pin: str | None = None) -> bool:
     if not api_key:
         return False
     try:
-        await _get_token(api_key)
+        await _get_token(api_key, pin=pin)
         return True
     except Exception:
         return False

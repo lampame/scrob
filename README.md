@@ -26,6 +26,7 @@ Scrob syncs your libraries from **Jellyfin**, **Plex**, **Emby**, **Nuvio**, **A
   - [First Setup](#first-setup)
   - [Updating](#updating)
 - [Configuration](#configuration)
+  - [TheTVDB metadata](#thetvdb-metadata)
 - [ARVIO Cloud Synchronization](#arvio-cloud-synchronization)
 - [Nuvio Cloud Synchronization](#nuvio-cloud-synchronization)
   - [Connect Nuvio](#connect-nuvio)
@@ -318,6 +319,27 @@ Remove the `scrob-db` service and set `DATABASE_URL` to your existing instance:
 ```yaml
 DATABASE_URL: postgresql+asyncpg://user:password@your-db-host:5432/scrob
 ```
+
+### TheTVDB metadata
+
+TMDB covers the great majority of titles. A **TheTVDB** key is optional and only affects TVDB-specific paths:
+
+- shows and episodes that exist on TheTVDB but not on TMDB;
+- TVDB-ordered episode mapping (absolute numbering, common for anime and long-running shows) and TVDB season metadata;
+- matching otherwise-unmatched local episodes through TheTVDB.
+
+With no key configured, all of the above fall back to TMDB-only behaviour; nothing else is affected.
+
+**Which credential to get.** TheTVDB v4 has two key types:
+
+| Type | Where | Auth | Notes |
+|---|---|---|---|
+| Free **project** key | [thetvdb.com/api-information](https://thetvdb.com/api-information) | API key only | Free for projects under the revenue threshold in TheTVDB's terms. Requires attribution — Scrob displays a "Metadata provided by TheTVDB" link on every TVDB-sourced page and in **About**. |
+| **Subscriber-supported** key | TheTVDB dashboard | API key **+ subscriber PIN** | Enter both the key and the PIN in Scrob. |
+
+Configure it per-user in **Settings → General → TVDB API Key** (with the **Subscriber PIN** field for a subscriber key), or server-wide in **Admin → Settings → TVDB** as a fallback for all users. Use **Test key** to verify the pair before saving.
+
+**Rotation / revocation.** Scrob caches the TheTVDB login token in memory for up to 29 days per key. After changing or removing the key or PIN in settings, the new credential takes effect on the next lookup; a stale token for the old credential is discarded on restart.
 
 ## ARVIO Cloud Synchronization
 

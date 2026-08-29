@@ -28,6 +28,7 @@ class GlobalSettings(Base):
     radarr_customize_on_add      : Mapped[bool]          = mapped_column(Boolean, nullable=False, server_default="false")
     sonarr_customize_on_add      : Mapped[bool]          = mapped_column(Boolean, nullable=False, server_default="false")
     tvdb_api_key                 : Mapped[Optional[str]] = mapped_column(String(255))
+    tvdb_subscriber_pin          : Mapped[Optional[str]] = mapped_column(String(255))
     image_cache_enabled          : Mapped[bool]          = mapped_column(Boolean, nullable=False, server_default="false")
     image_cache_limit_gb         : Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     enable_logged_out_navigation : Mapped[bool]          = mapped_column(Boolean, nullable=False, server_default="false")

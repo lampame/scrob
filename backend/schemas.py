@@ -124,6 +124,7 @@ class UserSettings(BaseModel):
 
     # TVDB
     tvdb_api_key: Optional[str] = None
+    tvdb_subscriber_pin: Optional[str] = None
     has_global_tvdb_key: bool = False
     has_effective_tvdb_key: bool = False
 
@@ -242,6 +243,7 @@ class ArvioConnectionTestRequest(BaseModel):
 
 class ApiKeyTestRequest(BaseModel):
     key: SecretStr
+    pin: Optional[SecretStr] = None  # TVDB subscriber PIN, ignored by other providers
 
 
 class ServiceConnectionTestRequest(BaseModel):
@@ -456,6 +458,7 @@ class PublicProfileResponse(BaseModel):
 class GlobalSettings(BaseModel):
     tmdb_api_key           : Optional[str] = None
     tvdb_api_key           : Optional[str] = None
+    tvdb_subscriber_pin    : Optional[str] = None
     radarr_url             : Optional[str] = None
     radarr_token           : Optional[str] = None
     radarr_root_folder     : Optional[str] = None

@@ -356,6 +356,7 @@ def build_api_keys(user: User, settings: UserSettings | None) -> dict:
         "scrob_api_key": user.api_key,
         "tmdb_api_key": settings.tmdb_api_key if settings else None,
         "tvdb_api_key": settings.tvdb_api_key if settings else None,
+        "tvdb_subscriber_pin": settings.tvdb_subscriber_pin if settings else None,
     }
 
 

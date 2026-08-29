@@ -314,6 +314,8 @@ export interface AdminUser {
 
 export interface GlobalSettings {
   tmdb_api_key: string | null;
+  tvdb_api_key: string | null;
+  tvdb_subscriber_pin: string | null;
   radarr_url: string | null;
   radarr_token: string | null;
   radarr_root_folder: string | null;
@@ -420,6 +422,7 @@ export interface UserSettings {
   has_global_tmdb_key: boolean;
 
   tvdb_api_key: string | null;
+  tvdb_subscriber_pin: string | null;
   has_effective_tvdb_key: boolean;
   has_global_tvdb_key: boolean;
 
