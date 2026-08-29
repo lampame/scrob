@@ -342,8 +342,8 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
         <!-- Enable Caching -->
         <label class="flex items-center justify-between gap-3 p-4 bg-zinc-950 border border-zinc-800 rounded-xl cursor-pointer hover:bg-zinc-800/40 transition-colors">
           <div>
-            <span class="block text-sm font-semibold text-zinc-200">Enable TMDB Image Cache</span>
-            <span class="block text-xs text-zinc-500 mt-0.5">Cache poster and backdrop images locally on the server to improve load times and support offline mode.</span>
+            <span class="block text-sm font-semibold text-zinc-200">Enable TMDB &amp; TheTVDB Image Cache</span>
+            <span class="block text-xs text-zinc-500 mt-0.5">Cache poster, backdrop, and still images from TMDB and TheTVDB locally on the server to improve load times and support offline mode.</span>
           </div>
           <input type="checkbox" name="image_cache_enabled" id="image_cache_enabled" value="true" class="sr-only peer" checked={globalSettings.image_cache_enabled ?? false} />
           <div class="relative w-10 h-5 bg-zinc-700 peer-checked:bg-blue-600 rounded-full transition-colors pointer-events-none shrink-0 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-4 after:h-4 after:bg-white after:rounded-full after:transition-transform peer-checked:after:translate-x-5"></div>
@@ -522,11 +522,11 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
           </div>
         </div>
 
-        <!-- Clear TMDB image cache -->
+        <!-- Clear image cache -->
         <div class="p-6 border-t border-zinc-800 flex flex-col sm:flex-row sm:items-center gap-4">
           <div class="flex-1">
-            <h3 class="font-semibold text-zinc-100 mb-1">Clear TMDB image cache</h3>
-            <p class="text-sm text-zinc-400">Delete all locally cached TMDB poster and backdrop files, and clear their database records. Files will be re-downloaded on-demand when requested.</p>
+            <h3 class="font-semibold text-zinc-100 mb-1">Clear image cache</h3>
+            <p class="text-sm text-zinc-400">Delete all locally cached TMDB and TheTVDB image files, and clear their database records. Files will be re-downloaded on-demand when requested.</p>
           </div>
           <button id="admin-clear-cache-btn"
             class="shrink-0 px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white text-sm font-semibold rounded-xl transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">

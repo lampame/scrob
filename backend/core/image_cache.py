@@ -18,8 +18,23 @@ from models.global_settings import GlobalSettings
 
 logger = logging.getLogger(__name__)
 
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p"
+TVDB_IMAGE_BASE = "https://artworks.thetvdb.com"
+
 # Valid TMDB image sizes to prevent traversal / arbitrary requests
 ALLOWED_SIZES = {"w92", "w154", "w185", "w342", "w500", "w780", "w1280", "original"}
+
+# Synthetic "size" bucket for TheTVDB artwork, which has no size variants - the
+# path alone identifies the image. Stored under image_cache/tvdb/<path>.
+TVDB_SIZE = "tvdb"
+
+
+def upstream_image_url(size: str, path: str) -> str:
+    """Origin URL for a cached image, by size bucket."""
+    if size == TVDB_SIZE:
+        return f"{TVDB_IMAGE_BASE}{path}"
+    return f"{TMDB_IMAGE_BASE}/{size}{path}"
+
 
 _last_prune_at: datetime = datetime.min.replace(tzinfo=timezone.utc)
 _PRUNE_INTERVAL = timedelta(minutes=5)
@@ -28,8 +43,10 @@ _PRUNE_INTERVAL = timedelta(minutes=5)
 _MAX_IN_PARAMS = 30_000
 
 
-def parse_tmdb_url(url: str) -> tuple[Optional[str], Optional[str]]:
-    """Parse TMDB URL or path into (size, path) tuple."""
+def parse_image_url(url: str) -> tuple[Optional[str], Optional[str]]:
+    """Parse a TMDB or TheTVDB image URL (or bare TMDB path) into a
+    (size, path) tuple the cache is keyed by. TheTVDB artwork uses the
+    synthetic ``tvdb`` size bucket. Returns (None, None) for anything else."""
     if not url:
         return None, None
 
@@ -38,17 +55,28 @@ def parse_tmdb_url(url: str) -> tuple[Optional[str], Optional[str]]:
         if match:
             return match.group(1), match.group(2)
 
+    if "artworks.thetvdb.com" in url:
+        match = re.search(r"artworks\.thetvdb\.com(/.+)$", url)
+        if match:
+            return TVDB_SIZE, match.group(1)
+
     if url.startswith("/"):
         return "w500", url
 
     return None, None
 
 
+# Back-compat alias (was the only public name before TheTVDB support).
+parse_tmdb_url = parse_image_url
+
+
 async def download_and_cache_image(db, size: str, path: str, image_type: str = "ondemand") -> Optional[str]:
-    """Download image from TMDB and cache it locally."""
-    if size not in ALLOWED_SIZES:
+    """Download an image from TMDB or TheTVDB and cache it locally."""
+    if size != TVDB_SIZE and size not in ALLOWED_SIZES:
         return None
     if ".." in path or not path.startswith("/"):
+        return None
+    if len(path) > 255:  # ImageCache.path column width; skip caching, let the caller redirect
         return None
 
     stmt = select(ImageCache).where(ImageCache.path == path, ImageCache.size == size)
@@ -65,10 +93,10 @@ async def download_and_cache_image(db, size: str, path: str, image_type: str = "
             await db.delete(cached)
             await db.commit()
 
-    # Fetch from TMDB
-    url = f"https://image.tmdb.org/t/p/{size}{path}"
+    # Fetch from the origin (TMDB or TheTVDB)
+    url = upstream_image_url(size, path)
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             r = await client.get(url)
             if r.status_code == 200:
                 local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,7 +125,7 @@ async def download_and_cache_image(db, size: str, path: str, image_type: str = "
                         await db.commit()
                 return str(local_path)
     except Exception as e:
-        logger.error(f"Error downloading TMDB image {url}: {e}")
+        logger.error(f"Error downloading image {url}: {e}")
 
     return None
 
@@ -198,7 +226,7 @@ async def pre_cache_all_collected(db):
     parsed_images = [
         (size, path)
         for url in urls_to_cache
-        for size, path in [parse_tmdb_url(url)]
+        for size, path in [parse_image_url(url)]
         if size and path
     ]
 

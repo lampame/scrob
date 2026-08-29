@@ -407,6 +407,8 @@ const sonarrUrl = `${origin}/api/proxy/sonarr-compat/${list?.id}`;
     if (path.startsWith('http://') || path.startsWith('https://')) {
       const m = /image\.tmdb\.org\/t\/p\/([^/]+)(\/.+)$/.exec(path);
       if (m) return `/api/proxy/media/image/${m[1]}${m[2]}`;
+      const t = /artworks\.thetvdb\.com(\/.+)$/.exec(path);
+      if (t) return `/api/proxy/media/image/tvdb${t[1]}`;
       return path;
     }
     return `/api/proxy/media/image/${size}${path.startsWith('/') ? path : '/' + path}`;
