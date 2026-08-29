@@ -22,6 +22,7 @@ from routers.webhooks import (
     _maybe_simkl_scrobble,
     _resolve_plex_progress,
     _resolve_tvdb_episode_to_tmdb_position,
+    _translate_plex_tvdb_episode_position,
     _write_watch_event,
     find_or_create_media_jellyfin,
     find_or_create_media_jellyfin_multi,
@@ -661,6 +662,96 @@ class ResolveTvdbEpisodeToTmdbPositionTests(IsolatedAsyncioTestCase):
         with patch("routers.webhooks.get_mapping_by_tvdb_position", AsyncMock(side_effect=RuntimeError("boom"))):
             result = await _resolve_tvdb_episode_to_tmdb_position(db, self._show(), 2, 1, "tmdb-key", "tvdb-key")
         self.assertIsNone(result)
+
+
+class TranslatePlexTvdbEpisodePositionTests(IsolatedAsyncioTestCase):
+    """#335: Plex reports whatever numbering the library's episode-ordering
+    setting uses. When the user has put the show on TVDB (aired) order,
+    _translate_plex_tvdb_episode_position rewrites the reported (season,
+    episode) to the canonical TMDB position in place - and does nothing at all
+    otherwise, so a show still on TMDB numbering is never disturbed."""
+
+    def _data(self, **overrides):
+        data = {
+            "media_type": "episode",
+            "tmdb_id": None,
+            "season_number": 2,
+            "episode_number": 1,
+        }
+        data.update(overrides)
+        return data
+
+    async def test_noop_without_tvdb_order_preference(self):
+        db = AsyncMock()
+        data = self._data()
+        with (
+            patch("routers.webhooks.get_episode_order", AsyncMock(return_value=None)),
+            patch("routers.webhooks._resolve_tvdb_episode_to_tmdb_position", AsyncMock()) as translate,
+        ):
+            await _translate_plex_tvdb_episode_position(data, db, series_tmdb_id=100, user_id=1, tmdb_api_key="k")
+        self.assertEqual((data["season_number"], data["episode_number"]), (2, 1))
+        translate.assert_not_awaited()
+
+    async def test_noop_when_preference_is_tmdb(self):
+        db = AsyncMock()
+        data = self._data()
+        pref = SimpleNamespace(episode_order="tmdb")
+        with (
+            patch("routers.webhooks.get_episode_order", AsyncMock(return_value=pref)),
+            patch("routers.webhooks._resolve_tvdb_episode_to_tmdb_position", AsyncMock()) as translate,
+        ):
+            await _translate_plex_tvdb_episode_position(data, db, 100, 1, "k")
+        translate.assert_not_awaited()
+        self.assertEqual((data["season_number"], data["episode_number"]), (2, 1))
+
+    async def test_noop_when_episode_has_a_tmdb_id(self):
+        db = AsyncMock()
+        data = self._data(tmdb_id="555")
+        with patch("routers.webhooks.get_episode_order", AsyncMock()) as order:
+            await _translate_plex_tvdb_episode_position(data, db, 100, 1, "k")
+        order.assert_not_awaited()
+
+    async def test_noop_when_show_has_no_tvdb_id(self):
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=_ScalarResult(SimpleNamespace(tmdb_id=100, tvdb_id=None)))
+        data = self._data()
+        with (
+            patch("routers.webhooks.get_episode_order", AsyncMock(return_value=SimpleNamespace(episode_order="tvdb"))),
+            patch("routers.webhooks._resolve_tvdb_episode_to_tmdb_position", AsyncMock()) as translate,
+        ):
+            await _translate_plex_tvdb_episode_position(data, db, 100, 1, "k")
+        translate.assert_not_awaited()
+
+    async def test_rewrites_position_when_mapping_resolves(self):
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=_ScalarResult(SimpleNamespace(id=9, tmdb_id=100, tvdb_id=42)))
+        data = self._data(season_number=2, episode_number=1)
+        with (
+            patch("routers.webhooks.get_episode_order", AsyncMock(return_value=SimpleNamespace(episode_order="tvdb"))),
+            patch("routers.webhooks._resolve_tvdb_fallback", AsyncMock(return_value=(42, "tvdb-key", None))),
+            patch("routers.webhooks._resolve_tvdb_episode_to_tmdb_position", AsyncMock(return_value=(1, 25))),
+        ):
+            await _translate_plex_tvdb_episode_position(data, db, 100, 1, "tmdb-key")
+        self.assertEqual((data["season_number"], data["episode_number"]), (1, 25))
+
+    async def test_leaves_position_untouched_for_genuinely_tvdb_only_episode(self):
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=_ScalarResult(SimpleNamespace(id=9, tmdb_id=100, tvdb_id=42)))
+        data = self._data(season_number=0, episode_number=7)
+        with (
+            patch("routers.webhooks.get_episode_order", AsyncMock(return_value=SimpleNamespace(episode_order="tvdb"))),
+            patch("routers.webhooks._resolve_tvdb_fallback", AsyncMock(return_value=(42, "tvdb-key", None))),
+            patch("routers.webhooks._resolve_tvdb_episode_to_tmdb_position", AsyncMock(return_value=None)),
+        ):
+            await _translate_plex_tvdb_episode_position(data, db, 100, 1, "tmdb-key")
+        self.assertEqual((data["season_number"], data["episode_number"]), (0, 7))
+
+    async def test_never_raises(self):
+        db = AsyncMock()
+        data = self._data()
+        with patch("routers.webhooks.get_episode_order", AsyncMock(side_effect=RuntimeError("boom"))):
+            await _translate_plex_tvdb_episode_position(data, db, 100, 1, "k")
+        self.assertEqual((data["season_number"], data["episode_number"]), (2, 1))
 
 
 class FindOrCreateMediaJellyfinTvdbTranslationTests(IsolatedAsyncioTestCase):

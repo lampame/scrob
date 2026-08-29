@@ -10,6 +10,7 @@ from sqlalchemy import select, delete, func, or_
 from sqlalchemy.orm.exc import StaleDataError
 
 from db import get_db
+from dependencies import get_current_user_or_api_key
 from models.media import Media
 from models.show import Show
 from models.collection import Collection, CollectionFile
@@ -26,6 +27,7 @@ from models.library_selections import PlexLibrarySelection, JellyfinLibrarySelec
 from core.enrichment import create_media_safely, enrich_media, enrich_media_safely
 from core.episode_order import (
     ensure_episode_order_mapping_for_season,
+    get_episode_order,
     get_mapping_by_tvdb_position,
     reconcile_divergent_episode_media,
 )
@@ -914,6 +916,54 @@ async def _resolve_tvdb_episode_to_tmdb_position(
             show.id, season_number, episode_number,
         )
         return None
+
+
+async def _translate_plex_tvdb_episode_position(
+    data: dict, db: AsyncSession, series_tmdb_id: int | None,
+    user_id: int | None, tmdb_api_key: str | None,
+) -> None:
+    """#335: when the user has explicitly put this show on TVDB (aired) episode
+    order, Plex reports its TVDB-native (season, episode) numbers. Rewrite them
+    in-place to the canonical TMDB position before find_or_create_media_plex's
+    raw-number match/create, the same translation find_or_create_media_jellyfin
+    does for #162.
+
+    Unlike the Jellyfin path this is gated on the explicit per-show order
+    preference: Plex defaults to TMDB numbering, so a show still on the default
+    must never be touched. No-op (and never raises) if anything needed is
+    missing or the position genuinely doesn't exist on TMDB's side.
+    """
+    if not (
+        user_id
+        and series_tmdb_id
+        and data.get("media_type") == "episode"
+        and not data.get("tmdb_id")
+        and data.get("season_number") is not None
+        and data.get("episode_number") is not None
+    ):
+        return
+    try:
+        order_pref = await get_episode_order(db, user_id, series_tmdb_id)
+        if not order_pref or order_pref.episode_order != "tvdb":
+            return
+        show_row = (
+            await db.execute(select(Show).where(Show.tmdb_id == series_tmdb_id))
+        ).scalar_one_or_none()
+        if not show_row or not show_row.tvdb_id:
+            return
+        _, tvdb_api_key, _ = await _resolve_tvdb_fallback(db, show_row, user_id)
+        canonical = await _resolve_tvdb_episode_to_tmdb_position(
+            db, show_row, data["season_number"], data["episode_number"],
+            tmdb_api_key, tvdb_api_key,
+        )
+        if canonical:
+            data["season_number"], data["episode_number"] = canonical
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception(
+            "Plex TVDB episode position translation failed (series_tmdb_id=%s s=%s e=%s)",
+            series_tmdb_id, data.get("season_number"), data.get("episode_number"),
+        )
 
 
 async def _resolve_show_for_episode(
@@ -2274,6 +2324,11 @@ async def find_or_create_media_plex(
         print(f"  Skipping unidentifiable episode '{data['title']}' (no season/episode/tmdb_id)")
         return None
 
+    # #335: if the user put this show on TVDB (aired) order, rewrite the
+    # TVDB-native (season, episode) Plex reported to the canonical TMDB position
+    # before the raw-number match/create below.
+    await _translate_plex_tvdb_episode_position(data, db, series_tmdb_id, user_id, api_key)
+
     # For episodes without a TMDB ID, look up by show+season+episode before creating
     # to avoid duplicate Media rows on repeated webhook events (e.g. episodes not yet
     # on TMDB that Plex tracks only by season/episode number).
@@ -3012,12 +3067,7 @@ async def find_or_create_media_kodi(
     return media
 
 
-async def _handle_kodi_webhook(request: Request, db: AsyncSession, api_key: str):
-    user_result = await db.execute(select(User).where(User.api_key == api_key))
-    user = user_result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
+async def _handle_kodi_webhook(request: Request, db: AsyncSession, user: User):
     body = await request.body()
     if not body:
         return {"status": "ignored", "reason": "empty body"}
@@ -3106,21 +3156,16 @@ async def _handle_kodi_webhook(request: Request, db: AsyncSession, api_key: str)
 async def kodi_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    api_key: str = Query(..., description="Scrob user API key"),
+    user: User = Depends(get_current_user_or_api_key),
 ):
-    return await _handle_kodi_webhook(request, db, api_key)
+    return await _handle_kodi_webhook(request, db, user)
 
 
 @router.get("/kodi/history")
 async def kodi_library_history(
     db: AsyncSession = Depends(get_db),
-    api_key: str = Query(..., description="Scrob user API key"),
+    user: User = Depends(get_current_user_or_api_key),
 ):
-    user_result = await db.execute(select(User).where(User.api_key == api_key))
-    user = user_result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
     movie_rows = (await db.execute(
         select(Media.tmdb_id, func.sum(WatchEvent.play_count).label("play_count"))
         .join(WatchEvent, WatchEvent.media_id == Media.id)
@@ -3154,17 +3199,12 @@ async def kodi_library_history(
 @router.get("/kodi/ratings")
 async def kodi_library_ratings(
     db: AsyncSession = Depends(get_db),
-    api_key: str = Query(..., description="Scrob user API key"),
+    user: User = Depends(get_current_user_or_api_key),
 ):
     """Item-level ratings for the signed-in user, shaped for the Kodi add-on to
     mirror back into its local library as ``userrating``. Movie and episode
     ratings only - season/show-level rows (``Rating.season_number`` or
     ``episode_order`` set) are left out."""
-    user_result = await db.execute(select(User).where(User.api_key == api_key))
-    user = user_result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
     movie_rows = (await db.execute(
         select(Media.tmdb_id, Rating.rating)
         .join(Rating, Rating.media_id == Media.id)
@@ -3221,13 +3261,8 @@ class KodiRatingPayload(BaseModel):
 async def kodi_rating(
     payload: KodiRatingPayload,
     db: AsyncSession = Depends(get_db),
-    api_key: str = Query(..., description="Scrob user API key"),
+    user: User = Depends(get_current_user_or_api_key),
 ):
-    user_result = await db.execute(select(User).where(User.api_key == api_key))
-    user = user_result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
     settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == user.id))
     settings = settings_result.scalar_one_or_none()
     tmdb_key = await _get_tmdb_key(db, settings)

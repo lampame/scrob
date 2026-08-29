@@ -253,14 +253,23 @@ async def admin_heal_metadata(
     current_user: User = Depends(require_admin),
 ):
     """Re-enrich all collection items server-wide that are missing poster/date metadata."""
-    gs = await _get_or_create_global_settings(db)
-    if not gs.tmdb_api_key:
-        raise HTTPException(status_code=400, detail="A global TMDB API key is required for server-wide heal")
+    # TMDB metadata isn't user-specific, so resolve the key the same way every
+    # other TMDB path does: this admin's own key, then the global one (#336).
+    from routers.sync import _get_effective_tmdb_key
+
+    settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
+    settings = settings_result.scalar_one_or_none()
+    effective_key = await _get_effective_tmdb_key(db, settings)
+    if not effective_key:
+        raise HTTPException(
+            status_code=400,
+            detail="No TMDB Read Access Token is configured. Set one in Admin settings or in your account Settings.",
+        )
     job = SyncJob(user_id=current_user.id, source=CollectionSource.tmdb, job_type="heal", status=SyncStatus.pending)
     db.add(job)
     await db.commit()
     await db.refresh(job)
-    background_tasks.add_task(run_admin_heal, gs.tmdb_api_key, current_user.id, job.id)
+    background_tasks.add_task(run_admin_heal, effective_key, current_user.id, job.id)
     return {"status": "started", "message": "Server-wide metadata heal is running in the background"}
 
 

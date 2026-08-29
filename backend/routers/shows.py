@@ -2186,6 +2186,7 @@ async def get_tvdb_show(
         "in_library": in_library,
         "watched": watched_overall,
         "rewatch": rewatch_info,
+        "dropped": bool(show and settings and show.id in set(settings.dropped_shows or [])),
         "in_lists": in_lists,
         "collection_pct": collection_pct,
         "watch_pct": watch_pct,

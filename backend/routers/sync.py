@@ -3337,7 +3337,7 @@ async def _apply_remote_watchlist_changes(
         _, title = local_by_key.get(key, (None, None))
         plex_type = "movie" if kind == "movie" else "show"
         try:
-            rating_key = await plex.resolve_tmdb_ratingkey(conn.token, int(raw_id), plex_type, title)
+            rating_key = await plex.resolve_tmdb_ratingkey(conn.plex_account_token, int(raw_id), plex_type, title)
             if not rating_key:
                 logger.warning(
                     "Could not resolve Plex ratingKey for %s (connection %s); will retry on the next reconcile",
@@ -3345,7 +3345,7 @@ async def _apply_remote_watchlist_changes(
                 )
                 failed_add.add(key)
                 continue
-            if not await plex.add_to_watchlist(conn.token, rating_key):
+            if not await plex.add_to_watchlist(conn.plex_account_token, rating_key):
                 failed_add.add(key)
         except Exception as exc:
             logger.warning("Plex watchlist add failed for %s (connection %s): %s", key, conn.id, exc)
@@ -3360,8 +3360,8 @@ async def _apply_remote_watchlist_changes(
             if not rating_key:
                 kind, _, raw_id = key.partition(":")
                 plex_type = "movie" if kind == "movie" else "show"
-                rating_key = await plex.resolve_tmdb_ratingkey(conn.token, int(raw_id), plex_type, item.get("title"))
-            if not rating_key or not await plex.remove_from_watchlist(conn.token, rating_key):
+                rating_key = await plex.resolve_tmdb_ratingkey(conn.plex_account_token, int(raw_id), plex_type, item.get("title"))
+            if not rating_key or not await plex.remove_from_watchlist(conn.plex_account_token, rating_key):
                 failed_remove.add(key)
         except Exception as exc:
             logger.warning("Plex watchlist remove failed for %s (connection %s): %s", key, conn.id, exc)
@@ -3410,7 +3410,7 @@ async def _reconcile_plex_watchlist(user_id: int, connection_id: int, tmdb_api_k
                 baseline = baseline_result.scalar_one_or_none()
 
                 print(f"  Fetching Plex watchlist...")
-                remote_items = await plex.get_watchlist(conn.token)
+                remote_items = await plex.get_watchlist(conn.plex_account_token)
                 print(f"  {len(remote_items)} items in Plex watchlist")
                 remote_by_key = _plex_watchlist_remote_map(remote_items)
 
@@ -5013,7 +5013,7 @@ async def get_plex_friends(
     if conn.type != "plex":
         raise HTTPException(status_code=400, detail="Connection is not a Plex server")
     from core import plex as plex_client
-    friends = await plex_client.get_all_friends(conn.token)
+    friends = await plex_client.get_all_friends(conn.plex_account_token)
     return {"friends": friends}
 
 

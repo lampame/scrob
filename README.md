@@ -574,8 +574,12 @@ Plex webhooks require a **Plex Pass** subscription.
 Kodi scrobbling uses the **[scrob-kodi](https://github.com/ellite/scrob-kodi)** add-on - no manual webhook configuration needed.
 
 1. Install the **scrob-kodi** add-on from the [scrob-kodi repository](https://github.com/ellite/scrob-kodi).
-2. In the add-on settings, enter your Scrob URL and your API key (found in **Connections → API Key**).
+2. In the add-on settings, enter your Scrob URL, then either:
+   - **Authorize with Scrob** (recommended) - the add-on shows a short code; open `your-scrob-url/link` in a browser, sign in, and approve. This works with 2FA accounts, never exposes your password, and the device can be revoked on its own from **Connections → Connected Apps**.
+   - or paste your **API key** (found in **Connections → API Key**) - still fully supported, and the only option if your Scrob instance predates device linking.
 3. The add-on will automatically send playback events to Scrob as you watch.
+
+The `POST /api/proxy/webhooks/kodi` endpoint (and the `kodi/history`, `kodi/ratings`, `kodi/rating` helpers the add-on uses for library sync) accept either an `Authorization: Bearer` device token or the `?api_key=` query parameter.
 
 ## OIDC / Single Sign-On
 
