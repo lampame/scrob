@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
 from typing import Optional
 from datetime import datetime
 from models.base import UserRole, MediaType, PrivacyLevel
@@ -510,3 +510,10 @@ class AdminUser(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AdminUserCreate(BaseModel):
+    username : str = Field(min_length=1, max_length=150)
+    email    : EmailStr
+    password : str = Field(min_length=1)
+    is_admin : bool = False

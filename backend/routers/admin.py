@@ -94,6 +94,55 @@ async def list_users(
     ]
 
 
+@router.post("/users", response_model=schemas.AdminUser, status_code=status.HTTP_201_CREATED)
+async def create_user(
+    body: schemas.AdminUserCreate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin),
+):
+    """Manually provision a user. Unlike self-registration this ignores the
+    ENABLE_REGISTRATIONS gate and marks the email confirmed - the admin is
+    vouching for the account - so the user can sign in right away."""
+    from core.security import get_password_hash
+    from models.base import UserRole
+    from routers.auth import _generate_api_key
+
+    username = body.username.strip()
+    email = body.email.strip().lower()
+
+    existing = await db.execute(
+        select(User).where((User.email == email) | (User.username == username))
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A user with this email or username already exists",
+        )
+
+    user = User(
+        username=username,
+        email=email,
+        password_hash=get_password_hash(body.password),
+        api_key=_generate_api_key(),
+        role=UserRole.admin if body.is_admin else UserRole.user,
+        is_admin=body.is_admin,
+        email_confirmed=True,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    return schemas.AdminUser(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        is_admin=user.is_admin,
+        api_key=user.api_key,
+        created_at=user.created_at,
+        avatar_url=None,
+    )
+
+
 @router.patch("/users/{user_id}/toggle-admin", response_model=schemas.AdminUser)
 async def toggle_admin(
     user_id: int,

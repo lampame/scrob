@@ -492,6 +492,65 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
           </tbody>
         </table>
       </div>
+
+      <!-- Add a user -->
+      <div class="mt-4 bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
+        <div class="collapsible-header flex items-center justify-between px-6 py-4 hover:bg-zinc-900/40 cursor-pointer transition-colors select-none" data-target="add-user-body">
+          <div class="flex items-center gap-3 pointer-events-none">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-4 h-4 text-zinc-400 shrink-0">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19 7.5v3m0 0v3m0-3h3m-3 0h-3m-2.25-4.125a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zM4 19.235v-.11a6.375 6.375 0 0112.75 0v.109A12.318 12.318 0 0110.374 21c-2.331 0-4.512-.645-6.374-1.766z" />
+            </svg>
+            <span class="font-medium text-zinc-200">Add a user</span>
+          </div>
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="collapsible-chevron w-4 h-4 text-zinc-500 transition-transform pointer-events-none ml-1 shrink-0">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+          </svg>
+        </div>
+        <div id="add-user-body" class="border-t border-zinc-800 hidden">
+          <form id="add-user-form" class="px-6 py-6 space-y-4 max-w-md">
+            <div class="space-y-1.5">
+              <label for="new-user-username" class="block text-sm font-medium text-zinc-400">Username</label>
+              <input type="text" id="new-user-username" name="username" required autocomplete="off"
+                class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all" />
+            </div>
+            <div class="space-y-1.5">
+              <label for="new-user-email" class="block text-sm font-medium text-zinc-400">Email</label>
+              <input type="email" id="new-user-email" name="email" required autocomplete="off"
+                class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all" />
+            </div>
+            <div class="space-y-1.5">
+              <label for="new-user-password" class="block text-sm font-medium text-zinc-400">Password</label>
+              <div class="relative">
+                <input type="password" id="new-user-password" name="password" required autocomplete="new-password"
+                  class="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-4 pr-10 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all" />
+                <button type="button" class="password-toggle absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-1 cursor-pointer transition-colors" aria-label="Toggle visibility">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 eye-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.644C3.412 7.943 7.213 5 12 5c4.787 0 8.588 2.943 9.964 6.678.066.18.066.362 0 .544C20.588 16.057 16.787 19 12 19c-4.787 0-8.588-2.943-9.964-6.678z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 eye-slash-icon hidden"><path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" /></svg>
+                </button>
+              </div>
+            </div>
+            <div class="space-y-1.5">
+              <label for="new-user-password-confirm" class="block text-sm font-medium text-zinc-400">Confirm password</label>
+              <div class="relative">
+                <input type="password" id="new-user-password-confirm" name="password_confirm" required autocomplete="new-password"
+                  class="w-full bg-zinc-950 border border-zinc-800 rounded-lg pl-4 pr-10 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all" />
+                <button type="button" class="password-toggle absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 p-1 cursor-pointer transition-colors" aria-label="Toggle visibility">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 eye-icon"><path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.644C3.412 7.943 7.213 5 12 5c4.787 0 8.588 2.943 9.964 6.678.066.18.066.362 0 .544C20.588 16.057 16.787 19 12 19c-4.787 0-8.588-2.943-9.964-6.678z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 eye-slash-icon hidden"><path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" /></svg>
+                </button>
+              </div>
+            </div>
+            <label class="flex items-center gap-2.5 text-sm text-zinc-300 cursor-pointer select-none">
+              <input type="checkbox" name="is_admin" value="true" class="w-4 h-4 rounded border-zinc-700 bg-zinc-950 text-blue-600 focus:ring-blue-500 focus:ring-offset-0" />
+              Grant admin access
+            </label>
+            <button type="submit" id="add-user-submit"
+              class="w-full sm:w-auto px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-xl transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+              Create user
+            </button>
+          </form>
+        </div>
+      </div>
     </section>
 
     <!-- ── Maintenance ── -->
@@ -960,6 +1019,45 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
     } finally {
       btn.disabled = false;
       btn.textContent = 'Save Performance Settings';
+    }
+  });
+
+  // ── Add a user ──
+  document.getElementById('add-user-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target as HTMLFormElement;
+    const btn = document.getElementById('add-user-submit') as HTMLButtonElement;
+    const fd = new FormData(form);
+    const payload = {
+      username: ((fd.get('username') as string) ?? '').trim(),
+      email: ((fd.get('email') as string) ?? '').trim(),
+      password: (fd.get('password') as string) ?? '',
+      is_admin: fd.get('is_admin') === 'true',
+    };
+    if (payload.password !== ((fd.get('password_confirm') as string) ?? '')) {
+      showMessage('Passwords do not match.', 'error');
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Creating…';
+    try {
+      const res = await fetch('/api/proxy/admin/users', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const detail = Array.isArray(data.detail) ? (data.detail[0]?.msg ?? 'Invalid input') : data.detail;
+        throw new Error(detail || 'Failed to create user');
+      }
+      showMessage(`User "${payload.username}" created.`);
+      form.reset();
+      setTimeout(() => location.reload(), 800);
+    } catch (err: unknown) {
+      showMessage(err instanceof Error ? err.message : 'Failed to create user', 'error');
+      btn.disabled = false;
+      btn.textContent = 'Create user';
     }
   });
 
