@@ -67,8 +67,17 @@ jobs:
           LATEST="${{ steps.resolve.outputs.latest }}"
           BR="sync/${LATEST#upstream/}"
           git switch -c "$BR" main
-          git merge "$LATEST" --no-edit
-
+          git merge -X ours "$LATEST" --no-edit
+      - name: Drop upstream-only workflows (fork uses fork-release.yml)
+        if: steps.check.outputs.already_merged == 'false'
+        run: |
+          for f in .github/workflows/release.yml \
+                   .github/workflows/docker.yml \
+                   .github/workflows/docker-x64.yml \
+                   .releaserc.json; do
+            git rm -f "$f" || true
+          done
+          git commit -m "chore: drop upstream release/docker workflows and .releaserc.json (fork uses fork-release.yml)" || echo "nothing to remove"
       - name: Set up uv and Node.js
         if: steps.check.outputs.already_merged == 'false'
         uses: actions/setup-python@v5
