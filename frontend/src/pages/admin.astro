@@ -31,7 +31,7 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
   <div class="max-w-4xl mx-auto px-4 py-8 space-y-10">
     <h1 class="page-title">Admin Panel</h1>
 
-    <div id="js-message" class="hidden"></div>
+    <div id="js-message" class="hidden fixed right-4 z-[200] max-w-sm p-4 rounded-lg shadow-2xl border"></div>
 
     <!-- ── Global Server Settings ── -->
     <section>
@@ -704,19 +704,32 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  function showMessage(text: string, type: 'success' | 'error' = 'success') {
-    const msg = document.getElementById('js-message')!;
-    msg.textContent = text;
-    msg.className = `p-4 rounded-lg mb-8 ${
-      type === 'success'
-        ? 'bg-green-500/10 border border-green-500 text-green-500'
-        : 'bg-red-500/10 border border-red-500 text-red-500'
-    }`;
-    msg.classList.remove('hidden');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    if ((window as any)._msgTimeout) clearTimeout((window as any)._msgTimeout);
-    (window as any)._msgTimeout = setTimeout(() => msg.classList.add('hidden'), 4000);
+  // Floating toast, top-right, kept below the nav (mirrors settings.astro).
+  function positionMessage(msg: HTMLElement) {
+    const nav = document.querySelector('nav');
+    const navBottom = nav ? nav.getBoundingClientRect().bottom : 0;
+    msg.style.top = `${Math.max(16, navBottom + 12)}px`;
   }
+
+  function showMessage(text: string, type: 'success' | 'error' = 'success') {
+    const msg = document.getElementById('js-message');
+    if (!msg) return;
+    msg.textContent = text;
+    msg.className = `fixed right-4 z-[200] max-w-sm p-4 rounded-lg shadow-2xl border ${
+      type === 'success'
+        ? 'bg-zinc-900 border-green-500/50 text-green-400'
+        : 'bg-zinc-900 border-red-500/50 text-red-400'
+    }`;
+    positionMessage(msg);
+    msg.classList.remove('hidden');
+    if ((window as any)._messageTimeout) clearTimeout((window as any)._messageTimeout);
+    (window as any)._messageTimeout = setTimeout(() => msg.classList.add('hidden'), 4000);
+  }
+
+  window.addEventListener('scroll', () => {
+    const msg = document.getElementById('js-message');
+    if (msg && !msg.classList.contains('hidden')) positionMessage(msg);
+  }, { passive: true });
 
   function setConnStatus(id: string, state: 'checking' | 'connected' | 'disconnected') {
     const el = document.getElementById(id);
