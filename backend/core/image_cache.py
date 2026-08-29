@@ -158,7 +158,7 @@ async def _prune_type(db, image_type: str, total_size: int, limit_bytes: int) ->
     return total_size
 
 
-async def prune_cache(db, limit_gb: int):
+async def prune_cache(db, limit_gb: float):
     """Evict images from cache when exceeding the limit. Prunes on-demand first, then collected."""
     if not limit_gb or limit_gb <= 0:
         return
@@ -178,7 +178,7 @@ async def prune_cache(db, limit_gb: int):
     await db.commit()
 
 
-async def prune_cache_bg(limit_gb: int):
+async def prune_cache_bg(limit_gb: float):
     """Throttled background prune: runs at most once every 5 minutes."""
     global _last_prune_at
     if not limit_gb or limit_gb <= 0:

@@ -357,11 +357,12 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
             name="image_cache_limit_gb"
             id="image_cache_limit_gb"
             min="0"
+            step="0.1"
             placeholder="0 (Unlimited)"
             value={globalSettings.image_cache_limit_gb ?? ""}
             class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
           />
-          <p class="text-xs text-zinc-500">Set a maximum storage limit in GB. Oldest accessed images will be pruned when the limit is exceeded. Set to 0 or leave empty for unlimited.</p>
+          <p class="text-xs text-zinc-500">Set a maximum storage limit in GB (fractional values allowed, e.g. 1.5). Oldest accessed images will be pruned when the limit is exceeded. Set to 0 or leave empty for unlimited.</p>
         </div>
 
         <!-- Cache Usage -->
@@ -942,7 +943,8 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
 
     body['image_cache_enabled'] = fd.get('image_cache_enabled') === 'true';
     const cacheLimit = ((fd.get('image_cache_limit_gb') as string) ?? '').trim();
-    body['image_cache_limit_gb'] = cacheLimit ? parseInt(cacheLimit) : null;
+    const cacheLimitNum = cacheLimit ? parseFloat(cacheLimit) : NaN;
+    body['image_cache_limit_gb'] = Number.isFinite(cacheLimitNum) && cacheLimitNum > 0 ? cacheLimitNum : null;
 
     try {
       const res = await fetch('/api/proxy/admin/settings', {
@@ -1403,7 +1405,7 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
           pct >= 90 ? 'bg-red-500' : pct >= 70 ? 'bg-amber-500' : 'bg-blue-500'
         }`;
         usedLabel.textContent = usedStr;
-        limitLabel.textContent = `${data.limit_gb} GB limit`;
+        limitLabel.textContent = `${Number(data.limit_gb.toFixed(2))} GB limit`;
       } else {
         pctEl.textContent = '';
         progressWrap.classList.add('hidden');

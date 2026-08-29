@@ -475,7 +475,7 @@ class GlobalSettings(BaseModel):
     radarr_customize_on_add     : bool = False
     sonarr_customize_on_add     : bool = False
     image_cache_enabled         : bool = False
-    image_cache_limit_gb        : Optional[int] = None
+    image_cache_limit_gb        : Optional[float] = None
     enable_logged_out_navigation: bool = False
     disable_comments            : bool = False
 

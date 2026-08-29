@@ -107,6 +107,32 @@ class DownloadAndCacheTvdbImageTests(unittest.IsolatedAsyncioTestCase):
         async with self.Session() as db:
             self.assertIsNone(await image_cache.download_and_cache_image(db, "tvdb", "/../../etc/passwd"))
 
+    async def test_prune_cache_honours_a_fractional_gb_limit(self):
+        # Two 800-byte entries; a ~1000-byte limit (fractional GB) must evict
+        # the older one, not silently round the limit to 0 or 1 GB.
+        from datetime import datetime, timedelta, timezone
+
+        from models.image_cache import ImageCache
+
+        now = datetime.now(timezone.utc)
+        for i, ts in enumerate([now - timedelta(hours=2), now]):
+            p = self.tmp / "image_cache" / "tvdb" / f"{i}.jpg"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"x" * 800)
+        async with self.Session() as db:
+            db.add_all([
+                ImageCache(path=f"/{i}.jpg", size="tvdb", image_type="ondemand",
+                           file_size=800, last_accessed=ts, created_at=ts)
+                for i, ts in enumerate([now - timedelta(hours=2), now])
+            ])
+            await db.commit()
+
+            await image_cache.prune_cache(db, limit_gb=1000 / 1024 ** 3)  # ~1000 bytes
+
+            remaining = [r.path for r in (await db.execute(ImageCache.__table__.select())).all()]
+        self.assertEqual(remaining, ["/1.jpg"])  # oldest evicted
+        self.assertFalse((self.tmp / "image_cache" / "tvdb" / "0.jpg").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

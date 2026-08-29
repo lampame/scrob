@@ -1,6 +1,6 @@
 from typing import Optional
 
-from sqlalchemy import Boolean, Integer, String
+from sqlalchemy import Boolean, Float, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -30,7 +30,7 @@ class GlobalSettings(Base):
     tvdb_api_key                 : Mapped[Optional[str]] = mapped_column(String(255))
     tvdb_subscriber_pin          : Mapped[Optional[str]] = mapped_column(String(255))
     image_cache_enabled          : Mapped[bool]          = mapped_column(Boolean, nullable=False, server_default="false")
-    image_cache_limit_gb         : Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    image_cache_limit_gb         : Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     enable_logged_out_navigation : Mapped[bool]          = mapped_column(Boolean, nullable=False, server_default="false")
     disable_comments             : Mapped[bool]          = mapped_column(Boolean, nullable=False, server_default="false")
     # Stable X-Plex-Client-Identifier for this Scrob instance. Generated on first
