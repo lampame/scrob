@@ -12,12 +12,14 @@ export function formatEpisodesLeft(
 }
 
 export function formatSeasonTitle(seasonNumber: number, name?: string | null): string {
-  const fallback = `Season ${seasonNumber}`;
+  const isSpecials = seasonNumber === 0;
+  const fallback = isSpecials ? "Specials" : `Season ${seasonNumber}`;
   const trimDecorators = (value: string) => value.replace(/^[-–—:·\s]+|[-–—:·\s]+$/g, "").trim();
-  const normalized = trimDecorators(name ?? "").replace(
-    new RegExp(`^season\\s+${seasonNumber}\\s*[-–—:·]?\\s*`, "i"),
-    "",
-  );
-  const customName = trimDecorators(normalized);
+  // Strip a redundant leading label ("Season 3 - ", or "Specials - " for season 0)
+  // so a name that only repeats the fallback collapses back to it.
+  const prefixRe = isSpecials
+    ? /^(?:season\s+0|specials)\s*[-–—:·]?\s*/i
+    : new RegExp(`^season\\s+${seasonNumber}\\s*[-–—:·]?\\s*`, "i");
+  const customName = trimDecorators(trimDecorators(name ?? "").replace(prefixRe, ""));
   return customName ? `${fallback} · ${customName}` : fallback;
 }

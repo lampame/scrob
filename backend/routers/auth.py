@@ -533,6 +533,24 @@ async def create_connection(
         server_user_id = profile_id
         server_username = arvio.get_profile_name(profiles, profile_id)
 
+    plex_auth_token = None
+    plex_account_id = None
+    plex_machine_identifier = None
+    if body.type == "plex":
+        plex_auth_token = body.plex_auth_token or None
+        plex_account_id = body.plex_account_id or None
+        plex_machine_identifier = body.plex_machine_identifier or None
+        if plex_machine_identifier:
+            dup = await db.execute(
+                select(MediaServerConnection).where(
+                    MediaServerConnection.user_id == current_user.id,
+                    MediaServerConnection.type == "plex",
+                    MediaServerConnection.plex_machine_identifier == plex_machine_identifier,
+                )
+            )
+            if dup.scalar_one_or_none():
+                raise HTTPException(status_code=409, detail="This Plex server is already connected.")
+
     cloud_media_provider = body.type in ("nuvio", "stremio", "arvio")
     conn = MediaServerConnection(
         user_id=current_user.id,
@@ -542,6 +560,9 @@ async def create_connection(
         token=connection_token,
         server_user_id=server_user_id,
         server_username=server_username,
+        plex_auth_token=plex_auth_token,
+        plex_account_id=plex_account_id,
+        plex_machine_identifier=plex_machine_identifier,
         sync_collection=body.sync_collection,
         sync_watched=body.sync_watched,
         sync_ratings=body.sync_ratings if not cloud_media_provider else False,
@@ -875,6 +896,111 @@ async def test_plex(
     if not success:
         raise HTTPException(status_code=400, detail="Failed to connect to Plex")
     return {"status": "ok"}
+
+
+# ── "Login with Plex" (PIN auth) ──────────────────────────────────────────────
+
+# user_id -> {"pin_id": int, "client_id": str, "created_at": datetime}. Transient;
+# a pending PIN only needs to survive the ~2 min the user spends on app.plex.tv.
+_PLEX_PIN_CACHE: dict[int, dict] = {}
+_PLEX_PIN_TTL = timedelta(minutes=15)
+
+
+async def _get_plex_client_identifier(db: AsyncSession) -> str:
+    """Return this instance's stable X-Plex-Client-Identifier, generating and
+    persisting one on first use."""
+    gs = (await db.execute(select(GlobalSettings).where(GlobalSettings.id == 1))).scalar_one_or_none()
+    if gs is None:
+        gs = GlobalSettings(id=1)
+        db.add(gs)
+    if not gs.plex_client_identifier:
+        gs.plex_client_identifier = f"scrob-{secrets.token_hex(12)}"
+        await db.commit()
+    return gs.plex_client_identifier
+
+
+@router.post("/plex/pin/start")
+async def plex_pin_start(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Begin the "Login with Plex" flow. Returns a PIN code, the URL the user
+    opens to authorize it, and the poll interval."""
+    from core import plex
+
+    client_id = await _get_plex_client_identifier(db)
+    try:
+        pin = await plex.create_auth_pin(client_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not reach plex.tv: {exc}")
+
+    _PLEX_PIN_CACHE[current_user.id] = {
+        "pin_id": pin["id"],
+        "client_id": client_id,
+        "created_at": datetime.now(timezone.utc),
+    }
+    return {
+        "pin_id": pin["id"],
+        "auth_url": plex.build_auth_url(client_id, pin["code"]),
+        "interval": 2,
+    }
+
+
+@router.post("/plex/pin/poll")
+async def plex_pin_poll(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Check whether the user has authorized the PIN. While pending, returns
+    {status: "pending"}. Once claimed, returns the Plex account plus every server
+    it can reach, each with a ready-to-use URL and token for the connection form."""
+    from core import plex
+
+    entry = _PLEX_PIN_CACHE.get(current_user.id)
+    if not entry:
+        raise HTTPException(status_code=400, detail="No pending Plex login. Start again.")
+    if datetime.now(timezone.utc) - entry["created_at"] > _PLEX_PIN_TTL:
+        _PLEX_PIN_CACHE.pop(current_user.id, None)
+        raise HTTPException(status_code=400, detail="Plex login expired. Start again.")
+
+    try:
+        auth_token = await plex.poll_auth_pin(entry["client_id"], entry["pin_id"])
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not reach plex.tv: {exc}")
+    if not auth_token:
+        return {"status": "pending"}
+
+    _PLEX_PIN_CACHE.pop(current_user.id, None)
+
+    account = await plex.get_account(entry["client_id"], auth_token)
+    if not account:
+        raise HTTPException(status_code=502, detail="Plex authorized but the account could not be read.")
+
+    try:
+        servers = await plex.get_servers(entry["client_id"], auth_token)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not list Plex servers: {exc}")
+
+    resolved = []
+    for server in servers:
+        probe = await plex.resolve_connections(server)
+        if not probe["connections"]:
+            continue
+        resolved.append({
+            "name": server["name"],
+            "machine_identifier": server["machine_identifier"],
+            "owned": server["owned"],
+            "token": server["access_token"],
+            "url": probe["recommended"],
+            "connections": probe["connections"],
+        })
+
+    return {
+        "status": "connected",
+        "account": account,
+        "auth_token": auth_token,
+        "servers": resolved,
+    }
 
 
 @router.post("/stremio/link/start")
