@@ -333,6 +333,11 @@ export interface GlobalSettings {
   image_cache_limit_gb: number | null;
   enable_logged_out_navigation: boolean;
   disable_comments: boolean;
+  socket_mode: string;
+  socket_namespace: string;
+  socket_join_key: string | null;
+  socket_send_key: string | null;
+  socket_external_url: string | null;
 }
 
 export interface MediaRequestItem {

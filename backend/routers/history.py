@@ -1332,7 +1332,8 @@ async def drop_show(
     settings = settings_result.scalar_one_or_none()
     if not settings:
         raise HTTPException(status_code=404, detail="Settings not found")
-    dropped = list(settings.dropped_shows or [])
+    dropped = list(settings.dropped_shows or []) if settings else []
+
     if body.show_id not in dropped:
         dropped.append(body.show_id)
         settings.dropped_shows = dropped
@@ -1356,7 +1357,8 @@ async def undrop_show(
     settings = settings_result.scalar_one_or_none()
     if not settings:
         raise HTTPException(status_code=404, detail="Settings not found")
-    dropped = list(settings.dropped_shows or [])
+    dropped = list(settings.dropped_shows or []) if settings else []
+
     if show_id in dropped:
         dropped.remove(show_id)
         settings.dropped_shows = dropped
@@ -1539,7 +1541,6 @@ async def mark_as_watched(
     api_key = None
     episode_has_context = (
         event_in.media_type == MediaType.episode
-        and event_in.series_tmdb_id is not None
         and event_in.season_number is not None
         and event_in.episode_number is not None
     )
@@ -1714,6 +1715,22 @@ async def mark_as_watched(
             )
         )
     await db.commit()
+
+    # Emit real-time event to socket subscribers
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="watch_event.created",
+        payload={
+            "id": event.id,
+            "media_id": media.id,
+            "media_tmdb_id": media.tmdb_id,
+            "media_type": media.media_type,
+            "media_title": media.title,
+            "watched_at": watched_at.isoformat() if watched_at else None,
+            "completed": event_in.completed,
+        },
+    )
 
     if event_in.completed:
         await record_rewatch_progress(db, current_user.id, media.id, event.id)
@@ -2222,6 +2239,7 @@ async def mark_show_watched(
             first_air_date=data.get("first_air_date"),
             tmdb_data={
                 "genres": [g["name"] for g in data.get("genres", [])],
+                "last_episode_to_air": data.get("last_episode_to_air"),
                 "seasons": [
                     {
                         "season_number": s["season_number"],
@@ -2687,6 +2705,24 @@ async def start_manual_session(
     db.add(session)
     await db.commit()
 
+    # Emit real-time event
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="playback_session.started",
+        payload={
+            "session_key": session_key,
+            "media_id": media.id,
+            "media_tmdb_id": media.tmdb_id,
+            "media_type": media.media_type,
+            "media_title": media.title,
+            "state": "playing",
+            "progress_percent": 0.0,
+            "progress_seconds": 0,
+            "source": "manual",
+        },
+    )
+
     return {"session_key": session_key, "media_id": media.id, "runtime": media.runtime, "resumed": False}
 
 
@@ -2722,25 +2758,50 @@ async def update_manual_session(
     session.updated_at = datetime.utcnow()
 
     if 0.05 <= progress_pct < 0.90:
-        prog_q = await db.execute(
-            select(PlaybackProgress).where(
-                PlaybackProgress.user_id == current_user.id,
-                PlaybackProgress.media_id == session.media_id,
+        prog = (
+            await db.execute(
+                select(PlaybackProgress).where(
+                    PlaybackProgress.user_id == current_user.id,
+                    PlaybackProgress.media_id == media.id,
+                )
             )
-        )
-        prog = prog_q.scalar_one_or_none()
+        ).scalar_one_or_none()
         if prog:
             prog.progress_seconds = body.progress_seconds
             prog.progress_percent = progress_pct
         else:
-            db.add(PlaybackProgress(
-                user_id=current_user.id,
-                media_id=session.media_id,
-                progress_seconds=body.progress_seconds,
-                progress_percent=progress_pct,
-            ))
+            db.add(
+                PlaybackProgress(
+                    user_id=current_user.id,
+                    media_id=media.id,
+                    progress_seconds=body.progress_seconds,
+                    progress_percent=progress_pct,
+                )
+            )
+    else:
+        await db.execute(
+            delete(PlaybackProgress).where(
+                PlaybackProgress.user_id == current_user.id,
+                PlaybackProgress.media_id == media.id,
+            )
+        )
 
     await db.commit()
+
+    # Emit real-time event for session update
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type=f"playback_session.{session.state}",  # playing or paused
+        payload={
+            "session_key": session.session_key,
+            "media_id": session.media_id,
+            "state": session.state,
+            "progress_percent": session.progress_percent,
+            "progress_seconds": session.progress_seconds,
+        },
+    )
+
     return {"status": "ok"}
 
 
@@ -2770,6 +2831,18 @@ async def stop_manual_session(
         )
     )
     await db.commit()
+
+    # Emit real-time event
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="playback_session.stopped",
+        payload={
+            "session_key": session_key,
+            "media_id": media_id,
+        },
+    )
+
     return {"status": "ok"}
 
 

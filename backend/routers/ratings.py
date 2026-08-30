@@ -14,6 +14,7 @@ from models.users import UserSettings
 from dependencies import get_current_user, get_current_user_or_api_key
 from models.users import User
 from core.enrichment import enrich_media, create_media_safely
+from core.socket.manager import socket_manager
 
 router = APIRouter()
 
@@ -122,11 +123,13 @@ async def submit_rating(
     )
     rating = result2.scalar_one_or_none()
 
+    is_new = False
     if rating:
         rating.rating = body.rating
         rating.review = body.review
         rating.rated_at = datetime.utcnow()
     else:
+        is_new = True
         rating = Rating(
             media_id=media.id,
             user_id=current_user.id,
@@ -139,6 +142,23 @@ async def submit_rating(
 
     await db.commit()
     await db.refresh(rating)
+
+    # Emit real-time event
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="rating.created" if is_new else "rating.updated",
+        payload={
+            "media_id": media.id,
+            "tmdb_id": media.tmdb_id,
+            "media_type": media.media_type,
+            "title": media.title,
+            "rating": body.rating,
+            "review": body.review,
+            "season_number": effective_season,
+        },
+    )
+
     if effective_episode_order == "tvdb":
         return format_rating(rating, media)
 
@@ -229,6 +249,21 @@ async def delete_rating(
         raise HTTPException(status_code=404, detail="Rating not found")
     await db.delete(rating)
     await db.commit()
+
+    # Emit real-time event
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="rating.deleted",
+        payload={
+            "media_id": media.id,
+            "tmdb_id": media.tmdb_id,
+            "media_type": media.media_type,
+            "title": media.title,
+            "season_number": effective_season,
+        },
+    )
+
     if effective_episode_order == "tvdb":
         return {"status": "deleted"}
 

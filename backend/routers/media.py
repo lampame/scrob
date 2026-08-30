@@ -3045,6 +3045,20 @@ async def manually_collect(
         source_id=str(body.tmdb_id),
     ))
     await db.commit()
+
+    # Emit real-time event
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="collection.added",
+        payload={
+            "media_id": media.id,
+            "tmdb_id": body.tmdb_id,
+            "media_type": body.media_type.value,
+            "title": media.title,
+        },
+    )
+
     await _push_collection_change(db, current_user.id, {media.id}, added=True)
     return {"status": "ok", "message": "Added to collection"}
 
@@ -3124,6 +3138,19 @@ async def manually_uncollect(
         )
     )
     await db.commit()
+
+    # Emit real-time event
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="collection.removed",
+        payload={
+            "media_id": media.id,
+            "tmdb_id": media.tmdb_id,
+            "media_type": media.media_type,
+            "title": media.title,
+        },
+    )
 
     await _push_collection_change(db, current_user.id, {media.id}, added=False)
     return {"status": "ok", "message": "Removed from collection"}

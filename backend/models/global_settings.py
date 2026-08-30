@@ -36,3 +36,10 @@ class GlobalSettings(Base):
     # Stable X-Plex-Client-Identifier for this Scrob instance. Generated on first
     # use of "Login with Plex"; kept forever so Plex keeps recognising the device.
     plex_client_identifier       : Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    # WebSocket real-time communication settings
+    socket_mode          : Mapped[str]           = mapped_column(String(20), nullable=False, server_default="disabled")
+    socket_namespace     : Mapped[str]           = mapped_column(String(100), nullable=False, server_default="gwb-scrob")
+    socket_join_key      : Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    socket_send_key      : Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    socket_external_url  : Mapped[Optional[str]] = mapped_column(String(500), nullable=True, server_default="wss://itty.ws/c/")

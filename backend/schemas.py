@@ -480,6 +480,13 @@ class GlobalSettings(BaseModel):
     enable_logged_out_navigation: bool = False
     disable_comments            : bool = False
 
+    # WebSocket real-time communication settings
+    socket_mode          : Optional[str] = "disabled"
+    socket_namespace     : Optional[str] = "gwb-scrob"
+    socket_join_key      : Optional[str] = None
+    socket_send_key      : Optional[str] = None
+    socket_external_url  : Optional[str] = "wss://itty.ws/c/"
+
     class Config:
         from_attributes = True
 

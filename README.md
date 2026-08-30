@@ -45,6 +45,8 @@ Scrob syncs your libraries from **Jellyfin**, **Plex**, **Emby**, **Nuvio**, **A
   - [Emby](#emby)
   - [Kodi](#kodi)
 - [OIDC / Single Sign-On](#oidc--single-sign-on)
+- [WebSocket (Socket) Configuration](#websocket-socket-configuration)
+  - [Socket API Documentation](docs/socket-api.md)
 - [Email Validation & SMTP](#email-validation--smtp)
 - [Contributing](#contributing)
 - [Contributors](#contributors)
@@ -298,7 +300,24 @@ Database migrations run automatically on startup - no manual steps required.
 | `OIDC_ENABLED` | `false` | Enable OIDC login. |
 | `OIDC_DISABLE_PASSWORD_LOGIN` | `false` | Enforce OIDC-only login (disables username/password). |
 
-See `docker-compose.yaml` for the full list of OIDC variables and other variables.
+### WebSocket (Socket) Configuration
+
+Optional real-time communication via WebSocket. Disabled by default.
+
+All socket settings are managed in the admin panel (**Settings → WebSocket**) and take effect without a container restart. The only environment variable is the internal server port (infrastructure, like `BACKEND_PORT`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `SOCKET_INTERNAL_PORT` | `7332` | Port for the internal socket server (internal mode only). Override only if 7332 conflicts. |
+
+**Modes:**
+- **`disabled`** — no WebSocket functionality (default).
+- **`internal`** — runs a WebSocket server inside the container; clients connect directly.
+- **`external`** — connects to the public `itty.ws` relay as a client; requires keys from ittysockets.com.
+
+Configure mode, namespace, keys, and URL in the admin panel.
+
+**External clients** (scripts, automations, other Scrob instances) can connect to the WebSocket API for real-time events. See [Socket API Documentation](docs/socket-api.md) for the protocol, event types, and example clients in [Python](examples/socket_client.py) and [Node.js](examples/socket_client.js).
 
 ### Reverse proxy
 

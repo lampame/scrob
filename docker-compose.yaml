@@ -76,6 +76,11 @@ services:
       # DB_POOL_TIMEOUT: "30"
       # DB_POOL_RECYCLE: "1800"
       # DB_POOL_PRE_PING: "true"
+
+      # ── Socket (optional) ──────────────────────────────────────────────────
+      # WebSocket settings are managed in the admin panel (Settings → WebSocket).
+      # Only the internal server port is needed here (only if 7332 conflicts).
+      # SOCKET_INTERNAL_PORT: "7332"
     volumes:
       - scrob_data:/app/backend/data
 

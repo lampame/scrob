@@ -96,6 +96,10 @@ class Settings(BaseSettings):
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
+    # WebSocket — only the internal server port is infrastructure (env).
+    # Mode, URL, and keys are managed via the admin panel (GlobalSettings).
+    socket_internal_port: int = 7332
+
     # File storage root — override with DATA_DIR env var in production / Docker
     data_dir: Path = Path(__file__).parent.parent / "data"
 

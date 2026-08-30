@@ -250,6 +250,20 @@ async def create_list(
     db.add(lst)
     await db.commit()
     await db.refresh(lst)
+
+    # Emit real-time event
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="list.created",
+        payload={
+            "id": lst.id,
+            "name": lst.name,
+            "description": lst.description,
+            "privacy_level": lst.privacy_level.value,
+        },
+    )
+
     return {
         "id": lst.id,
         "name": lst.name,
@@ -381,6 +395,19 @@ async def update_list(
 
     await db.commit()
 
+    # Emit real-time event
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="list.updated",
+        payload={
+            "id": lst.id,
+            "name": lst.name,
+            "description": lst.description,
+            "privacy_level": lst.privacy_level.value,
+        },
+    )
+
     result = await db.execute(
         select(ListModel)
         .options(selectinload(ListModel.items))
@@ -415,6 +442,18 @@ async def delete_list(
         raise HTTPException(status_code=404, detail="List not found")
     await db.delete(lst)
     await db.commit()
+
+    # Emit real-time event
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="list.deleted",
+        payload={
+            "id": list_id,
+            "name": lst.name,
+        },
+    )
+
     return {"message": "List deleted"}
 
 
@@ -717,12 +756,27 @@ async def add_list_item(
     db.add(item)
     await db.commit()
 
-    if lst.trakt_slug:
+    # Emit real-time event
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="list.item_added",
+        payload={
+            "list_id": list_id,
+            "list_name": lst.name if lst else None,
+            "media_id": media.id if media else None,
+            "media_tmdb_id": media.tmdb_id if media else None,
+            "media_type": media.media_type if media else None,
+            "media_title": media.title if media else None,
+        },
+    )
+
+    if lst and lst.trakt_slug and media:
         await _push_list_item_to_trakt(db, current_user.id, lst.trakt_slug, media, season_number=body.season_number, remove=False)
         if lst.trakt_slug == "__plex_watchlist__":
             await _push_list_item_to_plex_watchlist(db, current_user.id, media, season_number=body.season_number, remove=False)
 
-    if lst.mdblist_slug:
+    if lst and lst.mdblist_slug and media:
         await _push_list_item_to_mdblist(
             db, current_user.id, lst.mdblist_slug, media, season_number=body.season_number, remove=False
         )
@@ -772,6 +826,21 @@ async def remove_list_item(
 
     await db.delete(item)
     await db.commit()
+
+    # Emit real-time event
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="list.item_removed",
+        payload={
+            "list_id": list_id,
+            "list_name": lst.name if lst else None,
+            "media_id": media.id if media else None,
+            "media_tmdb_id": media.tmdb_id if media else None,
+            "media_type": media.media_type if media else None,
+            "media_title": media.title if media else None,
+        },
+    )
 
     if lst and lst.trakt_slug and media:
         await _push_list_item_to_trakt(db, current_user.id, lst.trakt_slug, media, season_number=season_number, remove=True)

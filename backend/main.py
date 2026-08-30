@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import AsyncSession
 from db import engine, Base
 import models # noqa: F401
-from routers import webhooks, media, history, ratings, sync, shows, auth, lists, oidc, profile, trakt, simkl, mdblist, bingebase, comments, admin, compat, export, yamtrack, calendar
+from routers import webhooks, media, history, ratings, sync, shows, auth, lists, oidc, profile, trakt, simkl, mdblist, bingebase, comments, admin, compat, export, yamtrack, calendar, socket as socket_router
 
 from core.access_log import install as install_access_log_redaction
 install_access_log_redaction()
@@ -634,8 +634,12 @@ async def lifespan(app: FastAPI):
     emby_progress_task = asyncio.create_task(_emby_progress_poller())
     show_status_task = asyncio.create_task(_show_status_refresher())
 
+    from core.socket.manager import socket_manager
+    await socket_manager.startup(app)
+
     yield
 
+    await socket_manager.shutdown()
     scheduler_task.cancel()
     watchlist_task.cancel()
     manual_session_task.cancel()
@@ -719,6 +723,7 @@ app.include_router(export.router, prefix="/export", tags=["export"])
 app.include_router(yamtrack.router, prefix="/yamtrack", tags=["yamtrack"])
 app.include_router(calendar.router, prefix="/calendar", tags=["calendar"])
 app.include_router(compat.router, tags=["compat"])
+app.include_router(socket_router.router, tags=["socket"])
 
 @app.get("/health")
 async def health():
