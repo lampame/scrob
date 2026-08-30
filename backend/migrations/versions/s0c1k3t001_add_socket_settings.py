@@ -1,7 +1,7 @@
 """add socket settings to global_settings
 
 Revision ID: s0c1k3t001
-Revises: plexlogin102
+Revises: imgcachefloat
 Create Date: 2026-08-30
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision = "s0c1k3t001"
-down_revision = "plexlogin102"
+down_revision = "imgcachefloat"
 branch_labels = None
 depends_on = None
 
