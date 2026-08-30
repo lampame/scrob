@@ -482,7 +482,7 @@ class GlobalSettings(BaseModel):
 
     # WebSocket real-time communication settings
     socket_mode          : Optional[str] = "disabled"
-    socket_namespace     : Optional[str] = "gwb-scrob"
+    socket_namespace     : Optional[str] = None
     socket_join_key      : Optional[str] = None
     socket_send_key      : Optional[str] = None
     socket_external_url  : Optional[str] = "wss://itty.ws/c/"

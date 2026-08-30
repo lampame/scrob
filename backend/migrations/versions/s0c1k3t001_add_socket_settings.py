@@ -22,7 +22,7 @@ def upgrade() -> None:
     )
     op.add_column(
         "global_settings",
-        sa.Column("socket_namespace", sa.String(100), nullable=False, server_default="gwb-scrob"),
+        sa.Column("socket_namespace", sa.String(100), nullable=True),
     )
     op.add_column(
         "global_settings",

@@ -95,29 +95,47 @@ jobs:
           CURRENT="${{ env.APP_VERSION }}"
           PREV=$(git tag -l 'v*-fork*' --sort=-version:refname | grep -v "^${CURRENT}$" | head -1 || true)
 
-          if [ -n "$PREV" ]; then
-            echo "Previous fork tag: $PREV"
-            PREV_DATE=$(git log -1 --format=%as "$PREV")
-            SEARCH="merged:>=${PREV_DATE}"
-          else
-            echo "No previous fork tag — using all merged PRs"
-            SEARCH="merged:>=2020-01-01"
-          fi
-
           UPSTREAM_FILE=$(mktemp)
           FORK_FILE=$(mktemp)
           trap 'rm -f "$UPSTREAM_FILE" "$FORK_FILE"' EXIT
 
-          # Fetch merged PRs since previous tag, categorize by 'sync' label
-          gh pr list --repo "$REPO" --state merged --search "$SEARCH" \
-            --json number,title,author,url,labels --limit 100 \
-            | jq -r '.[] | select(.labels | map(.name) | contains(["sync"])) | "* \(.title) by @\(.author.login) in \(.url)"' \
-            > "$UPSTREAM_FILE" 2>/dev/null || true
+          # 1) PR-based changes from GitHub API (nice format with author/link)
+          if [ -n "$PREV" ]; then
+            echo "Previous fork tag: $PREV"
+            NOTES=$(gh api "repos/${REPO}/releases/generate-notes" \
+              -f tag_name="$CURRENT" \
+              -f previous_tag_name="$PREV" \
+              -q .body 2>/dev/null || echo "")
+          else
+            NOTES=$(gh api "repos/${REPO}/releases/generate-notes" \
+              -f tag_name="$CURRENT" \
+              -q .body 2>/dev/null || echo "")
+          fi
 
-          gh pr list --repo "$REPO" --state merged --search "$SEARCH" \
-            --json number,title,author,url,labels --limit 100 \
-            | jq -r '.[] | select(.labels | map(.name) | contains(["sync"]) | not) | "* \(.title) by @\(.author.login) in \(.url)"' \
-            > "$FORK_FILE" 2>/dev/null || true
+          # Split PR lines: sync/upstream in title → upstream, rest → fork
+          while IFS= read -r line; do
+            # Only process PR lines: "* TITLE by @AUTHOR in URL"
+            [[ "$line" == \**\ by\ @* ]] || continue
+            title=$(echo "$line" | sed -E 's/^\* (.*) by @.*/\1/')
+            if echo "$title" | grep -qiE "(sync|upstream)"; then
+              echo "$line" >> "$UPSTREAM_FILE"
+            else
+              echo "$line" >> "$FORK_FILE"
+            fi
+          done <<< "$NOTES"
+
+          # 2) Direct commits (not in any PR) → fork section
+          if [ -n "$PREV" ]; then
+            RANGE="${PREV}..HEAD"
+          else
+            RANGE="HEAD"
+          fi
+
+          while IFS='|' read -r hash subject; do
+            [ -z "$hash" ] && continue
+            short="${hash:0:7}"
+            echo "- ${subject} (${short})" >> "$FORK_FILE"
+          done < <(git log --no-merges --pretty=format:"%H|%s" "$RANGE" 2>/dev/null)
 
           # --- Build markdown ---
           {
@@ -139,7 +157,7 @@ jobs:
             fi
 
             if [ ! -s "$UPSTREAM_FILE" ] && [ ! -s "$FORK_FILE" ]; then
-              echo "_No PRs found since previous release._"
+              echo "_No changes found since previous release._"
               echo ""
             fi
 

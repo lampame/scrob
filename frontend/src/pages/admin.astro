@@ -328,14 +328,14 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
                     type="text"
                     name="socket_namespace"
                     id="socket_namespace"
-                    value={globalSettings.socket_namespace ?? "gwb-scrob"}
-                    placeholder="gwb-scrob"
+                    value={globalSettings.socket_namespace ?? ""}
+                    placeholder="my-app"
                     class="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
                   />
-                  <p class="text-xs text-zinc-500">The namespace prefix for your socket channels.</p>
+                  <p class="text-xs text-zinc-500">Optional. Creates a channel prefix like "my-app:user-&#123;username&#125;". Leave empty for no prefix.</p>
                 </div>
                 <!-- External URL -->
-                <div class="space-y-2">
+                <div class="space-y-2" id="socket-external-url-group">
                   <label for="socket_external_url" class="block text-sm font-medium text-zinc-400">External Server URL</label>
                   <input
                     type="url"
@@ -392,7 +392,7 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
                   <h3 class="text-sm font-semibold text-zinc-200 mb-2">Connection Info</h3>
                   <div class="text-xs text-zinc-400 space-y-1">
                     <div><span class="text-zinc-500">Mode:</span> <span id="socket-info-mode">{globalSettings.socket_mode ?? 'disabled'}</span></div>
-                    <div><span class="text-zinc-500">Namespace:</span> <span id="socket-info-namespace">{globalSettings.socket_namespace ?? 'gwb-scrob'}</span></div>
+                    <div><span class="text-zinc-500">Namespace:</span> <span id="socket-info-namespace">{globalSettings.socket_namespace || '(none)'}</span></div>
                     <div><span class="text-zinc-500">Join Key:</span> <span id="socket-info-join">{globalSettings.socket_join_key ? '••••••••' : '—'}</span></div>
                     <div><span class="text-zinc-500">Send Key:</span> <span id="socket-info-send">{globalSettings.socket_send_key ? '••••••••' : '—'}</span></div>
                     <div><span class="text-zinc-500">Server URL:</span> <span id="socket-info-url">{globalSettings.socket_mode === 'internal' ? 'ws://host:7332/c/' : (globalSettings.socket_external_url ?? 'wss://itty.ws/c/')}</span></div>
@@ -1146,6 +1146,57 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
     const form = e.target as HTMLFormElement;
     const fd = new FormData(form);
     const body: Record<string, string | number | boolean | number[] | null> = {};
+
+    // ── WebSocket mode-dependent field visibility ──
+    const socketMode = (document.getElementById('socket_mode') as HTMLSelectElement)?.value || 'disabled';
+    const socketExternalGroup = document.getElementById('socket-external-url-group');
+    const socketJoinKeyGroup = document.getElementById('socket_join_key')?.closest('.space-y-2');
+    const socketSendKeyGroup = document.getElementById('socket_send_key')?.closest('.space-y-2');
+
+    function updateSocketFields() {
+      const mode = (document.getElementById('socket_mode') as HTMLSelectElement)?.value || 'disabled';
+      const isExternal = mode === 'external';
+      const isInternal = mode === 'internal';
+      const isDisabled = mode === 'disabled';
+
+      // External URL only relevant for external mode
+      if (socketExternalGroup) {
+        socketExternalGroup.style.opacity = isExternal ? '1' : '40%';
+        socketExternalGroup.style.pointerEvents = isExternal ? 'auto' : 'none';
+        const input = socketExternalGroup.querySelector('input');
+        if (input) input.disabled = !isExternal;
+      }
+
+      // Join/Send keys only relevant for external mode
+      [socketJoinKeyGroup, socketSendKeyGroup].forEach(group => {
+        if (group) {
+          group.style.opacity = isExternal ? '1' : '40%';
+          group.style.pointerEvents = isExternal ? 'auto' : 'none';
+          const input = group.querySelector('input');
+          if (input) input.disabled = !isExternal;
+        }
+      });
+
+      // Update connection info
+      const infoMode = document.getElementById('socket-info-mode');
+      const infoUrl = document.getElementById('socket-info-url');
+      if (infoMode) infoMode.textContent = mode;
+      if (infoUrl) {
+        if (isInternal) {
+          infoUrl.textContent = 'ws://localhost:7332/c/';
+        } else if (isExternal) {
+          const url = (document.getElementById('socket_external_url') as HTMLInputElement)?.value || 'wss://itty.ws/c/';
+          infoUrl.textContent = url;
+        } else {
+          infoUrl.textContent = '—';
+        }
+      }
+    }
+
+    // Attach listener to mode selector
+    document.getElementById('socket_mode')?.addEventListener('change', updateSocketFields);
+    // Initial update
+    updateSocketFields();
 
     for (const f of ['tmdb_api_key', 'tvdb_api_key', 'tvdb_subscriber_pin', 'radarr_url', 'radarr_token', 'radarr_root_folder', 'sonarr_url', 'sonarr_token', 'sonarr_root_folder', 'socket_namespace', 'socket_join_key', 'socket_send_key', 'socket_external_url']) {
       const v = ((fd.get(f) as string) ?? '').trim();

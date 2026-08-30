@@ -45,7 +45,7 @@ class SocketManager:
             gs = await _get_global_settings(db)
             if gs:
                 self._mode = gs.socket_mode or "disabled"
-                self._namespace = gs.socket_namespace or "gwb-scrob"
+                self._namespace = gs.socket_namespace or ""
                 self._join_key = gs.socket_join_key
                 self._send_key = gs.socket_send_key
                 self._external_url = gs.socket_external_url or "wss://itty.ws/c/"
@@ -97,7 +97,11 @@ class SocketManager:
         if not self.is_enabled or not self._client:
             return
 
-        channel = f"{self._namespace}:user-{username}"
+        # Build channel name: "namespace:user-username" or just "user-username" if no namespace
+        if self._namespace:
+            channel = f"{self._namespace}:user-{username}"
+        else:
+            channel = f"user-{username}"
         message = {
             "type": event_type,
             "payload": payload,
