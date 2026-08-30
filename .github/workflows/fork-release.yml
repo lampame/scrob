@@ -97,44 +97,51 @@ jobs:
 
           UPSTREAM_FILE=$(mktemp)
           FORK_FILE=$(mktemp)
-          trap 'rm -f "$UPSTREAM_FILE" "$FORK_FILE"' EXIT
+          UPSTREAM_HASHES=$(mktemp)
+          trap 'rm -f "$UPSTREAM_FILE" "$FORK_FILE" "$UPSTREAM_HASHES"' EXIT
 
-          # 1) PR-based changes from GitHub API (nice format with author/link)
           if [ -n "$PREV" ]; then
             echo "Previous fork tag: $PREV"
-            NOTES=$(gh api "repos/${REPO}/releases/generate-notes" \
-              -f tag_name="$CURRENT" \
-              -f previous_tag_name="$PREV" \
-              -q .body 2>/dev/null || echo "")
-          else
-            NOTES=$(gh api "repos/${REPO}/releases/generate-notes" \
-              -f tag_name="$CURRENT" \
-              -q .body 2>/dev/null || echo "")
-          fi
-
-          # Split PR lines: sync/upstream in title → upstream, rest → fork
-          while IFS= read -r line; do
-            # Only process PR lines: "* TITLE by @AUTHOR in URL"
-            [[ "$line" == \**\ by\ @* ]] || continue
-            title=$(echo "$line" | sed -E 's/^\* (.*) by @.*/\1/')
-            if echo "$title" | grep -qiE "(sync|upstream)"; then
-              echo "$line" >> "$UPSTREAM_FILE"
-            else
-              echo "$line" >> "$FORK_FILE"
-            fi
-          done <<< "$NOTES"
-
-          # 2) Direct commits (not in any PR) → fork section
-          if [ -n "$PREV" ]; then
             RANGE="${PREV}..HEAD"
           else
             RANGE="HEAD"
           fi
 
+          # 1) Find all sync merge commits and collect upstream commit hashes
+          #    Sync merges have "sync" or "upstream" in commit message
+          #    Commits introduced by the merge = parent1..parent2
+          while read -r hash p1 p2 rest; do
+            [ -z "$hash" ] && continue
+            subject=$(git log -1 --format=%s "$hash")
+            if echo "$subject" | grep -qiE "(sync|upstream)"; then
+              # Collect all commit hashes introduced by this merge
+              git log --pretty=format:"%H" "${p1}..${p2}" >> "$UPSTREAM_HASHES" 2>/dev/null
+            fi
+          done < <(git log --merges --pretty=format:"%H %P" "$RANGE" 2>/dev/null)
+
+          # 2) Add sync PR line to upstream (from generate-notes API)
+          NOTES=$(gh api "repos/${REPO}/releases/generate-notes" \
+            -f tag_name="$CURRENT" \
+            ${PREV:+-f previous_tag_name="$PREV"} \
+            -q .body 2>/dev/null || echo "")
+
+          while IFS= read -r line; do
+            [[ "$line" == \**\ by\ @* ]] || continue
+            title=$(echo "$line" | sed -E 's/^\* (.*) by @.*/\1/')
+            if echo "$title" | grep -qiE "(sync|upstream)"; then
+              echo "$line" >> "$UPSTREAM_FILE"
+            fi
+          done <<< "$NOTES"
+
+          # 3) Categorize non-merge commits: upstream if hash in sync PR, else fork
           while IFS='|' read -r hash subject; do
             [ -z "$hash" ] && continue
             short="${hash:0:7}"
-            echo "- ${subject} (${short})" >> "$FORK_FILE"
+            if grep -q "$hash" "$UPSTREAM_HASHES" 2>/dev/null; then
+              echo "- ${subject} (${short})" >> "$UPSTREAM_FILE"
+            else
+              echo "- ${subject} (${short})" >> "$FORK_FILE"
+            fi
           done < <(git log --no-merges --pretty=format:"%H|%s" "$RANGE" 2>/dev/null)
 
           # --- Build markdown ---
