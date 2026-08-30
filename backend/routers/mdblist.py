@@ -85,6 +85,34 @@ def _entry_data(kind: str, entry: dict[str, Any]) -> dict[str, Any]:
     return nested if isinstance(nested, dict) else entry
 
 
+def _describe_not_found(entry: dict[str, Any]) -> str:
+    """One-line human summary of an item MDBList reported as not found, for the
+    push job's WARNING log (#340). Defensive about MDBList's echo shape - it
+    carries at least the ids we sent, sometimes a title and season/episode."""
+    kind = entry.get("kind") or "item"
+    item = entry.get("item") if isinstance(entry.get("item"), dict) else {}
+    ids = item.get("ids") if isinstance(item.get("ids"), dict) else {}
+    tmdb = ids.get("tmdb") or item.get("tmdb") or item.get("tmdb_id")
+    imdb = ids.get("imdb") or item.get("imdb")
+    ref = f"tmdb:{tmdb}" if tmdb is not None else (f"imdb:{imdb}" if imdb else "no-id")
+
+    sxe = ""
+    seasons = item.get("seasons")
+    if isinstance(seasons, list) and seasons and isinstance(seasons[0], dict):
+        s0 = seasons[0]
+        sxe = f" S{s0.get('number')}"
+        eps = s0.get("episodes")
+        if isinstance(eps, list) and eps and isinstance(eps[0], dict) and eps[0].get("number") is not None:
+            sxe += f"E{eps[0]['number']}"
+    elif item.get("season") is not None:
+        sxe = f" S{item['season']}"
+        if item.get("episode") is not None:
+            sxe += f"E{item['episode']}"
+
+    title = item.get("title")
+    return f"{kind} {ref}{sxe}" + (f' "{title}"' if title else "")
+
+
 def _tmdb_id(data: dict[str, Any]) -> int | None:
     ids = data.get("ids")
     ids = ids if isinstance(ids, dict) else {}
@@ -927,6 +955,16 @@ async def run_mdblist_push(user_id: int, job_id: int) -> None:
 
             submitted = sum(result["submitted"] for result in results.values())
             not_found = sum(result["not_found"] for result in results.values())
+
+            # MDBList echoes the items it couldn't match back in each response.
+            # Pull them out of the per-target results (keeps SyncJob.stats
+            # lean) so they can be logged and stored once, flat, with the
+            # target name attached (#340).
+            not_found_items: list[dict[str, Any]] = []
+            for name, r in results.items():
+                for entry in r.pop("not_found_items", []) or []:
+                    not_found_items.append({"target": name, **entry})
+
             breakdown = ", ".join(
                 f"{name}: {r['submitted']} submitted"
                 + (f" ({r['not_found']} not found on MDBList)" if r["not_found"] else "")
@@ -937,12 +975,25 @@ async def run_mdblist_push(user_id: int, job_id: int) -> None:
                 f"MDBList push job {job_id} completed. {breakdown}. "
                 f"Total: {submitted} submitted, {not_found} not found."
             )
+            if not_found_items:
+                shown = "; ".join(_describe_not_found(it) for it in not_found_items[:50])
+                more = f" (+{not_found - len(not_found_items[:50])} more)" if not_found > 50 else ""
+                logger.warning(
+                    "MDBList push job %s: %d item(s) not found on MDBList: %s%s",
+                    job_id, not_found, shown, more,
+                )
+
             await db.execute(
                 update(SyncJob).where(SyncJob.id == job_id).values(
                     status=SyncStatus.completed,
                     processed_items=submitted,
                     errors=not_found,
-                    stats={"submitted": submitted, "not_found": not_found, "targets": results},
+                    stats={
+                        "submitted": submitted,
+                        "not_found": not_found,
+                        "not_found_items": not_found_items,
+                        "targets": results,
+                    },
                 )
             )
             await db.commit()

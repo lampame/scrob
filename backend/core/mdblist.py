@@ -162,14 +162,20 @@ def _count_leaf_items(payload: dict[str, list[dict[str, Any]]]) -> int:
     return count
 
 
+# How many of MDBList's echoed-back "not found" items to keep for logging /
+# the job stats. A healthy push has a handful; capping keeps a pathological
+# run from bloating the log line and the SyncJob.stats JSON.
+NOT_FOUND_SAMPLE_CAP = 200
+
+
 async def _push(
     path: str,
     api_key: str,
     payload: dict[str, list[dict[str, Any]]],
     *,
     on_batch: Callable[[int], Awaitable[None]] | None = None,
-) -> dict[str, int]:
-    stats = {"submitted": 0, "batches": 0, "not_found": 0}
+) -> dict[str, Any]:
+    stats: dict[str, Any] = {"submitted": 0, "batches": 0, "not_found": 0, "not_found_items": []}
     for batch in _batched_payloads(payload):
         stats["batches"] += 1
         result = await _request("POST", path, api_key, payload=batch)
@@ -177,9 +183,16 @@ async def _push(
         stats["submitted"] += batch_count
         not_found = result.get("not_found")
         if isinstance(not_found, dict):
-            stats["not_found"] += sum(
-                len(values) for values in not_found.values() if isinstance(values, list)
-            )
+            for kind, values in not_found.items():
+                if not isinstance(values, list):
+                    continue
+                stats["not_found"] += len(values)
+                room = NOT_FOUND_SAMPLE_CAP - len(stats["not_found_items"])
+                if room > 0:
+                    # singular kind label ("movies" -> "movie"), item body as-is
+                    stats["not_found_items"].extend(
+                        {"kind": str(kind).rstrip("s") or kind, "item": v} for v in values[:room]
+                    )
         if on_batch is not None:
             await on_batch(batch_count)
     return stats
@@ -190,11 +203,11 @@ async def push_watched(
     payload: dict[str, list[dict[str, Any]]],
     *,
     on_batch: Callable[[int], Awaitable[None]] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     return await _push("/sync/watched", api_key, payload, on_batch=on_batch)
 
 
-async def remove_watched(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+async def remove_watched(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     return await _push("/sync/watched/remove", api_key, payload)
 
 
@@ -203,11 +216,11 @@ async def push_collection(
     payload: dict[str, list[dict[str, Any]]],
     *,
     on_batch: Callable[[int], Awaitable[None]] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     return await _push("/sync/collection", api_key, payload, on_batch=on_batch)
 
 
-async def remove_collection(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+async def remove_collection(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     return await _push("/sync/collection/remove", api_key, payload)
 
 
@@ -252,11 +265,11 @@ async def push_ratings(
     payload: dict[str, list[dict[str, Any]]],
     *,
     on_batch: Callable[[int], Awaitable[None]] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     return await _push("/sync/ratings", api_key, payload, on_batch=on_batch)
 
 
-async def remove_ratings(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+async def remove_ratings(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     return await _push("/sync/ratings/remove", api_key, payload)
 
 
@@ -290,9 +303,9 @@ async def push_watchlist(
     payload: dict[str, list[dict[str, Any]]],
     *,
     on_batch: Callable[[int], Awaitable[None]] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     return await _push("/watchlist/items/add", api_key, payload, on_batch=on_batch)
 
 
-async def remove_watchlist(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+async def remove_watchlist(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     return await _push("/watchlist/items/remove", api_key, payload)

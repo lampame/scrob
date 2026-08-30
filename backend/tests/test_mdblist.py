@@ -15,6 +15,7 @@ from models.base import MediaType
 from models.media import Media
 from models.show import Show
 from routers.mdblist import (
+    _describe_not_found,
     _episode_identity,
     _merge_show_entries,
     _payload_item,
@@ -133,7 +134,39 @@ class MDBListClientTests(unittest.IsolatedAsyncioTestCase):
             result = await mdblist.push_watched("secret-key", payload)
 
         self.assertEqual(calls, [("movies", 2), ("movies", 1), ("episodes", 1)])
-        self.assertEqual(result, {"submitted": 4, "batches": 3, "not_found": 0})
+        self.assertEqual(result, {"submitted": 4, "batches": 3, "not_found": 0, "not_found_items": []})
+
+    async def test_push_keeps_the_items_mdblist_reports_not_found(self) -> None:
+        # #340: the "N not found" count is useless without the ids - keep the
+        # echoed-back item bodies (tagged with a singular kind) so the push
+        # job can log exactly which entries MDBList rejected.
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "added": {},
+                "not_found": {
+                    "movies": [{"ids": {"tmdb": 999001}, "title": "Ghost Movie"}],
+                    "shows": [{"ids": {"tmdb": 999002}, "seasons": [{"number": 2, "episodes": [{"number": 4}]}]}],
+                },
+            })
+
+        payload = {
+            "movies": [{"ids": {"tmdb": 1}}], "seasons": [], "episodes": [],
+            "shows": [{"ids": {"tmdb": 2}}],
+        }
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            mdblist.httpx, "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            result = await mdblist.push_watched("secret-key", payload)
+
+        self.assertEqual(result["not_found"], 4)  # 2 batches x {movie, show}
+        self.assertIn({"kind": "movie", "item": {"ids": {"tmdb": 999001}, "title": "Ghost Movie"}},
+                      result["not_found_items"])
+        self.assertIn(
+            {"kind": "show", "item": {"ids": {"tmdb": 999002}, "seasons": [{"number": 2, "episodes": [{"number": 4}]}]}},
+            result["not_found_items"],
+        )
 
     def test_push_batch_size_does_not_exceed_mdblist_limit(self) -> None:
         # Regression test for #176: MDBList rejects any request with more
@@ -646,6 +679,35 @@ class ImportWatchedSkipsShowRollupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["watched"], 2)
         self.assertEqual(stats["skipped"], 1)
         self.assertEqual(changed, {1, 2})
+
+
+class DescribeNotFoundTests(unittest.TestCase):
+    """#340: the push job logs which items MDBList rejected, defensively
+    against MDBList's echo shape."""
+
+    def test_movie_with_title(self):
+        self.assertEqual(
+            _describe_not_found({"kind": "movie", "item": {"ids": {"tmdb": 550}, "title": "Fight Club"}}),
+            'movie tmdb:550 "Fight Club"',
+        )
+
+    def test_show_with_nested_season_episode(self):
+        self.assertEqual(
+            _describe_not_found({"kind": "show", "item": {
+                "ids": {"tmdb": 1396}, "seasons": [{"number": 2, "episodes": [{"number": 4}]}],
+            }}),
+            "show tmdb:1396 S2E4",
+        )
+
+    def test_flat_season_episode_and_imdb_fallback(self):
+        self.assertEqual(
+            _describe_not_found({"kind": "episode", "item": {"imdb": "tt0903747", "season": 1, "episode": 3}}),
+            "episode imdb:tt0903747 S1E3",
+        )
+
+    def test_missing_everything_is_still_a_string(self):
+        self.assertEqual(_describe_not_found({}), "item no-id")
+        self.assertEqual(_describe_not_found({"kind": "movie", "item": "garbage"}), "movie no-id")
 
 
 if __name__ == "__main__":
