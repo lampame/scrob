@@ -235,6 +235,21 @@ async def get_ratings(client_id: str, access_token: str) -> dict:
     return {"movies": movies, "shows": shows, "seasons": seasons, "episodes": episodes}
 
 
+async def get_collection(client_id: str, access_token: str) -> dict:
+    """Fetch the user's Trakt collection (movies + shows with nested seasons/
+    episodes). Used to dedup the outbound collection push so a steady-state run
+    re-sends nothing (#327)."""
+    async def _fetch(path: str) -> list[dict]:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            return await _get_all_pages(client, path, _headers(client_id, access_token))
+
+    movies, shows = await asyncio.gather(
+        _fetch("/sync/collection/movies"),
+        _fetch("/sync/collection/shows"),
+    )
+    return {"movies": movies, "shows": shows}
+
+
 # ── Outbound Push ─────────────────────────────────────────────────────────────
 
 async def add_to_history_batch(

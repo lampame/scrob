@@ -99,12 +99,14 @@ const bottomNavItem = (active: boolean) =>
       document.documentElement.removeAttribute('data-accent');
     }
 
-    // TMDB image fallback — registered here (head, inline) so the capture-phase
-    // listener is active before any <img> tags are parsed and start loading.
+    // Poster/backdrop image fallback — registered here (head, inline) so the
+    // capture-phase listener is active before any <img> tags are parsed and
+    // start loading. Covers TMDB/TheTVDB images loaded directly and via the
+    // backend image proxy/cache.
     (function () {
       var svgIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.25"><rect width="20" height="20" x="2" y="2" rx="2.18" ry="2.18"/><line x1="7" x2="7" y1="2" y2="22"/><line x1="17" x2="17" y1="2" y2="22"/><line x1="2" x2="22" y1="7" y2="7"/><line x1="2" x2="22" y1="12" y2="12"/><line x1="2" x2="22" y1="17" y2="17"/></svg>';
       function applyFallback(img) {
-        if (!img.src.includes('image.tmdb.org')) return;
+        if (!img.src.includes('image.tmdb.org') && !img.src.includes('artworks.thetvdb.com') && !img.src.includes('/api/proxy/media/image/')) return;
         img.style.display = 'none';
         // Decorative images (alt="") — just hide, no placeholder needed
         if (!img.alt) return;
@@ -618,6 +620,8 @@ const bottomNavItem = (active: boolean) =>
       if (path.startsWith('http://') || path.startsWith('https://')) {
         const m = /image\.tmdb\.org\/t\/p\/([^/]+)(\/.+)$/.exec(path);
         if (m) return `/api/proxy/media/image/${m[1]}${m[2]}`;
+        const t = /artworks\.thetvdb\.com(\/.+)$/.exec(path);
+        if (t) return `/api/proxy/media/image/tvdb${t[1]}`;
         return path;
       }
       return `/api/proxy/media/image/${size}${path.startsWith('/') ? path : '/' + path}`;

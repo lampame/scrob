@@ -38,7 +38,7 @@ from models.users import User, UserSettings
 router = APIRouter()
 
 CALENDAR_TTL = timedelta(hours=24)
-CALENDAR_SCHEMA = 3
+CALENDAR_SCHEMA = 4
 CALENDAR_WINDOW_DAYS = 14
 FETCH_CONCURRENCY = 8
 
@@ -133,31 +133,41 @@ async def compute_calendar(db: AsyncSession, user_id: int) -> dict:
                 detail = await tmdb_client.get_show_light(show.tmdb_id, api_key=api_key, language=language)
             except Exception:
                 return []
+            season_numbers: set[int] = set()
             next_ep = detail.get("next_episode_to_air")
-            season_number = next_ep.get("season_number") if next_ep else None
-            if season_number is None:
+            if next_ep and next_ep.get("season_number") is not None:
+                season_numbers.add(next_ep["season_number"])
+            # Specials (season 0) never surface as next_episode_to_air, so pull
+            # that season explicitly whenever the show has one and scan it for
+            # anything landing in the window too (#333).
+            if any((s or {}).get("season_number") == 0 for s in detail.get("seasons") or []):
+                season_numbers.add(0)
+            if not season_numbers:
                 return []
-            try:
-                season = await tmdb_client.get_season(show.tmdb_id, season_number, api_key=api_key, language=language)
-            except Exception:
-                return []
+            seasons: list[dict] = []
+            for sn in season_numbers:
+                try:
+                    seasons.append(await tmdb_client.get_season(show.tmdb_id, sn, api_key=api_key, language=language))
+                except Exception:
+                    continue
 
         out = []
-        for ep in season.get("episodes") or []:
-            air_date = ep.get("air_date")
-            if not air_date or not (window_start.isoformat() <= air_date <= window_end.isoformat()):
-                continue
-            out.append({
-                "air_date": air_date,
-                "show_id": show.id,
-                "show_tmdb_id": show.tmdb_id,
-                "show_tvdb_id": show.tvdb_id,
-                "show_title": show.title,
-                "poster_path": show.poster_path,
-                "season_number": ep.get("season_number"),
-                "episode_number": ep.get("episode_number"),
-                "episode_name": ep.get("name"),
-            })
+        for season in seasons:
+            for ep in season.get("episodes") or []:
+                air_date = ep.get("air_date")
+                if not air_date or not (window_start.isoformat() <= air_date <= window_end.isoformat()):
+                    continue
+                out.append({
+                    "air_date": air_date,
+                    "show_id": show.id,
+                    "show_tmdb_id": show.tmdb_id,
+                    "show_tvdb_id": show.tvdb_id,
+                    "show_title": show.title,
+                    "poster_path": show.poster_path,
+                    "season_number": ep.get("season_number"),
+                    "episode_number": ep.get("episode_number"),
+                    "episode_name": ep.get("name"),
+                })
         return out
 
     fetched = await asyncio.gather(*(_fetch(s) for s in candidates))
@@ -195,7 +205,11 @@ async def compute_calendar(db: AsyncSession, user_id: int) -> dict:
             e["watched"] = media_id in watched_ids if media_id else False
             del e["show_id"]
 
-    entries.sort(key=lambda e: (e["air_date"], e["show_title"] or ""))
+    entries.sort(key=lambda e: (
+        e["air_date"], e["show_title"] or "",
+        e["season_number"] if e["season_number"] is not None else 0,
+        e["episode_number"] if e["episode_number"] is not None else 0,
+    ))
     return {
         "schema": CALENDAR_SCHEMA,
         "generated_at": datetime.utcnow().isoformat(),

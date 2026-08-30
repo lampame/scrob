@@ -619,7 +619,7 @@ async def apply_scrob_import(
         settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
         settings = settings_result.scalar_one_or_none()
         if settings:
-            for field_name in ("tmdb_api_key", "tvdb_api_key"):
+            for field_name in ("tmdb_api_key", "tvdb_api_key", "tvdb_subscriber_pin"):
                 value = data.api_keys.get(field_name)
                 if value and not getattr(settings, field_name):
                     setattr(settings, field_name, value)

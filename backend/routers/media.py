@@ -5736,22 +5736,30 @@ async def serve_image(
     if not path.startswith("/"):
         path = "/" + path
 
+    from core.image_cache import (
+        ALLOWED_SIZES,
+        TVDB_SIZE,
+        upstream_image_url,
+        download_and_cache_image,
+        prune_cache_bg,
+    )
+    upstream = upstream_image_url(size, path)
+
     # Check settings
     settings_stmt = select(GlobalSettings).where(GlobalSettings.id == 1)
     gs = (await db.execute(settings_stmt)).scalar_one_or_none()
 
     if not gs or not gs.image_cache_enabled:
-        return RedirectResponse(f"https://image.tmdb.org/t/p/{size}{path}")
+        return RedirectResponse(upstream)
 
-    from core.image_cache import ALLOWED_SIZES, download_and_cache_image, prune_cache_bg
-    if size not in ALLOWED_SIZES:
+    if size != TVDB_SIZE and size not in ALLOWED_SIZES:
         raise HTTPException(status_code=400, detail="Invalid image size")
     if ".." in path:
         raise HTTPException(status_code=400, detail="Invalid image path")
 
     local_path_str = await download_and_cache_image(db, size, path)
     if not local_path_str:
-        return RedirectResponse(f"https://image.tmdb.org/t/p/{size}{path}")
+        return RedirectResponse(upstream)
 
     # Eviction pruning check in background
     bg_tasks = BackgroundTask(prune_cache_bg, limit_gb=gs.image_cache_limit_gb)
