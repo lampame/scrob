@@ -359,8 +359,6 @@ Aiven requires TLS. Append `?ssl=require` to `DATABASE_URL` (asyncpg accepts it)
 DATABASE_URL: postgresql+asyncpg://user:password@your-aiven-host:5432/scrob?ssl=require
 ```
 
-See [`develop-eggs/DB-CONNECTION-POOL-LIMITS.md`](develop-eggs/DB-CONNECTION-POOL-LIMITS.md) for the full business logic, the Aiven plan table, and the connection-budget formula.
-
 ## ARVIO Cloud Synchronization
 
 Scrob supports pull synchronization from **ARVIO Cloud** (`https://auth.arvio.tv/.netlify/functions`), importing watched movies, watched episodes, and continue watching playback progress per profile.
