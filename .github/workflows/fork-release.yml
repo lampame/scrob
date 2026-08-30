@@ -91,38 +91,33 @@ jobs:
         run: |
           set -euo pipefail
 
+          REPO="${{ github.repository }}"
           CURRENT="${{ env.APP_VERSION }}"
           PREV=$(git tag -l 'v*-fork*' --sort=-version:refname | grep -v "^${CURRENT}$" | head -1 || true)
 
           if [ -n "$PREV" ]; then
             echo "Previous fork tag: $PREV"
-            RANGE="${PREV}..HEAD"
+            PREV_DATE=$(git log -1 --format=%as "$PREV")
+            SEARCH="merged:>=${PREV_DATE}"
           else
-            echo "No previous fork tag — using all commits in repo"
-            RANGE="HEAD"
+            echo "No previous fork tag — using all merged PRs"
+            SEARCH="merged:>=2020-01-01"
           fi
 
           UPSTREAM_FILE=$(mktemp)
           FORK_FILE=$(mktemp)
           trap 'rm -f "$UPSTREAM_FILE" "$FORK_FILE"' EXIT
 
-          # --- Merge commits (PRs) ---
-          while IFS='|' read -r hash subject parents; do
-            [ -z "$hash" ] && continue
-            short="${hash:0:7}"
-            if echo "$subject" | grep -qiE "(sync.*upstream|upstream.*sync|from sync/)"; then
-              echo "- 🔄 ${subject} (${short})" >> "$UPSTREAM_FILE"
-            else
-              echo "- 🍴 ${subject} (${short})" >> "$FORK_FILE"
-            fi
-          done < <(git log --merges --pretty=format:"%H|%s|%P" "$RANGE" 2>/dev/null)
+          # Fetch merged PRs since previous tag, categorize by 'sync' label
+          gh pr list --repo "$REPO" --state merged --search "$SEARCH" \
+            --json number,title,author,url,labels --limit 100 \
+            | jq -r '.[] | select(.labels | map(.name) | contains(["sync"])) | "* \(.title) by @\(.author.login) in \(.url)"' \
+            > "$UPSTREAM_FILE" 2>/dev/null || true
 
-          # --- Non-merge commits → fork ---
-          while IFS='|' read -r hash subject; do
-            [ -z "$hash" ] && continue
-            short="${hash:0:7}"
-            echo "- 🍴 ${subject} (${short})" >> "$FORK_FILE"
-          done < <(git log --no-merges --pretty=format:"%H|%s" "$RANGE" 2>/dev/null)
+          gh pr list --repo "$REPO" --state merged --search "$SEARCH" \
+            --json number,title,author,url,labels --limit 100 \
+            | jq -r '.[] | select(.labels | map(.name) | contains(["sync"]) | not) | "* \(.title) by @\(.author.login) in \(.url)"' \
+            > "$FORK_FILE" 2>/dev/null || true
 
           # --- Build markdown ---
           {
@@ -144,8 +139,13 @@ jobs:
             fi
 
             if [ ! -s "$UPSTREAM_FILE" ] && [ ! -s "$FORK_FILE" ]; then
-              echo "_No commits found since previous release._"
+              echo "_No PRs found since previous release._"
               echo ""
+            fi
+
+            # Full changelog link
+            if [ -n "$PREV" ]; then
+              echo "**Full Changelog**: https://github.com/${REPO}/compare/${PREV}...${CURRENT}"
             fi
           } > release_notes.md
 
