@@ -16,6 +16,7 @@ from routers.webhooks import (
     _backfill_plex_runtime,
     _commit_playback_session_update,
     _consume_recently_pushed_watched,
+    _ensure_collection_entry,
     _episode_for_progress,
     _is_duplicate_webhook_delivery,
     _maybe_bingebase_scrobble,
@@ -117,6 +118,75 @@ class WriteWatchEventDedupTests(IsolatedAsyncioTestCase):
         await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
         await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
         self.assertEqual(len(db.added), 1)
+
+
+class _CollectionIdResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one(self):
+        return self._value
+
+
+class _EnsureCollectionFakeDB:
+    """Routes _ensure_collection_entry's queries by SQL text and captures the
+    collection_files insert so tests can inspect its bound connection_id."""
+
+    def __init__(self, *, connection_exists: bool):
+        self._connection_exists = connection_exists
+        self.collection_file_insert = None
+
+    async def execute(self, stmt):
+        sql = str(stmt)
+        if "media_server_connections" in sql:
+            return _ScalarResult(1 if self._connection_exists else None)
+        if sql.startswith("SELECT") and "FROM collections" in sql:
+            return _CollectionIdResult(7)
+        if "collection_files" in sql:
+            self.collection_file_insert = stmt
+        return _ScalarResult(None)
+
+    async def flush(self):
+        pass
+
+
+class EnsureCollectionEntryConnectionGuardTests(IsolatedAsyncioTestCase):
+    """#339: collection_files.connection_id is FK'd to media_server_connections.
+    A scrobble webhook passes a ScrobbleConnection id (different table/sequence)
+    - _ensure_collection_entry must store NULL, not let the INSERT FK-crash and
+    roll back the whole webhook (losing the watch event + stuck Now Playing)."""
+
+    def _bound_connection_id(self, stmt):
+        from sqlalchemy.dialects import postgresql
+        return stmt.compile(dialect=postgresql.dialect()).params.get("connection_id")
+
+    async def test_unknown_connection_id_is_stored_as_null(self):
+        from models.base import CollectionSource
+        db = _EnsureCollectionFakeDB(connection_exists=False)
+        await _ensure_collection_entry(
+            db, user_id=1, media_id=2, source=CollectionSource.plex,
+            source_id="521136", quality=None, connection_id=999,
+        )
+        self.assertIsNotNone(db.collection_file_insert)
+        self.assertIsNone(self._bound_connection_id(db.collection_file_insert))
+
+    async def test_real_connection_id_is_kept(self):
+        db = _EnsureCollectionFakeDB(connection_exists=True)
+        from models.base import CollectionSource
+        await _ensure_collection_entry(
+            db, user_id=1, media_id=2, source=CollectionSource.plex,
+            source_id="521136", quality=None, connection_id=5,
+        )
+        self.assertEqual(self._bound_connection_id(db.collection_file_insert), 5)
+
+    async def test_none_connection_id_skips_the_lookup(self):
+        db = _EnsureCollectionFakeDB(connection_exists=False)
+        from models.base import CollectionSource
+        await _ensure_collection_entry(
+            db, user_id=1, media_id=2, source=CollectionSource.plex,
+            source_id="521136", quality=None, connection_id=None,
+        )
+        self.assertIsNone(self._bound_connection_id(db.collection_file_insert))
 
 
 class ConsumeRecentlyPushedWatchedTests(unittest.TestCase):

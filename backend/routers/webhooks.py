@@ -1672,10 +1672,12 @@ async def _handle_jellyfin_scrobble_webhook(
             for m in media_list:
                 await _ensure_collection_entry(
                     db, user.id, m.id, coll_source, data["jellyfin_id"], data.get("quality"),
-                    # conn is guaranteed here (see the 404 check above) - a
-                    # hardcoded None left every scrobble-pushed CollectionFile
-                    # unmatchable by the full push's fast path (#299).
-                    connection_id=conn.id,
+                    # `conn` here is a ScrobbleConnection - a different table
+                    # and id sequence from media_server_connections, which is
+                    # what collection_files.connection_id is FK'd to. A
+                    # scrobble-only connection has no media-server row to link,
+                    # so leave it NULL (#339).
+                    connection_id=None,
                 )
             # See the matching comment in _handle_jellyfin_webhook (#129).
             await db.commit()
@@ -1949,6 +1951,21 @@ async def _ensure_collection_entry(
 
     if not quality:
         quality = {}
+
+    # collection_files.connection_id is FK'd to media_server_connections. A
+    # caller can hand us an id that isn't one (a ScrobbleConnection id, or a
+    # since-deleted connection a webhook is still pointed at) - link to NULL
+    # rather than letting the INSERT FK-crash and roll back the whole webhook,
+    # taking the watch event and session-close with it (#339).
+    if connection_id is not None:
+        exists = await db.execute(
+            select(MediaServerConnection.id).where(
+                MediaServerConnection.id == connection_id,
+                MediaServerConnection.user_id == user_id,
+            )
+        )
+        if exists.scalar_one_or_none() is None:
+            connection_id = None
 
     # 1. Upsert the Collection row (one per user+media)
     coll_stmt = pg_insert(Collection).values(user_id=user_id, media_id=media_id)
@@ -2815,10 +2832,11 @@ async def _handle_plex_scrobble_webhook(request: Request, db: AsyncSession, api_
             quality = data.get("quality")
             await _ensure_collection_entry(
                 db, user.id, media.id, CollectionSource.plex, data["plex_rating_key"], quality,
-                # conn is guaranteed here (see the 404 check above) - a
-                # hardcoded None left every scrobble-pushed CollectionFile
-                # unmatchable by the full push's fast path (#299).
-                connection_id=conn.id,
+                # `conn` is a ScrobbleConnection, not a media_server_connections
+                # row - collection_files.connection_id is FK'd to the latter and
+                # a scrobble-only connection has no row there, so leave it NULL
+                # (passing conn.id here FK-crashed the whole webhook - #339).
+                connection_id=None,
             )
         await db.commit()
         if not is_duplicate:
@@ -2835,7 +2853,7 @@ async def _handle_plex_scrobble_webhook(request: Request, db: AsyncSession, api_
             quality = data.get("quality")
             await _ensure_collection_entry(
                 db, user.id, media.id, CollectionSource.plex, data["plex_rating_key"], quality,
-                connection_id=conn.id,
+                connection_id=None,  # scrobble connection, not a media-server row (#339)
             )
         await db.commit()
 
@@ -2852,7 +2870,7 @@ async def _handle_plex_scrobble_webhook(request: Request, db: AsyncSession, api_
                 quality = data.get("quality")
                 await _ensure_collection_entry(
                     db, user.id, media.id, CollectionSource.plex, data["plex_rating_key"], quality,
-                    connection_id=conn.id,
+                    connection_id=None,  # scrobble connection, not a media-server row (#339)
                 )
                 await db.commit()
 
