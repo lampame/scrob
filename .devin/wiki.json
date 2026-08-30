@@ -1,0 +1,302 @@
+{
+  "repo_notes": [
+    {
+      "content": ""
+    }
+  ],
+  "pages": [
+    {
+      "title": "Scrob Overview",
+      "purpose": "High-level introduction to Scrob: what it is, its architecture, key features, and how the major subsystems relate. Links to child pages for deeper coverage.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Getting Started & Deployment",
+      "purpose": "How to deploy Scrob using Docker Compose (standard and Omnibus), environment variables, first-time setup, and updating. Covers both multi-container and single-container deployment models.",
+      "parent": "Scrob Overview",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Configuration Reference",
+      "purpose": "Comprehensive reference for all environment variables, database connection pool tuning, SMTP, OIDC, and application-level settings managed via pydantic-settings.",
+      "parent": "Scrob Overview",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Backend Architecture",
+      "purpose": "Overview of the FastAPI backend: application entrypoint, background schedulers, router organization, database layer, and shared dependencies. Links to child pages for each major subsystem.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Application Entrypoint & Background Tasks",
+      "purpose": "Details of backend/main.py: FastAPI app initialization, lifespan events, background schedulers (_auto_sync_scheduler, _emby_progress_poller, _watchlist_poller, _show_status_refresher), and rate limiting middleware.",
+      "parent": "Backend Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Database Layer & Models",
+      "purpose": "SQLAlchemy async engine setup, session management, connection pool tuning, Alembic migrations, and the full ORM model registry (User, Media, Show, WatchEvent, Collection, etc.).",
+      "parent": "Backend Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Authentication & Authorization",
+      "purpose": "User registration, login, JWT session management, TOTP 2FA, OIDC/SSO, OAuth 2.0 Device Authorization Grant (RFC 8628), API key access, and FastAPI dependency injection for auth enforcement.",
+      "parent": "Backend Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Data Schemas & API Contracts",
+      "purpose": "Pydantic schemas defining request/response shapes: User, UserSettings, MediaServerConnectionBase, WatchEventCreate, and how the frontend api.ts client maps to these contracts.",
+      "parent": "Backend Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Media Metadata & Discovery",
+      "purpose": "Overview of how Scrob fetches, enriches, and serves media metadata from TMDB and TVDB. Links to child pages covering the metadata pipeline, search/discovery, and show/episode management.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "TMDB & TVDB Integration",
+      "purpose": "The TMDB API client (tmdb.py), TTL cache, circuit breaker, enrichment pipeline (enrichment.py), TVDB fallback for unmatched episodes, and the create_media_safely concurrency pattern.",
+      "parent": "Media Metadata & Discovery",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Media Router: Collection, Search & Discovery",
+      "purpose": "The /media API router: collection listing with filters, multi-source search, trending/on-air/hidden-gems rails, the For You recommendation engine, and the enrich_with_state pipeline.",
+      "parent": "Media Metadata & Discovery",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Shows, Seasons & Episode Order",
+      "purpose": "The /shows API router: show detail aggregation, TVDB routing, episode order mapping (TMDB vs TVDB), EpisodeOrderMapping reconciliation, orphaned episode adoption, and show metadata refresh.",
+      "parent": "Media Metadata & Discovery",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Playback, Streaming & Subtitles",
+      "purpose": "Playback source resolution (CollectionFile → server instance), video stream proxying from Plex/Jellyfin/Emby, SRT-to-WebVTT subtitle conversion, and HLS player support.",
+      "parent": "Media Metadata & Discovery",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Watch History & Playback Tracking",
+      "purpose": "Overview of how Scrob records, manages, and queries user watch history, playback sessions, and progress. Links to child pages for history management and scrobbling.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Watch Events & History Management",
+      "purpose": "The /history API router: marking watched/unwatched, bulk season/show marking, watch event deletion with fan-out, Next Up calculation, Continue Watching, rate prompts, and dropped media.",
+      "parent": "Watch History & Playback Tracking",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Playback Sessions & Scrobbling",
+      "purpose": "PlaybackSession lifecycle (start/update/complete), deterministic session keying, auto-completion at 90% threshold, manual scrobble UI, echo suppression, and the now-playing poller.",
+      "parent": "Watch History & Playback Tracking",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Rewatch Cycles",
+      "purpose": "The ShowRewatch sub-system: starting a rewatch cycle, RewatchProgress tracking, how rewatch state overrides global WatchEvent history for Next Up and watch percentage calculations.",
+      "parent": "Watch History & Playback Tracking",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Synchronization Engine",
+      "purpose": "Overview of Scrob's bidirectional sync architecture: pull (inbound) and push (outbound) pipelines, SyncJob lifecycle, fan-out mechanism, and the semaphore-locked sync loop. Links to child pages per provider.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Jellyfin & Emby Sync",
+      "purpose": "Jellyfin and Emby library sync: the core API client (jellyfin.py/emby.py), pagination, TMDB ID resolution, watched state push/pull, rating sync, recently-added ordering, and the Emby progress poller.",
+      "parent": "Synchronization Engine",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Plex Sync",
+      "purpose": "Plex library sync: server vs account token, watch history backfill, PlexPendingPush echo protection, language backfill, Plex Watchlist reconciliation, and the Plex Discover/Community API.",
+      "parent": "Synchronization Engine",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Webhook Ingestion (Real-Time Scrobbling)",
+      "purpose": "Webhook endpoints for Plex, Jellyfin, Emby, and Kodi: payload parsing/normalization, media identification lifecycle (fast path → external ID → fuzzy match → TVDB translation), deduplication, and in-memory echo suppression.",
+      "parent": "Synchronization Engine",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Trakt Synchronization",
+      "purpose": "Trakt OAuth device flow, incremental and full pull sync, push pipeline with rate limiting, Trakt export ZIP import, list reconciliation, and the LiveTraktSource/ExportTraktSource adapter pattern.",
+      "parent": "Synchronization Engine",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Simkl, MDBList & Other Cloud Services",
+      "purpose": "Simkl PIN auth and bidirectional sync, MDBList watchlist pull and rating push, Nuvio/ARVIO cloud sync, Stremio watched bitfield decoding, Bingebase integration, and ratings fan-out.",
+      "parent": "Synchronization Engine",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Frontend Architecture",
+      "purpose": "Overview of the Astro-based frontend: SSR rendering model, layout system, global event bus, theme/accent system, and the API proxy layer. Links to child pages for pages and components.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Layout, Theming & Global Interactions",
+      "purpose": "Base.astro as the application shell: theme initialization (dark/light/accent), FOUC prevention, the data-action event delegation hub, DOM sync functions (updateWatchedButtonUI, syncSeasonWatchPctFromDOM), now-playing poller, and global.css design system.",
+      "parent": "Frontend Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Dashboard & Discovery Pages",
+      "purpose": "The index.astro dashboard (hero, recently added, continue watching, next up, trending rails), the discover page, search, airing-today, trending pages, and the hybrid SSR+client-side data fetching strategy.",
+      "parent": "Frontend Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Media Detail Pages",
+      "purpose": "Movie and episode detail pages (media/[type]/[id].astro), show/season/episode hierarchy pages (show/[id].astro, show/[id]/season/[n].astro), TVDB-routed variants, ActionBar component, EpisodeOrderSelector, and metadata refresh flow.",
+      "parent": "Frontend Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "UI Components Library",
+      "purpose": "Reusable Astro components: MediaCard, EpisodeCard, HistoryCard, ContinueWatchingCard, ActionBar, CardActionBar, ListCard, MediaRow, SyncStatus, FilterPanel, SortButton, CommentsSection, and ManualScrobble.",
+      "parent": "Frontend Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Collection, History & List Pages",
+      "purpose": "Collection pages (movies/shows), watch history page, list detail page ([id].astro) with search-and-add, Radarr/Sonarr compat URLs, next-up page, dropped page, calendar page, and stats/profile pages.",
+      "parent": "Frontend Architecture",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "User Management & Administration",
+      "purpose": "Overview of user accounts, settings, connections, admin panel, and social features. Links to child pages for connections management, admin operations, and user profiles.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    }
+  ]
+}
