@@ -430,11 +430,19 @@ async def update_user_settings(
         if not success:
             raise HTTPException(status_code=400, detail="Invalid TMDB API Key")
 
-    if "tvdb_api_key" in update_data and update_data["tvdb_api_key"]:
+    # Validate the resulting TVDB key/PIN pair whenever either is touched - but
+    # not when the key is being cleared (nothing to validate then).
+    tvdb_touched = "tvdb_api_key" in update_data or "tvdb_subscriber_pin" in update_data
+    new_tvdb_key = update_data["tvdb_api_key"] if "tvdb_api_key" in update_data else settings.tvdb_api_key
+    new_tvdb_pin = update_data["tvdb_subscriber_pin"] if "tvdb_subscriber_pin" in update_data else settings.tvdb_subscriber_pin
+    if tvdb_touched and new_tvdb_key:
         from core import tvdb
-        success = await tvdb.validate_api_key(update_data["tvdb_api_key"])
-        if not success:
-            raise HTTPException(status_code=400, detail="Invalid TVDB API Key")
+        if not await tvdb.validate_api_key(new_tvdb_key, pin=new_tvdb_pin or None):
+            raise HTTPException(
+                status_code=400,
+                detail="TVDB rejected the key" + (" / PIN" if new_tvdb_pin else "")
+                + ". A subscriber-supported key needs its account PIN; a free project key needs no PIN.",
+            )
 
     if "mdblist_api_key" in update_data and update_data["mdblist_api_key"]:
         from core import mdblist
@@ -842,9 +850,14 @@ async def test_tvdb(
 ):
     from core import tvdb
     _prevent_sensitive_response_caching(response)
-    success = await tvdb.validate_api_key(body.key.get_secret_value())
+    pin = body.pin.get_secret_value() if body.pin else None
+    success = await tvdb.validate_api_key(body.key.get_secret_value(), pin=pin)
     if not success:
-        raise HTTPException(status_code=400, detail="Invalid TVDB API Key")
+        raise HTTPException(
+            status_code=400,
+            detail="TVDB rejected the key" + (" / PIN" if pin else "")
+            + ". A subscriber-supported key needs its account PIN; a free project key needs no PIN.",
+        )
     return {"status": "ok", "message": "TVDB API key is valid."}
 
 @router.post("/test-jellyfin")

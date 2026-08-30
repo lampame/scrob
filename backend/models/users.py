@@ -102,8 +102,10 @@ class UserSettings(Base):
     trakt_auto_sync_interval : Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     trakt_auto_push_interval : Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
-    # TVDB API key (optional personal override)
+    # TVDB API key (optional personal override) + optional subscriber PIN, which
+    # TheTVDB v4 requires alongside a subscriber-supported key on /login (#322).
     tvdb_api_key             : Mapped[Optional[str]]  = mapped_column(String(255))
+    tvdb_subscriber_pin      : Mapped[Optional[str]]  = mapped_column(String(255))
 
     # Simkl OAuth credentials (PIN flow — client_id only, no secret needed)
     simkl_client_id          : Mapped[Optional[str]]  = mapped_column(String(255))

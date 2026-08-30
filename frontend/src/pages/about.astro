@@ -1,7 +1,46 @@
 ---
 import Base from "../layouts/Base.astro";
+import { connectionIconHtml } from "../lib/connectionIcons";
 
 Astro.response.headers.set("Cache-Control", "no-store");
+
+const creditGroups: { label: string; services: { name: string; type: string; url: string }[] }[] = [
+  {
+    label: "Metadata",
+    services: [
+      { name: "TMDB", type: "themoviedatabase", url: "https://www.themoviedb.org" },
+      { name: "TheTVDB", type: "tvdb", url: "https://thetvdb.com" },
+    ],
+  },
+  {
+    label: "Media servers & catalogs",
+    services: [
+      { name: "Plex", type: "plex", url: "https://www.plex.tv" },
+      { name: "Jellyfin", type: "jellyfin", url: "https://jellyfin.org" },
+      { name: "Emby", type: "emby", url: "https://emby.media" },
+      { name: "Kodi", type: "kodi", url: "https://kodi.tv" },
+      { name: "Nuvio", type: "nuvio", url: "https://nuvio.tv" },
+      { name: "Stremio", type: "stremio", url: "https://www.stremio.com" },
+      { name: "ARVIO", type: "arvio", url: "https://arvio.tv" },
+    ],
+  },
+  {
+    label: "Trackers",
+    services: [
+      { name: "Trakt", type: "trakt", url: "https://trakt.tv" },
+      { name: "Simkl", type: "simkl", url: "https://simkl.com" },
+      { name: "MDBList", type: "mdblist", url: "https://mdblist.com" },
+      { name: "Bingebase", type: "bingebase", url: "https://bingebase.com" },
+    ],
+  },
+  {
+    label: "Library automation",
+    services: [
+      { name: "Radarr", type: "radarr", url: "https://radarr.video" },
+      { name: "Sonarr", type: "sonarr", url: "https://sonarr.tv" },
+    ],
+  },
+];
 
 const currentVersion = process.env.APP_VERSION ?? 'dev';
 
@@ -137,8 +176,51 @@ if (currentVersion !== 'dev') {
         </div>
       </div>
 
-      <div class="pt-4 border-t border-zinc-800 text-sm text-zinc-600">
-        Built with Astro, FastAPI, and PostgreSQL. Powered by TMDB.
+      <div>
+        <h2 class="section-headline mb-2">Credits</h2>
+        <p class="text-sm text-zinc-500 mb-6">
+          Scrob connects to the following third-party services through their
+          publicly documented APIs. It is an independent project and is not
+          affiliated with, endorsed by, or certified by any of them.
+        </p>
+        <div class="space-y-5">
+          {creditGroups.map((group) => (
+            <div>
+              <h3 class="text-xs font-bold uppercase tracking-widest text-zinc-600 mb-2">{group.label}</h3>
+              <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {group.services.map((service) => (
+                  <a
+                    href={service.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="flex items-center gap-2.5 px-3 py-2 rounded-lg border border-zinc-800 bg-zinc-900/40 text-zinc-300 hover:text-zinc-100 hover:border-zinc-700 hover:bg-zinc-900 transition-colors"
+                  >
+                    <span class="flex shrink-0 items-center [&_svg]:size-5! [&_span]:size-5! [&_span]:text-[8px]! [&_span]:rounded-md!">
+                      <Fragment set:html={connectionIconHtml(service.type)} />
+                    </span>
+                    <span class="text-sm truncate">{service.name}</span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div class="pt-4 border-t border-zinc-800 text-xs text-zinc-600 space-y-2">
+        <p>Built with Astro, FastAPI, and PostgreSQL.</p>
+        <p>
+          This product uses the TMDB API but is not endorsed or certified by
+          <a href="https://www.themoviedb.org" target="_blank" rel="noopener noreferrer" class="text-zinc-500 hover:text-zinc-300 underline underline-offset-2 transition-colors">TMDB</a>.
+          Metadata is also provided by
+          <a href="https://thetvdb.com" target="_blank" rel="noopener noreferrer" class="text-zinc-500 hover:text-zinc-300 underline underline-offset-2 transition-colors">TheTVDB</a>.
+        </p>
+        <p>
+          All product names, logos, brands, and trademarks shown in Scrob are
+          the property of their respective owners and are used only to identify
+          the services Scrob interoperates with. Their use does not imply any
+          affiliation with or endorsement by them.
+        </p>
       </div>
     </div>
   </div>

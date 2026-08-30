@@ -314,6 +314,8 @@ export interface AdminUser {
 
 export interface GlobalSettings {
   tmdb_api_key: string | null;
+  tvdb_api_key: string | null;
+  tvdb_subscriber_pin: string | null;
   radarr_url: string | null;
   radarr_token: string | null;
   radarr_root_folder: string | null;
@@ -420,6 +422,7 @@ export interface UserSettings {
   has_global_tmdb_key: boolean;
 
   tvdb_api_key: string | null;
+  tvdb_subscriber_pin: string | null;
   has_effective_tvdb_key: boolean;
   has_global_tvdb_key: boolean;
 
@@ -1479,13 +1482,17 @@ export const api = {
   },
 };
 
+// Route TMDB and TheTVDB images through the backend image proxy (which serves
+// a locally cached copy when the admin has enabled the image cache, or 302s to
+// the origin otherwise). TheTVDB artwork has no size variants, so it uses the
+// synthetic "tvdb" size bucket.
 export function tmdbImageUrl(path: string | null | undefined, size: string = "w500"): string | null {
   if (!path) return null;
   if (path.startsWith("http://") || path.startsWith("https://")) {
-    const match = /image\.tmdb\.org\/t\/p\/([^/]+)(\/.+)$/.exec(path);
-    if (match) {
-      return `/api/proxy/media/image/${match[1]}${match[2]}`;
-    }
+    const tmdb = /image\.tmdb\.org\/t\/p\/([^/]+)(\/.+)$/.exec(path);
+    if (tmdb) return `/api/proxy/media/image/${tmdb[1]}${tmdb[2]}`;
+    const tvdb = /artworks\.thetvdb\.com(\/.+)$/.exec(path);
+    if (tvdb) return `/api/proxy/media/image/tvdb${tvdb[1]}`;
     return path;
   }
   const cleanPath = path.startsWith("/") ? path : `/${path}`;

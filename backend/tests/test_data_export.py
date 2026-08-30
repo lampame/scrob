@@ -190,13 +190,16 @@ class SecretCategoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_api_keys_includes_scrob_and_third_party_keys(self) -> None:
         user = SimpleNamespace(api_key="scrob-secret")
-        settings = SimpleNamespace(tmdb_api_key="tmdb-secret", tvdb_api_key=None)
+        settings = SimpleNamespace(
+            tmdb_api_key="tmdb-secret", tvdb_api_key=None, tvdb_subscriber_pin="sub-pin",
+        )
 
         out = data_export.build_api_keys(user, settings)
 
         self.assertEqual(out["scrob_api_key"], "scrob-secret")
         self.assertEqual(out["tmdb_api_key"], "tmdb-secret")
         self.assertIsNone(out["tvdb_api_key"])
+        self.assertEqual(out["tvdb_subscriber_pin"], "sub-pin")
 
     async def test_media_connection_includes_token(self) -> None:
         conn = SimpleNamespace(type="plex", name="Plex", url="http://x", token="plex-token",

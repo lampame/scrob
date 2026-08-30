@@ -57,6 +57,51 @@ def _headers(client_id: str, access_token: Optional[str] = None) -> dict:
     return h
 
 
+class SimklHistoryRejected(Exception):
+    """Simkl accepted a /sync/history request (HTTP 2xx) but reported the
+    item(s) in `not_found` and wrote nothing.
+
+    Happens when the show's TMDB id resolves to a Simkl entry whose season /
+    episode layout doesn't contain the number sent - absolute-ordered anime
+    past the first cour, or any other TMDB/TVDB season-split divergence. Simkl
+    reports this loss *inside* a 201, so raise_for_status() alone treats it as
+    success (#328)."""
+
+
+def _safe_json(resp: httpx.Response) -> object:
+    try:
+        return resp.json()
+    except ValueError:
+        return None
+
+
+def _history_not_found(payload: object) -> list:
+    """Flatten a /sync/history response's `not_found` into a list of the items
+    Simkl could not resolve. Tolerates both the documented dict-of-lists shape
+    ({"episodes": [...], "shows": [...], "movies": [...]}) and a bare list."""
+    if isinstance(payload, dict):
+        nf = payload.get("not_found")
+    else:
+        nf = None
+    if isinstance(nf, list):
+        return nf
+    if isinstance(nf, dict):
+        out: list = []
+        for value in nf.values():
+            if isinstance(value, list):
+                out.extend(value)
+        return out
+    return []
+
+
+def _raise_if_history_rejected(resp: httpx.Response, *, context: str) -> None:
+    """For the single-item history helpers: a non-empty `not_found` means the
+    one item we sent was rejected, so surface it instead of logging success."""
+    not_found = _history_not_found(_safe_json(resp))
+    if not_found:
+        raise SimklHistoryRejected(f"{context}: Simkl wrote nothing (not_found={not_found})")
+
+
 # ── PIN Authentication ────────────────────────────────────────────────────────
 
 async def start_pin_auth(client_id: str) -> dict:
@@ -173,6 +218,7 @@ async def add_movie_to_history(
             headers=_headers(client_id, access_token),
         )
         resp.raise_for_status()
+        _raise_if_history_rejected(resp, context=f"movie tmdb={tmdb_id}")
 
 
 async def add_history_batch(
@@ -223,6 +269,15 @@ async def add_history_batch(
             headers=_headers(client_id, access_token),
         )
         resp.raise_for_status()
+        # Simkl can accept the request (201) yet silently drop items it can't
+        # resolve into its own season layout - don't fail the whole batch over
+        # it, but don't let the loss go unrecorded either (#328).
+        rejected = _history_not_found(_safe_json(resp))
+        if rejected:
+            logger.warning(
+                "Simkl /sync/history accepted the batch but could not resolve %d item(s): %s",
+                len(rejected), rejected,
+            )
 
 
 async def remove_movie_from_history(client_id: str, access_token: str, tmdb_id: int) -> None:
@@ -263,6 +318,9 @@ async def add_episode_to_history(
             headers=_headers(client_id, access_token),
         )
         resp.raise_for_status()
+        _raise_if_history_rejected(
+            resp, context=f"show tmdb={show_tmdb_id} S{season_number}E{episode_number}"
+        )
 
 
 async def remove_episode_from_history(

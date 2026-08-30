@@ -60,14 +60,22 @@ router = APIRouter()
 
 
 async def get_user_tvdb_key(db: AsyncSession, user_id: int) -> str | None:
+    """Resolve the effective TVDB key (personal override, else server-wide) and
+    register its subscriber PIN with the TVDB client so every downstream request
+    for that key sends it on /login (#322/#325)."""
+    from core import tvdb
     from models.global_settings import GlobalSettings
     result = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
     s = result.scalar_one_or_none()
     if s and s.tvdb_api_key:
+        tvdb.set_subscriber_pin(s.tvdb_api_key, s.tvdb_subscriber_pin)
         return s.tvdb_api_key
     gs_result = await db.execute(select(GlobalSettings).where(GlobalSettings.id == 1))
     gs = gs_result.scalar_one_or_none()
-    return gs.tvdb_api_key if gs else None
+    if gs and gs.tvdb_api_key:
+        tvdb.set_subscriber_pin(gs.tvdb_api_key, gs.tvdb_subscriber_pin)
+        return gs.tvdb_api_key
+    return None
 
 
 async def _enrich_tvdb_seasons(

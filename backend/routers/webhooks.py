@@ -130,8 +130,13 @@ async def _maybe_simkl_scrobble(
     Simkl's /scrobble endpoints identify an episode only by show tmdb id +
     season + episode number, using Simkl's own layout - so an absolute-numbered
     anime episode past the first cour (TMDB keeps one season, Simkl splits it)
-    404s and the watch is lost. When a completed-watch stop fails, fall back to
-    /sync/history, which does map TMDB anime numbering onto Simkl's entries (#328)."""
+    404s. When a completed-watch stop fails we retry via /sync/history, which is
+    a little more forgiving; it still resolves the tmdb id to Simkl's own layout
+    though, so the same season-split mismatch is reported back (inside a 201) as
+    not_found - add_episode_to_history now raises SimklHistoryRejected on that
+    rather than logging a false success. A watch lost this way needs the
+    TMDB->Simkl layout remap that isn't built yet; for now it is logged, not
+    silently dropped (#328)."""
     if not (settings and settings.simkl_scrobble and settings.simkl_access_token and settings.simkl_client_id):
         return
 

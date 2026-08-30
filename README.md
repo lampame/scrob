@@ -25,6 +25,7 @@ Scrob syncs your libraries from **Jellyfin**, **Plex**, **Emby**, **Nuvio**, **A
   - [First Setup](#first-setup)
   - [Updating](#updating)
 - [Configuration](#configuration)
+  - [TheTVDB metadata](#thetvdb-metadata)
 - [ARVIO Cloud Synchronization](#arvio-cloud-synchronization)
 - [Nuvio Cloud Synchronization](#nuvio-cloud-synchronization)
   - [Connect Nuvio](#connect-nuvio)

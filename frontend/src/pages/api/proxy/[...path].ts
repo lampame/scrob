@@ -7,8 +7,9 @@ const BACKEND = `http://localhost:${BACKEND_PORT}`;
 // passed straight through to the browser must be pinned to hosts we actually
 // expect - otherwise a bug (or a future endpoint) returning an unexpected
 // Location would have the browser follow it unchecked. Today the only
-// backend route that redirects here is image serving, straight to TMDB.
-const ALLOWED_REDIRECT_HOSTS = new Set(["image.tmdb.org"]);
+// backend route that redirects here is image serving, straight to TMDB or
+// TheTVDB when the local image cache is disabled or misses.
+const ALLOWED_REDIRECT_HOSTS = new Set(["image.tmdb.org", "artworks.thetvdb.com"]);
 
 async function handle({ params, request }: Parameters<APIRoute>[0]): Promise<Response> {
   const path = params.path ?? "";

@@ -118,7 +118,22 @@ class IntegrationCredentialRequestTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["cache-control"], "no-store")
-        validate_api_key.assert_awaited_once_with("tvdb-secret")
+        validate_api_key.assert_awaited_once_with("tvdb-secret", pin=None)
+
+    async def test_tvdb_forwards_subscriber_pin_from_body(self) -> None:
+        app = _test_app()
+        transport = httpx.ASGITransport(app=app)
+        validate_api_key = AsyncMock(return_value=True)
+
+        with patch("core.tvdb.validate_api_key", validate_api_key):
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    "/auth/test-tvdb",
+                    json={"key": "tvdb-secret", "pin": "sub-pin"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        validate_api_key.assert_awaited_once_with("tvdb-secret", pin="sub-pin")
 
     async def test_jellyfin_passes_body_credentials_including_user_id(self) -> None:
         app = _test_app()
@@ -391,6 +406,62 @@ class UpdateUserSettingsBingebaseWebhookUrlValidationTests(unittest.IsolatedAsyn
                 )
 
         self.assertEqual(ctx.exception.status_code, 400)
+
+
+class UpdateUserSettingsTvdbPinValidationTests(unittest.IsolatedAsyncioTestCase):
+    """#322/#325: saving a TVDB key validates it together with the subscriber
+    PIN, and clearing the key skips validation entirely."""
+
+    async def test_key_and_pin_are_validated_together(self) -> None:
+        from models.users import UserSettings
+
+        settings = UserSettings(user_id=1)
+        db = _SettingsFakeDB(settings)
+        validate = AsyncMock(return_value=True)
+
+        with patch("core.tvdb.validate_api_key", validate):
+            await auth.update_user_settings(
+                schemas.UserSettings(tvdb_api_key="tvdb-key", tvdb_subscriber_pin="sub-pin"),
+                db=db,
+                current_user=SimpleNamespace(id=1),
+            )
+
+        validate.assert_awaited_once_with("tvdb-key", pin="sub-pin")
+        self.assertEqual(settings.tvdb_api_key, "tvdb-key")
+        self.assertEqual(settings.tvdb_subscriber_pin, "sub-pin")
+
+    async def test_rejected_pair_raises_400(self) -> None:
+        from fastapi import HTTPException
+        from models.users import UserSettings
+
+        settings = UserSettings(user_id=1)
+        db = _SettingsFakeDB(settings)
+
+        with patch("core.tvdb.validate_api_key", AsyncMock(return_value=False)):
+            with self.assertRaises(HTTPException) as ctx:
+                await auth.update_user_settings(
+                    schemas.UserSettings(tvdb_api_key="tvdb-key", tvdb_subscriber_pin="bad-pin"),
+                    db=db,
+                    current_user=SimpleNamespace(id=1),
+                )
+        self.assertEqual(ctx.exception.status_code, 400)
+
+    async def test_clearing_the_key_does_not_validate(self) -> None:
+        from models.users import UserSettings
+
+        settings = UserSettings(user_id=1, tvdb_api_key="old-sub-key", tvdb_subscriber_pin="old-pin")
+        db = _SettingsFakeDB(settings)
+        validate = AsyncMock(return_value=False)  # would block the clear if called
+
+        with patch("core.tvdb.validate_api_key", validate):
+            await auth.update_user_settings(
+                schemas.UserSettings(tvdb_api_key=None, tvdb_subscriber_pin=None),
+                db=db,
+                current_user=SimpleNamespace(id=1),
+            )
+
+        validate.assert_not_awaited()
+        self.assertIsNone(settings.tvdb_api_key)
 
 
 class _GlobalSettingsFakeDB:

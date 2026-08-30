@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
 from typing import Optional
 from datetime import datetime
 from models.base import UserRole, MediaType, PrivacyLevel
@@ -124,6 +124,7 @@ class UserSettings(BaseModel):
 
     # TVDB
     tvdb_api_key: Optional[str] = None
+    tvdb_subscriber_pin: Optional[str] = None
     has_global_tvdb_key: bool = False
     has_effective_tvdb_key: bool = False
 
@@ -242,6 +243,7 @@ class ArvioConnectionTestRequest(BaseModel):
 
 class ApiKeyTestRequest(BaseModel):
     key: SecretStr
+    pin: Optional[SecretStr] = None  # TVDB subscriber PIN, ignored by other providers
 
 
 class ServiceConnectionTestRequest(BaseModel):
@@ -457,6 +459,7 @@ class PublicProfileResponse(BaseModel):
 class GlobalSettings(BaseModel):
     tmdb_api_key           : Optional[str] = None
     tvdb_api_key           : Optional[str] = None
+    tvdb_subscriber_pin    : Optional[str] = None
     radarr_url             : Optional[str] = None
     radarr_token           : Optional[str] = None
     radarr_root_folder     : Optional[str] = None
@@ -473,7 +476,7 @@ class GlobalSettings(BaseModel):
     radarr_customize_on_add     : bool = False
     sonarr_customize_on_add     : bool = False
     image_cache_enabled         : bool = False
-    image_cache_limit_gb        : Optional[int] = None
+    image_cache_limit_gb        : Optional[float] = None
     enable_logged_out_navigation: bool = False
     disable_comments            : bool = False
 
@@ -515,3 +518,10 @@ class AdminUser(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AdminUserCreate(BaseModel):
+    username : str = Field(min_length=1, max_length=150)
+    email    : EmailStr
+    password : str = Field(min_length=1)
+    is_admin : bool = False
