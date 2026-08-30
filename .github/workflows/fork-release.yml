@@ -84,13 +84,80 @@ jobs:
           cache-from: type=gha,scope=fork-release-omnibus
           cache-to: type=gha,mode=max,scope=fork-release-omnibus
 
-      - name: Create GitHub Release with linked commits
+      - name: Generate categorized release notes (upstream vs fork)
+        id: notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Авто-нотатки: список комітів/PR між попереднім fork-тегом і новим,
-          # із активними посиланнями. Якщо попереднього тегу нема — бере всі коміти.
+          set -euo pipefail
+
+          CURRENT="${{ env.APP_VERSION }}"
+          PREV=$(git tag -l 'v*-fork*' --sort=-version:refname | grep -v "^${CURRENT}$" | head -1 || true)
+
+          if [ -n "$PREV" ]; then
+            echo "Previous fork tag: $PREV"
+            RANGE="${PREV}..HEAD"
+          else
+            echo "No previous fork tag — using all commits in repo"
+            RANGE="HEAD"
+          fi
+
+          UPSTREAM_FILE=$(mktemp)
+          FORK_FILE=$(mktemp)
+          trap 'rm -f "$UPSTREAM_FILE" "$FORK_FILE"' EXIT
+
+          # --- Merge commits (PRs) ---
+          while IFS='|' read -r hash subject parents; do
+            [ -z "$hash" ] && continue
+            short="${hash:0:7}"
+            if echo "$subject" | grep -qiE "(sync.*upstream|upstream.*sync|from sync/)"; then
+              echo "- 🔄 ${subject} (${short})" >> "$UPSTREAM_FILE"
+            else
+              echo "- 🍴 ${subject} (${short})" >> "$FORK_FILE"
+            fi
+          done < <(git log --merges --pretty=format:"%H|%s|%P" "$RANGE" 2>/dev/null)
+
+          # --- Non-merge commits → fork ---
+          while IFS='|' read -r hash subject; do
+            [ -z "$hash" ] && continue
+            short="${hash:0:7}"
+            echo "- 🍴 ${subject} (${short})" >> "$FORK_FILE"
+          done < <(git log --no-merges --pretty=format:"%H|%s" "$RANGE" 2>/dev/null)
+
+          # --- Build markdown ---
+          {
+            echo "## What's Changed"
+            echo ""
+
+            if [ -s "$UPSTREAM_FILE" ]; then
+              echo "### 🔄 Upstream Changes"
+              echo ""
+              cat "$UPSTREAM_FILE"
+              echo ""
+            fi
+
+            if [ -s "$FORK_FILE" ]; then
+              echo "### 🍴 Fork Changes"
+              echo ""
+              cat "$FORK_FILE"
+              echo ""
+            fi
+
+            if [ ! -s "$UPSTREAM_FILE" ] && [ ! -s "$FORK_FILE" ]; then
+              echo "_No commits found since previous release._"
+              echo ""
+            fi
+          } > release_notes.md
+
+          echo "=== Generated release notes ==="
+          cat release_notes.md
+          echo "================================"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           gh release create "${{ env.APP_VERSION }}" \
             --title "${{ env.APP_VERSION }}" \
-            --generate-notes \
+            --notes-file release_notes.md \
             --latest

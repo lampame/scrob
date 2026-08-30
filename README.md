@@ -10,7 +10,7 @@
   [![Latest Release](https://img.shields.io/github/v/release/lampame/scrob?style=flat-square)](https://github.com/lampame/scrob/releases/latest)
   [![Build](https://github.com/lampame/scrob/actions/workflows/fork-release.yml/badge.svg?branch=main)](https://github.com/lampame/scrob/actions/workflows/fork-release.yml)
 </div>
----
+
 
 Scrob syncs your libraries from **Jellyfin**, **Plex**, **Emby**, **Nuvio**, **ARVIO**, and **Stremio**, tracks your watch history, ratings, and personal lists, and can push watched activity back to connected providers - all from a clean, app-like web interface that installs as a PWA on any device.
 
