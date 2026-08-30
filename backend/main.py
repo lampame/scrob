@@ -370,25 +370,32 @@ async def _emby_progress_poller():
             log.error(f"Emby progress poller: {e}")
 
 
-async def _show_status_refresher():
-    """Next Up's missing-episode fallback (routers/history.py) only creates
-    a Media row for a show's next episode when TMDB says one exists - for a
-    finished show, none ever gets created, so it stays in missing_show_ids
-    (and gets re-fetched from TMDB on every cold Next Up load) forever, even
-    though it will never have a next episode again unless revived.
+async def _show_metadata_refresher():
+    """Keeps every TMDB-backed show's stored metadata (status plus the
+    tmdb_data snapshot: seasons, last/next_episode_to_air, refreshed_at) at
+    most ~a day old, so Next Up's missing-episode fallback
+    (routers/history.py's _next_up_needs_live_fetch) can answer "did a new
+    episode appear?" from the database alone instead of fan-out fetching
+    TMDB on every cold home-page load (#294, #307, #332).
 
-    Once a day, directly re-checks every locally Ended/Canceled show's
-    status against TMDB, so an unexpected revival (e.g. Futurama) is picked
-    up without depending on a delta/changes feed - if this process happened
-    to be down during the window a changes feed would have caught a
-    revival, that revival is gone for good. A direct per-show check has no
-    such window: whether yesterday's sweep ran or not, today's checks every
-    finished show from scratch.
+    This sweep is also what catches revivals: an unexpected renewal (e.g.
+    Futurama) flips a locally Ended/Canceled status back within a day. It
+    deliberately re-checks each show directly rather than using a
+    delta/changes feed - if this process happened to be down during the
+    window a changes feed would have caught a revival, that revival is gone
+    for good. A direct per-show check has no such window: whether
+    yesterday's sweep ran or not, today's checks every stale show from
+    scratch.
 
-    Deliberately leaves Returning Series alone - those already stay live via
-    Next Up's own per-request fallback fetch.
+    Runs shortly after startup (so fresh installs and restarts get their
+    snapshots gated quickly), then daily. Shows refreshed less than
+    STALE_AFTER ago are skipped, so a restart doesn't re-fetch what
+    yesterday's sweep already covered. TVDB-sourced snapshots
+    (tmdb_data.source == "tvdb") are never touched - their season layout is
+    TVDB-shaped (#335) and their shows have no TMDB identity to fetch.
     """
     import logging
+    from datetime import datetime, timedelta, timezone
     log = logging.getLogger("uvicorn.error")
 
     try:
@@ -400,16 +407,35 @@ async def _show_status_refresher():
         from routers.media import check_tmdb_key
         from routers.shows import apply_show_metadata
     except Exception as e:
-        log.error(f"Show status refresher: failed to import dependencies: {e}")
+        log.error(f"Show metadata refresher: failed to import dependencies: {e}")
         return
 
     FINAL_STATUSES = ("Ended", "Canceled")
+    STARTUP_DELAY = 2 * 60
     SWEEP_INTERVAL = 24 * 60 * 60
+    # Skip shows whose snapshot is younger than this - comfortably less than
+    # SWEEP_INTERVAL so clock drift can't make the sweep skip everything, but
+    # large enough that a restart right after a sweep re-fetches ~nothing.
+    STALE_AFTER = timedelta(hours=20)
     FETCH_CONCURRENCY = 10
-    log.info("Show status refresher: started")
+    log.info("Show metadata refresher: started")
 
+    def _snapshot_is_fresh(show) -> bool:
+        refreshed_at = (show.tmdb_data or {}).get("refreshed_at")
+        if not refreshed_at:
+            return False
+        try:
+            refreshed = datetime.fromisoformat(refreshed_at)
+        except (TypeError, ValueError):
+            return False
+        if refreshed.tzinfo is None:
+            refreshed = refreshed.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - refreshed < STALE_AFTER
+
+    delay = STARTUP_DELAY
     while True:
-        await asyncio.sleep(SWEEP_INTERVAL)
+        await asyncio.sleep(delay)
+        delay = SWEEP_INTERVAL
         try:
             async with AsyncSessionLocal() as db:
                 # Show is a shared, instance-wide table with no single
@@ -438,20 +464,26 @@ async def _show_status_refresher():
                         .limit(1)
                     )).scalar_one_or_none()
                 if not check_tmdb_key(api_key):
-                    log.info("Show status refresher: no TMDB key configured anywhere, skipping")
+                    log.info("Show metadata refresher: no TMDB key configured anywhere, skipping")
                     continue
 
-                shows = (await db.execute(
-                    select(Show).where(Show.status.in_(FINAL_STATUSES), Show.tmdb_id.isnot(None))
+                all_shows = (await db.execute(
+                    select(Show).where(Show.tmdb_id.isnot(None))
                 )).scalars().all()
+                shows = [
+                    s for s in all_shows
+                    if (s.tmdb_data or {}).get("source") != "tvdb" and not _snapshot_is_fresh(s)
+                ]
                 if not shows:
                     continue
 
                 sem = asyncio.Semaphore(FETCH_CONCURRENCY)
+                refreshed = 0
                 revived = 0
 
                 async def _check(show):
-                    nonlocal revived
+                    nonlocal refreshed, revived
+                    was_final = show.status in FINAL_STATUSES
                     async with sem:
                         try:
                             # cache_ttl=None: a stale cached response would
@@ -459,16 +491,19 @@ async def _show_status_refresher():
                             data = await tmdb_client.get_show(show.tmdb_id, api_key=api_key, cache_ttl=None)
                         except Exception:
                             return
-                    if data.get("status") in FINAL_STATUSES:
-                        return
                     apply_show_metadata(show, data)
-                    revived += 1
+                    refreshed += 1
+                    if was_final and data.get("status") not in FINAL_STATUSES:
+                        revived += 1
 
                 await asyncio.gather(*(_check(s) for s in shows))
                 await db.commit()
-                log.info(f"Show status refresher: checked {len(shows)} finished shows, {revived} revived")
+                log.info(
+                    f"Show metadata refresher: refreshed {refreshed}/{len(shows)} stale shows, "
+                    f"{revived} revived"
+                )
         except Exception as e:
-            log.error(f"Show status refresher: {e}")
+            log.error(f"Show metadata refresher: {e}")
 
 
 async def _watchlist_poller():
@@ -631,7 +666,7 @@ async def lifespan(app: FastAPI):
     watchlist_task = asyncio.create_task(_watchlist_poller())
     manual_session_task = asyncio.create_task(_manual_session_completer())
     emby_progress_task = asyncio.create_task(_emby_progress_poller())
-    show_status_task = asyncio.create_task(_show_status_refresher())
+    show_metadata_task = asyncio.create_task(_show_metadata_refresher())
 
     yield
 
@@ -639,7 +674,7 @@ async def lifespan(app: FastAPI):
     watchlist_task.cancel()
     manual_session_task.cancel()
     emby_progress_task.cancel()
-    show_status_task.cancel()
+    show_metadata_task.cancel()
     try:
         await scheduler_task
     except asyncio.CancelledError:
@@ -657,7 +692,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     try:
-        await show_status_task
+        await show_metadata_task
     except asyncio.CancelledError:
         pass
 

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -7,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import and_, or_, select, desc, func, delete, case
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload, aliased
-from db import get_db
+from db import get_db, AsyncSessionLocal
 from models.media import Media
 from models.show import Show
 from models.events import WatchEvent
@@ -698,6 +699,67 @@ def _format_media_item(media: Media) -> dict:
     return data
 
 
+# Shows whose stored status says they're finished can never gain a new episode.
+# Revivals (e.g. Futurama) are caught by main.py's daily metadata sweep flipping
+# this status back within a day (#307).
+FINAL_STATUSES = {"Ended", "Canceled"}
+
+# How stale a show's tmdb_data snapshot may get before Next Up stops trusting it
+# and re-fetches live. The daily sweep rewrites every snapshot roughly every
+# 24h, so while it's running this threshold is never reached and the request
+# path stays fetch-free; if the sweep is down, each show degrades to one live
+# fetch per ~26h instead of the snapshot going permanently stale (#287).
+_NEXT_UP_SNAPSHOT_MAX_AGE = timedelta(hours=26)
+
+
+def _next_up_needs_live_fetch(show, today: date, now: datetime) -> bool:
+    """Whether get_next_up's missing-episode fallback must ask TMDB about this
+    show, or can answer from the tmdb_data snapshot on the Show row (#332).
+
+    The per-request question is only "has an episode appeared after the user's
+    furthest-watched position?" - and the snapshot already knows when that
+    can't have happened:
+      - a finished show can't gain episodes (revivals flip its status via the
+        daily sweep, #307);
+      - a still-running show announces its next episode's air date ahead of
+        time (next_episode_to_air) - until that date arrives, nothing new can
+        have aired;
+      - a snapshot refreshed within ~a day with no scheduled next episode
+        means TMDB had nothing new either.
+    Everything else - a next episode whose air date has arrived, or a
+    never-written or stale snapshot - gets a live fetch, so unlike #287 a
+    snapshot can never go permanently stale: it is refreshed by the daily
+    sweep, and re-fetched here the moment it's overdue.
+    """
+    if not show or not show.tmdb_id:
+        # No TMDB identity - there's nothing to fetch (unchanged behavior:
+        # unmapped-TVDB shows get their episodes from TVDB sync, not here).
+        return False
+    data = show.tmdb_data or {}
+    if data.get("source") == "tvdb":
+        # TVDB-sourced snapshot: its season layout is TVDB-shaped (#335) and
+        # must never be fetched-over / rewritten with TMDB-shaped data here.
+        return False
+    if (show.status or "") in FINAL_STATUSES:
+        # A finished show's season list can't change. "seasons" missing
+        # entirely means some path set the status without ever storing a
+        # snapshot - fetch once to build it.
+        return "seasons" not in data
+    next_air = (data.get("next_episode_to_air") or {}).get("air_date")
+    if next_air and next_air <= today.isoformat():
+        return True
+    refreshed_at = data.get("refreshed_at")
+    if not refreshed_at:
+        return True
+    try:
+        refreshed = datetime.fromisoformat(refreshed_at)
+    except (TypeError, ValueError):
+        return True
+    if refreshed.tzinfo is None:
+        refreshed = refreshed.replace(tzinfo=timezone.utc)
+    return now - refreshed > _NEXT_UP_SNAPSHOT_MAX_AGE
+
+
 def _compute_next_episode(seasons: list[dict], season: int, episode: int) -> tuple[int, int] | None:
     """Given a show's TMDB season metadata and the last-watched (season, episode),
     returns the next (season, episode), or None if the show has no more aired/
@@ -884,7 +946,6 @@ async def _next_up_remaining_stats(
     # be capped to aired episodes, so the count would include episodes that
     # haven't aired yet (#296). Fetch it live for exactly those shows: Next Up
     # is a short list, and finished shows never need it.
-    FINAL_STATUSES = {"Ended", "Canceled"}
     needs_last_ep = [
         sid for sid, show in shows_by_id.items()
         if show.tmdb_id
@@ -1059,51 +1120,64 @@ async def get_next_up(
             shows_result = await db.execute(select(Show).where(Show.id.in_(missing_show_ids)))
             shows_by_id = {s.id: s for s in shows_result.scalars().all()}
 
-            # The TMDB fetch below is independent, read-only work per show -
-            # fetch them all concurrently instead of one HTTP round trip at a
-            # time. A show with no locally-synced next episode is commonly
-            # just a fully-watched one (this fetch confirms there's nothing
-            # left to watch), so a user with many completed shows could have
-            # dozens to hundreds of these on every cold Next Up load; done
-            # sequentially this was the entire ~15-25s a cold load cost (#294).
-            _fetch_sem = asyncio.Semaphore(10)
+            # A show with no locally-synced next episode is commonly just a
+            # fully-watched one, so a user with many completed shows can have
+            # hundreds of these on every cold Next Up load - fetched live
+            # per-request, that fan-out was the entire multi-minute cold-load
+            # cost (#294, #307, #332). Only shows whose stored metadata says
+            # something new could exist since it was last written are fetched
+            # (see _next_up_needs_live_fetch); everything else is answered
+            # from the tmdb_data snapshot, which main.py's daily metadata
+            # sweep keeps at most ~a day old - so unlike #287, trusting it
+            # here can't hide a newly-aired episode for good.
+            fetch_today = date.today()
+            fetch_now = datetime.now(timezone.utc)
+            live_fetch_ids = [
+                sid for sid in missing_show_ids
+                if _next_up_needs_live_fetch(shows_by_id.get(sid), fetch_today, fetch_now)
+            ]
 
-            async def _fetch_seasons(show_id: int) -> tuple[int, list[dict]]:
-                show = shows_by_id.get(show_id)
-                if not show or not show.tmdb_id:
-                    return show_id, []
-                async with _fetch_sem:
-                    # show.tmdb_data's cached season list is only ever rewritten by an
-                    # explicit "Refresh Metadata" action, so trusting it here would leave
-                    # a newly-aired episode or season permanently invisible in Next Up
-                    # once that snapshot goes stale (#287). Fetch fresh instead - this
-                    # still goes through the normal shared TMDB cache (core/tmdb.py's
-                    # DEFAULT_CACHE_TTL), so it's not a live call on every request.
-                    try:
-                        fresh_show_data = await tmdb.get_show(show.tmdb_id, api_key=api_key)
-                        return show_id, fresh_show_data.get("seasons", [])
-                    except Exception:
-                        return show_id, (show.tmdb_data or {}).get("seasons", [])
+            fetched_by_show: dict[int, dict] = {}
+            if live_fetch_ids:
+                _fetch_sem = asyncio.Semaphore(10)
 
-            try:
-                seasons_by_show = dict(await asyncio.wait_for(
-                    asyncio.gather(*[_fetch_seasons(sid) for sid in missing_show_ids]),
-                    timeout=8.0,
-                ))
-            except (asyncio.TimeoutError, tmdb.TMDBUnavailable):
-                # TMDB slow/down - fall back to each show's cached season snapshot.
-                seasons_by_show = {
-                    sid: (shows_by_id.get(sid).tmdb_data or {}).get("seasons", [])
-                    for sid in missing_show_ids
-                    if shows_by_id.get(sid)
-                }
+                async def _fetch_show(show_id: int) -> tuple[int, dict | None]:
+                    async with _fetch_sem:
+                        try:
+                            return show_id, await tmdb.get_show(shows_by_id[show_id].tmdb_id, api_key=api_key)
+                        except Exception:
+                            return show_id, None
+
+                # Cap the whole fan-out: if TMDB is slow/down, render Next Up
+                # from the stored snapshots rather than block the home page
+                # (the per-show except above falls back the same way).
+                try:
+                    fetch_results = await asyncio.wait_for(
+                        asyncio.gather(*[_fetch_show(sid) for sid in live_fetch_ids]),
+                        timeout=8.0,
+                    )
+                except (asyncio.TimeoutError, tmdb.TMDBUnavailable):
+                    fetch_results = []
+                fetched_by_show = {sid: data for sid, data in fetch_results if data}
+
+            from routers.shows import apply_show_metadata
 
             for show_id in missing_show_ids:
                 show = shows_by_id.get(show_id)
                 if not show or not show.tmdb_id:
                     continue
+                fresh_show_data = fetched_by_show.get(show_id)
+                if fresh_show_data is not None:
+                    # Persist the fresh payload (incl. next_episode_to_air and
+                    # refreshed_at) so this show stops needing a live fetch on
+                    # the next load - committed together with the speculative
+                    # episode rows below. Safe to write: TVDB-sourced
+                    # snapshots are never in live_fetch_ids (#335).
+                    apply_show_metadata(show, fresh_show_data)
+                    seasons = fresh_show_data.get("seasons", [])
+                else:
+                    seasons = (show.tmdb_data or {}).get("seasons", [])
                 season, episode = last_per_show[show_id]
-                seasons = seasons_by_show.get(show_id, [])
                 next_ep = _compute_next_episode(seasons, season, episode)
                 if next_ep is None:
                     continue
@@ -1239,6 +1313,7 @@ from core import tmdb
 from core.enrichment import enrich_media, enrich_episode_from_tvdb, tmdb_season_covers, is_unmapped_tvdb_episode, enrich_media_safely
 from datetime import datetime
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -1282,6 +1357,113 @@ async def unhide_next_up_show(
             flag_modified(settings, "next_up_hidden_shows")
             await db.commit()
     return {"status": "ok"}
+
+
+# Concurrency for the "Refresh from TMDB" fan-out. TMDB's rate limit is ~50
+# req/s; 10 in flight with typical latency stays comfortably under it.
+_NEXT_UP_REFRESH_CONCURRENCY = 10
+# Commit every N completed shows so a mid-refresh disconnect (big library, slow
+# TMDB) still persists most of the work instead of throwing all of it away.
+_NEXT_UP_REFRESH_COMMIT_EVERY = 20
+
+
+async def _stream_next_up_refresh(user_id: int, api_key: str):
+    """Newline-delimited-JSON progress stream for the Next Up "Refresh from
+    TMDB" button. Re-queries TMDB (cache bypassed) for every TMDB-backed show
+    the user has watch history for and rewrites its stored tmdb_data snapshot,
+    so the next plain Next Up load surfaces episodes/seasons that have appeared
+    since the last daily metadata sweep (main.py's _show_metadata_refresher).
+
+    Emits, one JSON object per line:
+        {"total": N}
+        {"done": 1, "total": N} ... {"done": N, "total": N}
+        {"done": N, "total": N, "complete": true}
+    or, when there's nothing to do:
+        {"total": 0, "complete": true[, "error": "no_tmdb_key"]}
+    """
+    if not check_tmdb_key(api_key):
+        yield json.dumps({"total": 0, "complete": True, "error": "no_tmdb_key"}) + "\n"
+        return
+
+    async with AsyncSessionLocal() as db:
+        # Shows the user has actually watched an episode of, that carry a TMDB
+        # identity. TVDB-sourced snapshots are excluded: their season layout is
+        # TVDB-shaped (#335) and apply_show_metadata would clobber it.
+        watched_show_ids = (
+            select(Media.show_id)
+            .join(WatchEvent, WatchEvent.media_id == Media.id)
+            .where(
+                WatchEvent.user_id == user_id,
+                Media.media_type == MediaType.episode,
+                Media.show_id.isnot(None),
+            )
+            .distinct()
+        )
+        show_rows = (await db.execute(
+            select(Show).where(Show.tmdb_id.isnot(None), Show.id.in_(watched_show_ids))
+        )).scalars().all()
+        shows = [s for s in show_rows if (s.tmdb_data or {}).get("source") != "tvdb"]
+
+        total = len(shows)
+        yield json.dumps({"total": total}) + "\n"
+        if not total:
+            yield json.dumps({"done": 0, "total": 0, "complete": True}) + "\n"
+            return
+
+        from routers.shows import apply_show_metadata
+
+        sem = asyncio.Semaphore(_NEXT_UP_REFRESH_CONCURRENCY)
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _one(show):
+            async with sem:
+                try:
+                    # cache_ttl=None: the whole point of the button is that the
+                    # cached/snapshotted data is behind, so don't reuse it.
+                    data = await tmdb.get_show(show.tmdb_id, api_key=api_key, cache_ttl=None)
+                    apply_show_metadata(show, data)
+                except Exception:
+                    pass
+            await queue.put(1)
+
+        tasks = [asyncio.create_task(_one(s)) for s in shows]
+        done = 0
+        try:
+            for _ in range(total):
+                await queue.get()
+                done += 1
+                if done % _NEXT_UP_REFRESH_COMMIT_EVERY == 0:
+                    await db.commit()
+                yield json.dumps({"done": done, "total": total}) + "\n"
+        finally:
+            # On a normal finish every task is already done and these are
+            # no-ops; on a client disconnect mid-stream they stop the rest of
+            # the fan-out instead of letting an abandoned request keep hammering
+            # TMDB. Either way, commit what did land.
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await db.commit()
+
+        yield json.dumps({"done": total, "total": total, "complete": True}) + "\n"
+
+
+@router.post("/next-up/refresh")
+async def refresh_next_up(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_or_api_key),
+):
+    """Streams NDJSON progress while re-checking TMDB for every show the user
+    watches (see _stream_next_up_refresh). The client reloads Next Up when the
+    stream completes; the refreshed snapshots are what let a previously-missing
+    show surface on that reload."""
+    api_key = await get_user_tmdb_key(db, current_user.id)
+    return StreamingResponse(
+        _stream_next_up_refresh(current_user.id, api_key),
+        media_type="application/x-ndjson",
+        # Defeat proxy/buffering so progress lines arrive as they're produced.
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"},
+    )
 
 
 async def _push_show_dropped_to_providers(db: AsyncSession, settings: UserSettings, tmdb_id: int, *, remove: bool) -> None:
