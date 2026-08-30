@@ -1,10 +1,9 @@
 """Internal WebSocket server for Scrob real-time communication.
 
-MVP: ping-pong keepalive + namespace echo. No real event routing yet.
+MVP: ping-pong keepalive + echo. No real event routing yet.
 Becomes a no-op when socket_mode == 'disabled'.
 """
 
-import asyncio
 import json
 import logging
 from typing import Optional
@@ -15,7 +14,7 @@ from websockets.exceptions import ConnectionClosed
 logger = logging.getLogger(__name__)
 
 
-async def _handle(websocket, namespace: str):
+async def _handle(websocket):
     async for raw in websocket:
         try:
             msg = json.loads(raw)
@@ -26,27 +25,27 @@ async def _handle(websocket, namespace: str):
             await websocket.send(json.dumps({"type": "pong"}))
             continue
 
-        # Echo back namespaced — placeholder for future event routing
-        await websocket.send(json.dumps({"type": "echo", "namespace": namespace, "data": msg}))
+        # Echo back — placeholder for future event routing
+        await websocket.send(json.dumps({"type": "echo", "data": msg}))
 
 
-async def start_server(port: int, namespace: str = "gwb-scrob"):
-    """Start the internal WebSocket server. Returns immediately if disabled."""
-    server = await serve(_handle, "0.0.0.0", port, namespace=namespace)
-    logger.info("Socket server listening on :%d (namespace=%s)", port, namespace)
+async def start_server(port: int):
+    """Start the internal WebSocket server."""
+    server = await serve(_handle, "0.0.0.0", port)
+    logger.info("Socket server listening on :%d", port)
     return server
 
 
 class SocketServer:
     """Lifecycle wrapper for the internal WebSocket server."""
 
-    def __init__(self, port: int = 7332, namespace: str = "gwb-scrob"):
+    def __init__(self, port: int = 7332, namespace: str = ""):
         self.port = port
-        self.namespace = namespace
+        self.namespace = namespace  # Reserved for future use
         self._server: Optional[object] = None
 
     async def start(self):
-        self._server = await start_server(self.port, self.namespace)
+        self._server = await start_server(self.port)
 
     async def stop(self):
         if self._server:
