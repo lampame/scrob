@@ -3,6 +3,8 @@
   <h1>Scrob</h1>
   <p>Open-source, self-hosted media tracking - your personal Letterboxd + Trakt.</p>
 
+  [**English**](README.md) | [**Українська**](README.uk.md)
+
   [![GitHub Stars](https://img.shields.io/github/stars/lampame/scrob?style=flat-square)](https://github.com/lampame/scrob/stargazers)
   [![Docker Pulls](https://img.shields.io/docker/pulls/lampame/scrob?style=flat-square)](https://hub.docker.com/r/lampame/scrob)
   [![GitHub Contributors](https://img.shields.io/github/contributors/lampame/scrob?style=flat-square)](https://github.com/lampame/scrob/graphs/contributors)
@@ -11,6 +13,23 @@
   [![Build](https://github.com/lampame/scrob/actions/workflows/fork-release.yml/badge.svg?branch=main)](https://github.com/lampame/scrob/actions/workflows/fork-release.yml)
 </div>
 
+---
+
+> ⚠️ **Fork Disclaimer**
+>
+> This is a **community fork** of the original [ellite/scrob](https://github.com/ellite/scrob) repository. It develops in parallel with the upstream project but with a different focus and direction.
+>
+> **Why this fork exists:** Attempts were made to contribute changes back to the original repository, but the upstream author was not reachable for collaboration. Rather than letting the work stall, this fork was created to continue development openly.
+>
+> **What makes this fork different:**
+> - Changes are driven by **specific, practical needs** rather than a centralized roadmap
+> - Development is **AI-assisted** — code is produced collaboratively with AI tooling
+> - The project is **modular by design** — anyone can pick up individual components (WebSocket API, DB pool configuration, scrobble session redesign, etc.) and adapt them for their own use
+> - **Contributions are welcome** — whether you want to take a feature, suggest an improvement, or join the development process
+>
+> This fork **automatically syncs** with upstream releases, so you get the best of both worlds: upstream stability + fork-specific enhancements.
+
+---
 
 Scrob syncs your libraries from **Jellyfin**, **Plex**, **Emby**, **Nuvio**, **ARVIO**, and **Stremio**, tracks your watch history, ratings, and personal lists, and can push watched activity back to connected providers - all from a clean, app-like web interface that installs as a PWA on any device.
 
@@ -88,6 +107,8 @@ Scrob syncs your libraries from **Jellyfin**, **Plex**, **Emby**, **Nuvio**, **A
 - **Progressive Web App**: Install Scrob on any device - Android, iOS, or desktop - for a native app feel.
 - **Single container**: Frontend and backend ship as one image on one port. No separate services to manage.
 - **API documentation**: Full interactive OpenAPI docs at `/docs` (Swagger UI) and `/redoc` (ReDoc), useful if you're scripting against Scrob directly.
+- **WebSocket API** (fork feature): Real-time bidirectional communication for external clients, scripts, and automations. See [Socket API Documentation](docs/socket-api.md).
+- **Configurable DB pool** (fork feature): Tune connection limits via environment variables for managed PostgreSQL providers (Aiven, Neon, etc.).
 
 ## Screenshots
 
