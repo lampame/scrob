@@ -52,31 +52,7 @@ const CONTENT_LANGUAGES: [string, string][] = [
   ["sr", "Serbian"],
 ];
 
-const METADATA_LANGUAGES: [string, string][] = [
-  ["en", "English"],
-  ["fr", "French"],
-  ["de", "German"],
-  ["es", "Spanish (Spain)"],
-  ["es-MX", "Spanish (Mexico)"],
-  ["it", "Italian"],
-  ["pt-BR", "Portuguese (Brazil)"],
-  ["pt-PT", "Portuguese (Portugal)"],
-  ["ja", "Japanese"],
-  ["ko", "Korean"],
-  ["zh-CN", "Chinese (Simplified)"],
-  ["zh-TW", "Chinese (Traditional)"],
-  ["hi", "Hindi"],
-  ["ar", "Arabic"],
-  ["ru", "Russian"],
-  ["nl", "Dutch"],
-  ["pl", "Polish"],
-  ["tr", "Turkish"],
-  ["sv", "Swedish"],
-  ["cs", "Czech"],
-  ["hu", "Hungarian"],
-  ["hr", "Croatian"],
-  ["sr", "Serbian"],
-];
+
 
 const MOVIE_GENRES = [
   "Action","Adventure","Animation","Comedy","Crime",
@@ -276,17 +252,27 @@ const COUNTRIES = [
           <h2 class="section-headline">Metadata Language</h2>
         </div>
         <div class="space-y-2 max-w-xs">
-          <label for="metadata_language" class="block text-sm font-medium text-zinc-400">Display Language</label>
-          <select
-            id="metadata_language"
-            name="metadata_language"
-            class="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
-          >
-            <option value="">— English (default) —</option>
-            {METADATA_LANGUAGES.map(([code, name]) => (
-              <option value={code} selected={prefs.metadata_language === code}>{name}</option>
-            ))}
-          </select>
+          <label for="metadata_language_search" class="block text-sm font-medium text-zinc-400">Display Language</label>
+          <div class="relative" id="metadata-language-combobox">
+            <input
+              type="text"
+              id="metadata_language_search"
+              class="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+              placeholder="Search languages..."
+              autocomplete="off"
+              role="combobox"
+              aria-expanded="false"
+              aria-controls="metadata-language-listbox"
+            />
+            <input type="hidden" id="metadata_language" name="metadata_language" value={prefs.metadata_language ?? ''} />
+            <div
+              id="metadata-language-listbox"
+              class="hidden absolute z-50 w-full mt-1 bg-zinc-900 border border-zinc-800 rounded-lg shadow-xl max-h-60 overflow-y-auto"
+              role="listbox"
+            >
+              <div class="px-4 py-3 text-zinc-500 text-sm cursor-pointer hover:bg-zinc-800" data-value="">English (default)</div>
+            </div>
+          </div>
           <p class="text-xs text-zinc-500">
             Titles, overviews, and taglines will be fetched from TMDB in this language. Translations are cached as you browse — library metadata updates gradually as you visit detail pages.
           </p>
@@ -778,7 +764,161 @@ const COUNTRIES = [
       }
     });
 
+    // ── Metadata language combobox ─────────────────────────────────────────
+    initMetadataLanguageCombobox(token);
+
     if (token) initStatus();
+  }
+
+  // ── Metadata language combobox ─────────────────────────────────────────────
+  function initMetadataLanguageCombobox(token: string) {
+    const searchInput = document.getElementById('metadata_language_search') as HTMLInputElement | null;
+    const hiddenInput = document.getElementById('metadata_language') as HTMLInputElement | null;
+    const listbox = document.getElementById('metadata-language-listbox') as HTMLDivElement | null;
+    if (!searchInput || !hiddenInput || !listbox) return;
+
+    let languages: { iso_639_1: string; english_name: string; name: string }[] = [];
+    let activeIndex = -1;
+    let selectedValue = hiddenInput.value;
+
+    // Pre-select display
+    updateDisplay();
+
+    async function loadLanguages() {
+      try {
+        const res = await fetch('/api/proxy/profile/tmdb/languages', {
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        languages = await res.json() as { iso_639_1: string; english_name: string; name: string }[];
+        renderList('');
+      } catch (_) {}
+    }
+
+    function renderList(filter: string) {
+      const q = filter.trim().toLowerCase();
+      const filtered = q
+        ? languages.filter(l =>
+            l.english_name.toLowerCase().includes(q) ||
+            l.name.toLowerCase().includes(q) ||
+            l.iso_639_1.toLowerCase().includes(q))
+        : languages;
+
+      listbox.innerHTML = '';
+      // Default option
+      const defaultOpt = document.createElement('div');
+      defaultOpt.className = 'px-4 py-3 text-zinc-500 text-sm cursor-pointer hover:bg-zinc-800';
+      defaultOpt.dataset.value = '';
+      defaultOpt.textContent = 'English (default)';
+      defaultOpt.setAttribute('role', 'option');
+      if (!selectedValue) defaultOpt.classList.add('bg-zinc-800', 'text-zinc-200');
+      listbox.appendChild(defaultOpt);
+
+      for (const lang of filtered) {
+        const opt = document.createElement('div');
+        opt.className = 'px-4 py-3 text-zinc-300 text-sm cursor-pointer hover:bg-zinc-800 flex justify-between gap-2';
+        opt.dataset.value = lang.iso_639_1;
+        opt.dataset.display = lang.english_name;
+        opt.setAttribute('role', 'option');
+        const isSelected = selectedValue === lang.iso_639_1;
+        if (isSelected) opt.classList.add('bg-zinc-800', 'text-zinc-200');
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'truncate';
+        nameSpan.textContent = lang.english_name;
+        opt.appendChild(nameSpan);
+
+        if (lang.name && lang.name !== lang.english_name) {
+          const localSpan = document.createElement('span');
+          localSpan.className = 'text-zinc-500 text-xs shrink-0';
+          localSpan.textContent = lang.name;
+          opt.appendChild(localSpan);
+        }
+        listbox.appendChild(opt);
+      }
+      activeIndex = -1;
+    }
+
+    function updateDisplay() {
+      if (!selectedValue) {
+        searchInput.value = '';
+        return;
+      }
+      const lang = languages.find(l => l.iso_639_1 === selectedValue);
+      if (lang) searchInput.value = lang.english_name;
+    }
+
+    function openList() {
+      renderList(searchInput.value);
+      listbox.classList.remove('hidden');
+      searchInput.setAttribute('aria-expanded', 'true');
+    }
+
+    function closeList() {
+      listbox.classList.add('hidden');
+      searchInput.setAttribute('aria-expanded', 'false');
+      activeIndex = -1;
+    }
+
+    function selectLanguage(value: string, display: string) {
+      selectedValue = value;
+      hiddenInput.value = value;
+      searchInput.value = value ? display : '';
+      closeList();
+      hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    searchInput.addEventListener('focus', () => {
+      if (languages.length === 0) { loadLanguages(); }
+      openList();
+    });
+
+    searchInput.addEventListener('input', () => {
+      openList();
+    });
+
+    searchInput.addEventListener('blur', () => {
+      // Delay to allow click on listbox item
+      setTimeout(() => {
+        if (!listbox.classList.contains('hidden')) {
+          closeList();
+          updateDisplay();
+        }
+      }, 150);
+    });
+
+    searchInput.addEventListener('keydown', (e) => {
+      const options = listbox.querySelectorAll('[role="option"]');
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (listbox.classList.contains('hidden')) openList();
+        activeIndex = Math.min(activeIndex + 1, options.length - 1);
+        options.forEach((o, i) => o.classList.toggle('bg-zinc-800', i === activeIndex));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        activeIndex = Math.max(activeIndex - 1, 0);
+        options.forEach((o, i) => o.classList.toggle('bg-zinc-800', i === activeIndex));
+      } else if (e.key === 'Enter' && activeIndex >= 0) {
+        e.preventDefault();
+        const opt = options[activeIndex] as HTMLDivElement;
+        selectLanguage(opt.dataset.value ?? '', opt.dataset.display ?? opt.textContent ?? '');
+      } else if (e.key === 'Escape') {
+        closeList();
+        updateDisplay();
+      }
+    });
+
+    listbox.addEventListener('click', (e) => {
+      const target = (e.target as HTMLElement).closest('[role="option"]') as HTMLDivElement | null;
+      if (target) {
+        const value = target.dataset.value ?? '';
+        const display = value ? target.dataset.display ?? target.textContent?.trim() ?? '' : '';
+        selectLanguage(value, display);
+      }
+    });
+
+    // Load languages on init
+    loadLanguages();
   }
 
   setup();
