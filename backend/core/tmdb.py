@@ -163,6 +163,16 @@ async def validate_api_key(api_key: str) -> bool:
         return False
 
 
+async def get_languages(api_key: str = None, cache_ttl: float | None = 86400) -> list[dict]:
+    """Fetch the list of languages TMDB supports for metadata.
+
+    Returns [{english_name, iso_639_1, name}] sorted by english_name.
+    Cached 24h — the list changes rarely."""
+    data = await _get(f"{TMDB_BASE}/configuration/languages", headers=get_headers(api_key), cache_ttl=cache_ttl)
+    languages = data if isinstance(data, list) else data.get("languages", [])
+    return sorted(languages, key=lambda l: l.get("english_name", "").lower())
+
+
 async def get_movie(tmdb_id: int, api_key: str = None, language: str | None = None, cache_ttl: float | None = DEFAULT_CACHE_TTL) -> dict:
     params: dict = {"append_to_response": "credits,release_dates,recommendations,external_ids,keywords"}
     if language:

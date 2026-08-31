@@ -51,6 +51,34 @@ async def get_public_access_status(db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.get("/tmdb/languages")
+async def get_tmdb_languages(
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_user_or_api_key),
+):
+    """Public: list of languages TMDB supports for metadata, sourced from
+    /3/configuration/languages. Authenticated users resolve their effective
+    TMDB key (personal → global); anonymous visitors fall back to the global
+    key only. Cached 24h server-side."""
+    from routers.media import get_user_tmdb_key
+    api_key = None
+    if current_user:
+        api_key = await get_user_tmdb_key(db, current_user.id)
+    if not api_key:
+        gs = await db.execute(select(GlobalSettings).where(GlobalSettings.id == 1))
+        gs = gs.scalar_one_or_none()
+        api_key = gs.tmdb_api_key if gs else None
+    if not api_key:
+        raise HTTPException(status_code=503, detail="No TMDB API key configured")
+    try:
+        languages = await tmdb_client.get_languages(api_key=api_key)
+        return languages
+    except tmdb_client.TMDBUnavailable:
+        raise HTTPException(status_code=503, detail="TMDB unavailable")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch languages: {e}")
+
+
 async def _check_profile_access(user_id: int, current_user, db: AsyncSession):
     """Returns (user, profile) or raises 404/403."""
     user_result = await db.execute(select(User).where(User.id == user_id))
