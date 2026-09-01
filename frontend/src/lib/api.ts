@@ -484,6 +484,7 @@ export interface UserSettings {
   minimalist_next_up: boolean;
   rate_prompt_movies: boolean;
   rate_prompt_episodes: boolean;
+  watchlist_auto_remove_id: number | null;
 }
 
 export interface MediaServerConnection {
