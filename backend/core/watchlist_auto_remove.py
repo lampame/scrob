@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from models.lists import ListItem, ListModel
+from models.lists import List, ListItem
 from models.users import UserSettings
 
 
@@ -35,11 +35,11 @@ async def auto_remove_from_watchlist(
     result = await db.execute(
         select(ListItem)
         .options(selectinload(ListItem.media))
-        .join(ListModel, ListModel.id == ListItem.list_id)
+        .join(List, List.id == ListItem.list_id)
         .where(
             ListItem.list_id == list_id,
             ListItem.media_id == media_id,
-            ListModel.user_id == user_id,  # Security: ensure ownership
+            List.user_id == user_id,  # Security: ensure ownership
         )
     )
     item = result.scalar_one_or_none()
@@ -48,7 +48,7 @@ async def auto_remove_from_watchlist(
         return  # Title not in watchlist
 
     # 3. Capture data before delete
-    lst = item.list_model if hasattr(item, "list_model") else None
+    lst = item.list if hasattr(item, "list") else None
     media = item.media
     season_number = item.season_number
 
