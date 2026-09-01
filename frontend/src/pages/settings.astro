@@ -1773,7 +1773,8 @@ if (me.totp_enabled) {
           headers: { 'Authorization': `Bearer ${tok}` },
         });
         if (res.ok) {
-          const lists = await res.json();
+          const data = await res.json();
+          const lists = data.lists || data;
           watchlistSelect.innerHTML = '<option value="">— Disabled —</option>';
           for (const list of lists) {
             const option = document.createElement('option');
