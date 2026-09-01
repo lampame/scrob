@@ -454,6 +454,19 @@ async def update_user_settings(
         if field in update_data and update_data[field]:
             update_data[field] = await validate_service_url(update_data[field], label)
 
+    # Validate watchlist_auto_remove_id: must be user's own list (or None)
+    if "watchlist_auto_remove_id" in update_data and update_data["watchlist_auto_remove_id"] is not None:
+        from backend.models.lists import ListModel
+
+        list_result = await db.execute(
+            select(ListModel.id).where(
+                ListModel.id == update_data["watchlist_auto_remove_id"],
+                ListModel.user_id == current_user.id,
+            )
+        )
+        if list_result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=400, detail="List not found or does not belong to you")
+
     for field, value in update_data.items():
         if hasattr(settings, field):
             setattr(settings, field, value)

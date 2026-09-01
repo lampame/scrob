@@ -327,7 +327,15 @@ async def _push_watch_state(
                 )
             except Exception as e:
                 logger.warning("Can't send history event to Stremio (connection %s) because %s", conn.id, e)
-        await db.commit()
+
+    # Auto-remove watched titles from user's selected watchlist
+    if watched:
+        from backend.core.watchlist_auto_remove import auto_remove_from_watchlist
+
+        for mid in media_ids:
+            await auto_remove_from_watchlist(db, user_id, mid)
+
+    await db.commit()
 
 
 def format_event(event: WatchEvent | PlaybackProgress, media: Media) -> dict:

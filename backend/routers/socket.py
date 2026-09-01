@@ -49,6 +49,13 @@ async def _handle_watch_event(user: User, payload: dict, db: AsyncSession):
     )
     db.add(event)
     await db.commit()
+
+    # Auto-remove from watchlist if completed
+    if event.completed:
+        from backend.core.watchlist_auto_remove import auto_remove_from_watchlist
+
+        await auto_remove_from_watchlist(db, user.id, media_id)
+
     return {"status": "created", "id": event.id}
 
 
