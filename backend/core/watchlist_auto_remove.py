@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from models.lists import List, ListItem
+from models.media import Media
 from models.users import UserSettings
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ async def auto_remove_from_watchlist(
         logger.debug("Auto-remove disabled for user %s (no watchlist_auto_remove_id)", user_id)
         return  # Auto-remove disabled
 
-    # 2. Find the list item
+    # 2. Find the list item (by media_id for movies, or by show_id for series)
     result = await db.execute(
         select(ListItem)
         .options(selectinload(ListItem.media), selectinload(ListItem.list))
@@ -47,6 +48,26 @@ async def auto_remove_from_watchlist(
         )
     )
     item = result.scalar_one_or_none()
+
+    # For series: if not found by episode media_id, try finding by show_id
+    if item is None:
+        media_result = await db.execute(
+            select(Media.show_id).where(Media.id == media_id)
+        )
+        show_id: Optional[int] = media_result.scalar_one_or_none()
+
+        if show_id is not None:
+            result = await db.execute(
+                select(ListItem)
+                .options(selectinload(ListItem.media), selectinload(ListItem.list))
+                .join(List, List.id == ListItem.list_id)
+                .where(
+                    ListItem.list_id == list_id,
+                    ListItem.media_id == show_id,
+                    List.user_id == user_id,
+                )
+            )
+            item = result.scalar_one_or_none()
 
     if item is None:
         logger.debug(
