@@ -143,6 +143,9 @@ class UserSettings(Base):
     dropped_shows  : Mapped[Optional[list[int]]] = mapped_column(JSONB, server_default="'[]'")
     dropped_movies : Mapped[Optional[list[int]]] = mapped_column(JSONB, server_default="'[]'")
     hide_watched_from_recently_added : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    watchlist_auto_remove_id : Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("lists.id", ondelete="SET NULL"), nullable=True, default=None, server_default=None
+    )
     # Prompt to rate an item right after it finishes playing (homepage Now
     # Playing bar drops the session -> star-rating popup), separately per type (#177).
     rate_prompt_movies   : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
