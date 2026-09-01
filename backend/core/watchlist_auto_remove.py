@@ -7,8 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.models.lists import ListItem, ListModel
-from backend.models.users import UserSettings
+from models.lists import ListItem, ListModel
+from models.users import UserSettings
 
 
 async def auto_remove_from_watchlist(

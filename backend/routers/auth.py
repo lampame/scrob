@@ -456,7 +456,7 @@ async def update_user_settings(
 
     # Validate watchlist_auto_remove_id: must be user's own list (or None)
     if "watchlist_auto_remove_id" in update_data and update_data["watchlist_auto_remove_id"] is not None:
-        from backend.models.lists import ListModel
+        from models.lists import ListModel
 
         list_result = await db.execute(
             select(ListModel.id).where(

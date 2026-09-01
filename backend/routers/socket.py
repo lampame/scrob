@@ -52,7 +52,7 @@ async def _handle_watch_event(user: User, payload: dict, db: AsyncSession):
 
     # Auto-remove from watchlist if completed
     if event.completed:
-        from backend.core.watchlist_auto_remove import auto_remove_from_watchlist
+        from core.watchlist_auto_remove import auto_remove_from_watchlist
 
         await auto_remove_from_watchlist(db, user.id, media_id)
 

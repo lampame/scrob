@@ -330,7 +330,7 @@ async def _push_watch_state(
 
     # Auto-remove watched titles from user's selected watchlist
     if watched:
-        from backend.core.watchlist_auto_remove import auto_remove_from_watchlist
+        from core.watchlist_auto_remove import auto_remove_from_watchlist
 
         for mid in media_ids:
             await auto_remove_from_watchlist(db, user_id, mid)
