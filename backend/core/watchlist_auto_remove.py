@@ -34,7 +34,7 @@ async def auto_remove_from_watchlist(
     # 2. Find the list item
     result = await db.execute(
         select(ListItem)
-        .options(selectinload(ListItem.media))
+        .options(selectinload(ListItem.media), selectinload(ListItem.list))
         .join(List, List.id == ListItem.list_id)
         .where(
             ListItem.list_id == list_id,
