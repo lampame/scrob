@@ -266,7 +266,7 @@ if (me.totp_enabled) {
                 Select a list to use as your watchlist. Watched titles will be automatically removed from it.
               </p>
             </div>
-            <select name="watchlist_auto_remove_id" id="watchlist-auto-remove-select" class="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm text-zinc-200 max-w-[200px]">
+            <select name="watchlist_auto_remove_id" id="watchlist-auto-remove-select" data-current-id={settings.watchlist_auto_remove_id ?? ''} class="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm text-zinc-200 max-w-[200px]">
               <option value="">— Disabled —</option>
               <!-- Populated dynamically -->
             </select>
@@ -1763,6 +1763,9 @@ if (me.totp_enabled) {
   // Watchlist auto-remove setting
   const watchlistSelect = document.getElementById('watchlist-auto-remove-select') as HTMLSelectElement | null;
   if (watchlistSelect) {
+    // Store current value from server-rendered settings
+    const currentWatchlistId = watchlistSelect.dataset.currentId || '';
+
     async function populateWatchlistSelect() {
       try {
         const tok = (document.getElementById('app-data') as HTMLElement | null)?.dataset.token ?? '';
@@ -1771,13 +1774,12 @@ if (me.totp_enabled) {
         });
         if (res.ok) {
           const lists = await res.json();
-          const currentId = settings.watchlist_auto_remove_id;
           watchlistSelect.innerHTML = '<option value="">— Disabled —</option>';
           for (const list of lists) {
             const option = document.createElement('option');
-            option.value = list.id;
-            option.textContent = list.name + (list.item_count ? ` (${list.item_count})` : '');
-            if (list.id === currentId) option.selected = true;
+            option.value = String(list.id);
+            option.textContent = list.name + (list.item_count != null ? ` (${list.item_count})` : '');
+            if (String(list.id) === currentWatchlistId) option.selected = true;
             watchlistSelect.appendChild(option);
           }
         }
