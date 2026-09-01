@@ -120,7 +120,7 @@ jobs:
         run: |
           LATEST="${{ steps.resolve.outputs.latest }}"
           BR="sync/${LATEST#upstream/}"
-          git push origin "$BR"
+          git push --force-with-lease origin "$BR"
 
       - name: Ensure sync label exists
         if: steps.check.outputs.already_merged == 'false'
