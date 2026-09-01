@@ -234,6 +234,37 @@ All messages are JSON objects:
 }
 ```
 
+### Drop
+
+| Event | Description |
+|---|---|
+| `show.dropped` | Show added to dropped (excluded from Next Up, Calendar, Discover) |
+| `show.undropped` | Show removed from dropped |
+| `movie.dropped` | Movie added to dropped (excluded from Continue Watching, Discover) |
+| `movie.undropped` | Movie removed from dropped |
+
+```json
+{
+  "type": "show.dropped",
+  "payload": {
+    "show_id": 123,
+    "tmdb_id": 456,
+    "title": "Breaking Bad"
+  }
+}
+```
+
+```json
+{
+  "type": "movie.dropped",
+  "payload": {
+    "media_id": 789,
+    "tmdb_id": 12345,
+    "title": "Inception"
+  }
+}
+```
+
 ---
 
 ## Error Handling

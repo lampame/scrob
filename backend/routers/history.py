@@ -1352,6 +1352,19 @@ async def drop_show(
     show = show_result.scalar_one_or_none()
     if show and show.tmdb_id:
         await _push_show_dropped_to_providers(db, settings, show.tmdb_id, remove=False)
+
+    # Emit real-time event to socket subscribers
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="show.dropped",
+        payload={
+            "show_id": body.show_id,
+            "tmdb_id": show.tmdb_id if show else None,
+            "title": show.title if show else None,
+        },
+    )
+
     return {"status": "ok"}
 
 
@@ -1377,6 +1390,19 @@ async def undrop_show(
     show = show_result.scalar_one_or_none()
     if show and show.tmdb_id:
         await _push_show_dropped_to_providers(db, settings, show.tmdb_id, remove=True)
+
+    # Emit real-time event to socket subscribers
+    from core.socket.manager import socket_manager
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="show.undropped",
+        payload={
+            "show_id": show_id,
+            "tmdb_id": show.tmdb_id if show else None,
+            "title": show.title if show else None,
+        },
+    )
+
     return {"status": "ok"}
 
 
@@ -1447,6 +1473,21 @@ async def drop_movie(
         settings.dropped_movies = dropped
         flag_modified(settings, "dropped_movies")
         await db.commit()
+
+    # Emit real-time event to socket subscribers
+    from core.socket.manager import socket_manager
+    media_result = await db.execute(select(Media).where(Media.id == media_id))
+    media = media_result.scalar_one_or_none()
+    await socket_manager.emit(
+        username=current_user.username,
+        event_type="movie.dropped",
+        payload={
+            "media_id": media_id,
+            "tmdb_id": media.tmdb_id if media else body.tmdb_id,
+            "title": media.title if media else None,
+        },
+    )
+
     return {"status": "ok"}
 
 
@@ -1459,6 +1500,7 @@ async def undrop_movie(
 ):
     settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
     settings = settings_result.scalar_one_or_none()
+    resolved = None
     if settings:
         resolved = await _resolve_movie_media_id(db, current_user.id, media_id, tmdb_id, create=False)
         dropped = list(settings.dropped_movies or [])
@@ -1467,6 +1509,22 @@ async def undrop_movie(
             settings.dropped_movies = dropped
             flag_modified(settings, "dropped_movies")
             await db.commit()
+
+    # Emit real-time event to socket subscribers
+    if resolved:
+        from core.socket.manager import socket_manager
+        media_result = await db.execute(select(Media).where(Media.id == resolved))
+        media = media_result.scalar_one_or_none()
+        await socket_manager.emit(
+            username=current_user.username,
+            event_type="movie.undropped",
+            payload={
+                "media_id": resolved,
+                "tmdb_id": media.tmdb_id if media else tmdb_id,
+                "title": media.title if media else None,
+            },
+        )
+
     return {"status": "ok"}
 
 
