@@ -1,6 +1,7 @@
 """Auto-remove watched titles from user's selected watchlist."""
 
 import asyncio
+import logging
 from typing import Optional
 
 from sqlalchemy import select
@@ -9,6 +10,8 @@ from sqlalchemy.orm import selectinload
 
 from models.lists import List, ListItem
 from models.users import UserSettings
+
+logger = logging.getLogger(__name__)
 
 
 async def auto_remove_from_watchlist(
@@ -29,6 +32,7 @@ async def auto_remove_from_watchlist(
     list_id: Optional[int] = result.scalar_one_or_none()
 
     if list_id is None:
+        logger.debug("Auto-remove disabled for user %s (no watchlist_auto_remove_id)", user_id)
         return  # Auto-remove disabled
 
     # 2. Find the list item
@@ -45,12 +49,21 @@ async def auto_remove_from_watchlist(
     item = result.scalar_one_or_none()
 
     if item is None:
+        logger.debug(
+            "Title %s not found in watchlist %s for user %s",
+            media_id, list_id, user_id,
+        )
         return  # Title not in watchlist
 
     # 3. Capture data before delete
     lst = item.list if hasattr(item, "list") else None
     media = item.media
     season_number = item.season_number
+
+    logger.info(
+        "Auto-removing %s from watchlist %s for user %s",
+        media.title if media else media_id, list_id, user_id,
+    )
 
     # 4. Delete the item
     await db.delete(item)
@@ -75,7 +88,7 @@ async def auto_remove_from_watchlist(
     tasks = []
 
     if lst and lst.trakt_slug and media:
-        from backend.routers.lists import _push_list_item_to_trakt
+        from routers.lists import _push_list_item_to_trakt
 
         tasks.append(
             _push_list_item_to_trakt(
@@ -83,7 +96,7 @@ async def auto_remove_from_watchlist(
             )
         )
         if lst.trakt_slug == "__plex_watchlist__":
-            from backend.routers.lists import _push_list_item_to_plex_watchlist
+            from routers.lists import _push_list_item_to_plex_watchlist
 
             tasks.append(
                 _push_list_item_to_plex_watchlist(
@@ -92,7 +105,7 @@ async def auto_remove_from_watchlist(
             )
 
     if lst and lst.mdblist_slug and media:
-        from backend.routers.lists import _push_list_item_to_mdblist
+        from routers.lists import _push_list_item_to_mdblist
 
         tasks.append(
             _push_list_item_to_mdblist(
