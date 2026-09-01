@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from models.lists import List, ListItem
 from models.media import Media
+from models.show import Show
 from models.users import UserSettings
 
 logger = logging.getLogger(__name__)
@@ -49,25 +50,43 @@ async def auto_remove_from_watchlist(
     )
     item = result.scalar_one_or_none()
 
-    # For series: if not found by episode media_id, try finding by show_id
+    # For series: if not found by episode media_id, find the show's Media record
     if item is None:
+        # Get the episode's show_id (references shows.id)
         media_result = await db.execute(
             select(Media.show_id).where(Media.id == media_id)
         )
-        show_id: Optional[int] = media_result.scalar_one_or_none()
+        episode_show_id: Optional[int] = media_result.scalar_one_or_none()
 
-        if show_id is not None:
-            result = await db.execute(
-                select(ListItem)
-                .options(selectinload(ListItem.media), selectinload(ListItem.list))
-                .join(List, List.id == ListItem.list_id)
-                .where(
-                    ListItem.list_id == list_id,
-                    ListItem.media_id == show_id,
-                    List.user_id == user_id,
-                )
+        if episode_show_id is not None:
+            # Get the show's tmdb_id
+            show_result = await db.execute(
+                select(Show.tmdb_id).where(Show.id == episode_show_id)
             )
-            item = result.scalar_one_or_none()
+            show_tmdb_id: Optional[int] = show_result.scalar_one_or_none()
+
+            if show_tmdb_id is not None:
+                # Find the Media record for the show (media_type='series')
+                show_media_result = await db.execute(
+                    select(Media.id).where(
+                        Media.tmdb_id == show_tmdb_id,
+                        Media.media_type == "series",
+                    )
+                )
+                show_media_id: Optional[int] = show_media_result.scalar_one_or_none()
+
+                if show_media_id is not None:
+                    result = await db.execute(
+                        select(ListItem)
+                        .options(selectinload(ListItem.media), selectinload(ListItem.list))
+                        .join(List, List.id == ListItem.list_id)
+                        .where(
+                            ListItem.list_id == list_id,
+                            ListItem.media_id == show_media_id,
+                            List.user_id == user_id,
+                        )
+                    )
+                    item = result.scalar_one_or_none()
 
     if item is None:
         logger.debug(
