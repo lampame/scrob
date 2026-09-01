@@ -71,8 +71,13 @@ async def auto_remove_from_watchlist(
 
     # 5. Emit socket event
     from core.socket.manager import socket_manager
+    from models.users import User
+
+    user_result = await db.execute(select(User.username).where(User.id == user_id))
+    username = user_result.scalar_one_or_none() or str(user_id)
 
     await socket_manager.emit(
+        username=username,
         event_type="list.item_removed",
         payload={
             "list_id": list_id,
