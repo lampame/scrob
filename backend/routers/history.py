@@ -383,15 +383,22 @@ async def get_history(
 ):
     offset = (page - 1) * page_size
 
+    # Watch history is movie/episode only. A watched show or season is a
+    # derived state (all of its episodes watched), never a watch event of its
+    # own - so a series-level row is always junk from an older buggy import
+    # path. Constrain every history query to the two real types so those rows
+    # can't surface (they previously leaked into the unfiltered "All" tab and
+    # then 404'd trying to open as a movie). See #358.
+    type_filter = [type] if type in ("movie", "episode") else ["movie", "episode"]
+
     base_query = (
         select(func.count())
         .select_from(WatchEvent)
         .join(Media, Media.id == WatchEvent.media_id)
         .where(WatchEvent.user_id == current_user.id)
         .where(WatchEvent.completed == True)
+        .where(Media.media_type.in_(type_filter))
     )
-    if type and type in ("movie", "episode"):
-        base_query = base_query.where(Media.media_type == type)
 
     total_result = await db.execute(base_query)
     total_count = total_result.scalar_one()
@@ -403,10 +410,9 @@ async def get_history(
         .options(selectinload(WatchEvent.media).selectinload(Media.show))
         .where(WatchEvent.user_id == current_user.id)
         .where(WatchEvent.completed == True)
+        .where(Media.media_type.in_(type_filter))
         .order_by(WatchEvent.watched_at.desc().nulls_last(), WatchEvent.id.desc())
     )
-    if type and type in ("movie", "episode"):
-        query = query.where(Media.media_type == type)
 
     query = query.offset(offset).limit(page_size)
 
@@ -1714,6 +1720,16 @@ async def mark_as_watched(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_or_api_key),
 ):
+    # A watch event is only ever a movie or an episode. Marking a whole show or
+    # season watched is a bulk-of-episodes operation and has its own endpoints
+    # (/history/show-all, /history/season) - accepting media_type=series here
+    # would create a bogus series-level watch event. See #358.
+    if event_in.media_type not in (MediaType.movie, MediaType.episode):
+        raise HTTPException(
+            status_code=422,
+            detail="media_type must be 'movie' or 'episode'; use /history/show-all or /history/season to mark a show or season watched",
+        )
+
     # 1. Check if Media exists locally
     media = None
     show = None
@@ -2789,6 +2805,11 @@ async def start_manual_session(
     current_user: User = Depends(get_current_user_or_api_key),
 ):
     """Start a manual scrobble session for any movie or episode."""
+    # A session completes into a watch event, which is movie/episode only - a
+    # series-type session would produce a bogus series-level watch event. #358.
+    if body.media_type not in (MediaType.movie, MediaType.episode):
+        raise HTTPException(status_code=422, detail="media_type must be 'movie' or 'episode'")
+
     media = await _get_or_create_media_for_session(db, body, current_user.id)
 
     if media.runtime is None and body.runtime:

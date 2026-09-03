@@ -4006,20 +4006,20 @@ async def _apply_nuvio_watch_history(
     include_unknown_dates: bool = False,
     dedupe_by_media_id_only: bool = False,
 ) -> set[int]:
+    # Only movies are "standalone" watch targets. A show-level row (no
+    # season/episode) is a rollup of its episodes and is skipped below, so it
+    # never needs a Media lookup here. See #358.
     standalone_tmdb_ids = {
         tmdb_id
         for row in rows
-        if (
-            str(row.get("content_type") or "").lower() == "movie"
-            or (row.get("season") is None and row.get("episode") is None)
-        )
+        if str(row.get("content_type") or "").lower() == "movie"
         if (tmdb_id := tmdb_ids.get(str(row.get("content_id") or ""))) is not None
     }
     standalone_by_key: dict[tuple[MediaType, int], Media] = {}
     if standalone_tmdb_ids:
         result = await db.execute(
             select(Media).where(
-                Media.media_type.in_([MediaType.movie, MediaType.series]),
+                Media.media_type == MediaType.movie,
                 Media.tmdb_id.in_(standalone_tmdb_ids),
             )
         )
@@ -4059,7 +4059,11 @@ async def _apply_nuvio_watch_history(
         if content_type == "movie":
             media = standalone_by_key.get((MediaType.movie, tmdb_id))
         elif season is None or episode is None:
-            media = standalone_by_key.get((MediaType.series, tmdb_id))
+            # A show-level "watched" row (no season/episode) is a rollup of its
+            # episodes, not a watchable item - recording it would create a
+            # bogus series-level watch event alongside the real episode ones.
+            # See #358.
+            continue
         else:
             show_id = show_map.get(content_id)
             media = (

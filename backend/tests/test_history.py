@@ -236,6 +236,29 @@ class UnknownWatchDateTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class MarkAsWatchedTypeGuardTests(unittest.IsolatedAsyncioTestCase):
+    """A watch event is movie/episode only - a whole show or season is a
+    derived state, not its own event. #358."""
+
+    async def _mark(self, media_type: str):
+        db = _FakeSession([])
+        return await history.mark_as_watched(
+            WatchEventCreate(tmdb_id=97546, media_type=media_type),
+            db,
+            SimpleNamespace(id=7),
+        )
+
+    async def test_series_is_rejected(self) -> None:
+        with self.assertRaises(HTTPException) as ctx:
+            await self._mark("series")
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    async def test_person_is_rejected(self) -> None:
+        with self.assertRaises(HTTPException) as ctx:
+            await self._mark("person")
+        self.assertEqual(ctx.exception.status_code, 422)
+
+
 _SEASON_PAYLOAD = {
     "episodes": [
         {"episode_number": 1, "id": 999, "name": "Ep 1", "air_date": "2020-01-01", "vote_average": 8.0, "still_path": None},
