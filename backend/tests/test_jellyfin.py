@@ -280,6 +280,134 @@ class JellyfinFindByIdsProviderFilterMismatchTests(unittest.IsolatedAsyncioTestC
 
         self.assertIsNone(item)
 
+
+class JellyfinItemsBatchTests(unittest.IsolatedAsyncioTestCase):
+    """#362: the already-watched check in a full push used to be one
+    get_item call per item. get_items_batch/get_items_watched_state replace
+    that with Items?Ids= chunks - these confirm the request shape and that a
+    missing id is dropped rather than defaulted to unplayed."""
+
+    async def test_requests_user_scoped_path_with_ids_and_userdata_field(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"Items": [
+                {"Id": "a", "UserData": {"Played": True}},
+                {"Id": "b", "UserData": {"Played": False}},
+            ]})
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            jellyfin.httpx,
+            "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            items = await jellyfin.get_items_batch(
+                "http://jellyfin.local", "token", ["a", "b"], user_id="user-id",
+            )
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].url.path, "/Users/user-id/Items")
+        self.assertEqual(requests[0].url.params["Ids"], "a,b")
+        self.assertEqual(requests[0].url.params["Fields"], "UserData")
+        self.assertEqual(set(items.keys()), {"a", "b"})
+
+    async def test_admin_path_used_without_a_user_id(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/Items")
+            return httpx.Response(200, json={"Items": []})
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            jellyfin.httpx,
+            "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            await jellyfin.get_items_batch("http://jellyfin.local", "token", ["a"])
+
+    async def test_reuses_a_passed_in_client_instead_of_opening_a_new_one(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"Items": [{"Id": "a", "UserData": {"Played": True}}]})
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            jellyfin.httpx,
+            "AsyncClient",
+            side_effect=lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not open a new client")),
+        ):
+            async with _REAL_ASYNC_CLIENT(transport=transport) as shared_client:
+                items = await jellyfin.get_items_batch(
+                    "http://jellyfin.local", "token", ["a"], client=shared_client,
+                )
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(items["a"]["UserData"]["Played"], True)
+
+    async def test_empty_id_list_short_circuits_without_a_request(self) -> None:
+        with patch.object(
+            jellyfin.httpx,
+            "AsyncClient",
+            side_effect=lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not make a request")),
+        ):
+            self.assertEqual(await jellyfin.get_items_batch("http://jellyfin.local", "token", []), {})
+
+    async def test_network_error_returns_empty_dict_not_an_exception(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500)
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            jellyfin.httpx,
+            "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            items = await jellyfin.get_items_batch("http://jellyfin.local", "token", ["a"])
+
+        self.assertEqual(items, {})
+
+    async def test_watched_state_chunks_past_100_ids_into_multiple_requests(self) -> None:
+        seen_id_counts: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            ids = request.url.params["Ids"].split(",")
+            seen_id_counts.append(len(ids))
+            return httpx.Response(200, json={
+                "Items": [{"Id": i, "UserData": {"Played": True}} for i in ids],
+            })
+
+        transport = httpx.MockTransport(handler)
+        item_ids = [f"item-{i}" for i in range(150)]
+        with patch.object(
+            jellyfin.httpx,
+            "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            state = await jellyfin.get_items_watched_state("http://jellyfin.local", "token", item_ids)
+
+        self.assertEqual(sorted(seen_id_counts), [50, 100])
+        self.assertEqual(len(state), 150)
+        self.assertTrue(all(state.values()))
+
+    async def test_watched_state_omits_ids_missing_from_the_server(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            # Only "a" still exists on the server - "b" was deleted.
+            return httpx.Response(200, json={"Items": [{"Id": "a", "UserData": {"Played": False}}]})
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            jellyfin.httpx,
+            "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            state = await jellyfin.get_items_watched_state("http://jellyfin.local", "token", ["a", "b"])
+
+        self.assertEqual(state, {"a": False})
+        self.assertNotIn("b", state)
+
     async def test_find_episode_by_ids_skips_a_wrong_first_series_result(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/Items" and request.url.params.get("IncludeItemTypes") == "Series":
