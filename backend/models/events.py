@@ -18,6 +18,15 @@ class WatchEvent(Base):
     user_id          : Mapped[int]             = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     media_id         : Mapped[int]             = mapped_column(ForeignKey("media.id", ondelete="CASCADE"), nullable=False)
     watched_at       : Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # When this row was inserted - distinct from watched_at, which is when the
+    # user says they watched it (possibly long ago, possibly unknown/NULL).
+    # Needed to bound the webhook duplicate-delivery guard for an unknown-dated
+    # event (see routers/webhooks.py:_write_watch_event and GitHub #355) -
+    # without it, that guard has no way to tell "this null-dated row was just
+    # inserted a second ago" from "this null-dated row is three years old",
+    # and treating every null-dated event as a permanent duplicate marker
+    # silently blocks all future real rewatches of that title.
+    created_at       : Mapped[datetime]        = mapped_column(DateTime, server_default=func.now(), nullable=False)
     progress_seconds : Mapped[Optional[int]]   = mapped_column(Integer)
     progress_percent : Mapped[Optional[float]] = mapped_column(Float)
     completed        : Mapped[bool]            = mapped_column(Boolean, default=False, nullable=False)
