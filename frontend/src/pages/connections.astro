@@ -5549,7 +5549,11 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
     let srcSeason = 0;
     let targetTmdbId = 0;
     let targetTvdbId = 0;
-    let targetSeasonNumber = 0;
+    // null = nothing picked yet, distinct from a legitimately-selected Season 0
+    // (TVDB stores specials/OVAs there for many anime - see #363). 0 is falsy
+    // in JS, so a plain `!targetSeasonNumber` check would reject it even once
+    // it's selected.
+    let targetSeasonNumber: number | null = null;
     let modalMode: 'remap' | 'match' | 'match-movie' = 'remap';
     let matchSeriesName = '';
     let matchMovieTitle = '';
@@ -5568,7 +5572,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
       (document.getElementById('remap-error') as HTMLElement).classList.add('hidden');
       targetTmdbId = 0;
       targetTvdbId = 0;
-      targetSeasonNumber = 0;
+      targetSeasonNumber = null;
       modalMode = 'remap';
       matchSeriesName = '';
       matchMovieTitle = '';
@@ -5620,7 +5624,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
       (document.getElementById('remap-save') as HTMLButtonElement).disabled = true;
       targetTmdbId = 0;
       targetTvdbId = 0;
-      targetSeasonNumber = 0;
+      targetSeasonNumber = null;
     });
 
     const searchInput = document.getElementById('remap-search-input') as HTMLInputElement;
@@ -5652,7 +5656,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
           targetTmdbId = tmdbId;
           targetTvdbId = 0;
         }
-        targetSeasonNumber = 0;
+        targetSeasonNumber = null;
         (document.getElementById('remap-selected-poster') as HTMLImageElement).src = btn.dataset.poster ?? '';
         (document.getElementById('remap-selected-title') as HTMLElement).textContent = btn.dataset.title ?? '';
         (document.getElementById('remap-selected-year') as HTMLElement).textContent = btn.dataset.year ?? '';
@@ -5684,7 +5688,9 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
             headers: { 'Authorization': `Bearer ${token}` },
           });
           const showData = showRes.ok ? await showRes.json() : null;
-          const seasons: any[] = (showData?.seasons_meta ?? []).filter((s: any) => s.season_number > 0);
+          // >= 0, not > 0 - TVDB stores specials/OVAs in Season 0 for a lot of
+          // anime, and that's a legitimate remap target (#363).
+          const seasons: any[] = (showData?.seasons_meta ?? []).filter((s: any) => s.season_number >= 0);
           seasonsLoading.classList.add('hidden');
           if (!seasons.length) {
             seasonsList.innerHTML = '<p class="text-xs text-zinc-500 py-1">No seasons found.</p>';
@@ -5853,7 +5859,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
       }
 
       // Remap mode
-      if ((!targetTmdbId && !targetTvdbId) || !targetSeasonNumber) return;
+      if ((!targetTmdbId && !targetTvdbId) || targetSeasonNumber === null) return;
       saveBtn.textContent = 'Saving…';
       try {
         const remapBody: any = {
