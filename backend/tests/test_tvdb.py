@@ -153,5 +153,59 @@ class SubscriberPinTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bodies[0]["pin"], "TYPED")
 
 
+class SearchSeriesYearFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """#364: TVDB's /search sometimes omits "year" even though the result has
+    a first_air_time (and, separately, sometimes has neither at all) - two
+    remakes sharing a title then render identically and can't be told apart.
+    search_series must fall back to first_air_time, and always include
+    tvdb_id/status/network so there's an unambiguous identifier either way."""
+
+    def setUp(self) -> None:
+        tvdb._cache._store.clear()
+        tvdb._token_cache.clear()
+
+    def _handler(self, items: list[dict]):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/login"):
+                return httpx.Response(200, json={"data": {"token": "tok"}})
+            return httpx.Response(200, json={"data": items})
+        return handler
+
+    async def _search(self, items: list[dict]) -> list[dict]:
+        transport = httpx.MockTransport(self._handler(items))
+        with patch.object(
+            tvdb.httpx, "AsyncClient", side_effect=lambda **kw: _REAL_ASYNC_CLIENT(transport=transport, **kw),
+        ):
+            return await tvdb.search_series("query", "key")
+
+    async def test_year_used_when_present(self) -> None:
+        results = await self._search([
+            {"tvdb_id": "1", "name": "Show", "year": "1989", "first_air_time": "1989-04-15"},
+        ])
+        self.assertEqual(results[0]["year"], "1989")
+
+    async def test_falls_back_to_first_air_time_when_year_missing(self) -> None:
+        results = await self._search([
+            {"tvdb_id": "2", "name": "Show (2024)", "first_air_time": "2024-10-06"},
+        ])
+        self.assertEqual(results[0]["year"], "2024")
+
+    async def test_year_is_none_when_neither_field_is_present(self) -> None:
+        # A real TVDB result (Tenali Rama, id 270090) has neither - must not
+        # crash slicing a missing string, and must not fabricate a year.
+        results = await self._search([{"tvdb_id": "3", "name": "Show"}])
+        self.assertIsNone(results[0]["year"])
+
+    async def test_tvdb_id_status_and_network_always_pass_through(self) -> None:
+        # These are what let two identically-titled, year-less remakes still
+        # be told apart in the remap UI.
+        results = await self._search([
+            {"tvdb_id": "4", "name": "Show", "status": "Ended", "network": "Fuji TV"},
+        ])
+        self.assertEqual(results[0]["tvdb_id"], 4)
+        self.assertEqual(results[0]["status"], "Ended")
+        self.assertEqual(results[0]["network"], "Fuji TV")
+
+
 if __name__ == "__main__":
     unittest.main()

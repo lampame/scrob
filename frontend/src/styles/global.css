@@ -296,6 +296,17 @@ nav, div, a, button, input, span {
   pointer-events: none; /* Prevent link clicks while dragging */
 }
 
+/* Plain scrollbar hiding for an ordinary vertical list (search results
+   dropdowns, etc.) - unlike .scrollbar-none above, this carries none of the
+   grab-cursor/drag-to-scroll behavior meant for horizontal media rows. */
+.scrollbar-hidden {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+}
+
 /* ── Explicit content blur ──────────────────────────────────────────────── */
 html.blur-explicit [data-adult="true"] img {
   filter: blur(24px);
