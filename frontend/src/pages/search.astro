@@ -13,6 +13,7 @@ const year = Astro.url.searchParams.get("year") ? Number(Astro.url.searchParams.
 const inLibrary = Astro.url.searchParams.get("in_library") === "true";
 
 const isUserSearch = type === "user";
+const isStudioSearch = type === "network" || type === "studio";
 const showYearFilter = (type === "movie" || type === "series") && !inLibrary;
 
 let hasTmdbKey = false;
@@ -66,6 +67,8 @@ const tabs: [string | undefined, string][] = [
   ["episode",      "Episodes"],
   ["person",       "People"],
   ["collection",   "Collections"],
+  ["network",      "Networks"],
+  ["studio",       "Studios"],
   // Searching for other users has no anonymous use case.
   ...(currentUser ? ([["user", "Users"]] as [string, string][]) : []),
 ];
@@ -95,7 +98,7 @@ const tabs: [string | undefined, string][] = [
     </div>
 
     <div class="flex items-center gap-2">
-      {currentUser && !isUserSearch && type !== "person" && type !== "collection" && (
+      {currentUser && !isUserSearch && !isStudioSearch && type !== "person" && type !== "collection" && (
         <a
           href={`/search?q=${encodeURIComponent(q)}${type ? `&type=${type}` : ""}${!inLibrary ? "&in_library=true" : ""}`}
           class={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium border transition ${inLibrary ? 'bg-blue-600/20 border-blue-500/40 text-blue-400' : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100'}`}
@@ -211,7 +214,34 @@ const tabs: [string | undefined, string][] = [
     </div>
   )}
 
-  {!isUserSearch && (
+  {!isUserSearch && isStudioSearch && results.length > 0 && (
+    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+      {results.map((item) => (
+        <a
+          href={`/${item.type === "network" ? "network" : "studio"}/${item.tmdb_id}`}
+          class="group flex flex-col items-center justify-center gap-3 p-5 h-36 rounded-2xl bg-zinc-900 border border-zinc-800 hover:border-blue-500/50 hover:-translate-y-1 transition-all text-center"
+        >
+          {item.logo_path ? (
+            <>
+              <div class="logo-swatch backdrop-blur-sm border border-gray-200/60 rounded-lg px-3 py-2 flex items-center justify-center">
+                <img src={item.logo_path} alt={item.title} class="h-8 max-w-[120px] object-contain" loading="lazy" />
+              </div>
+              <span class="text-xs text-zinc-500 truncate max-w-full">
+                {item.title}{item.origin_country ? ` · ${item.origin_country}` : ""}
+              </span>
+            </>
+          ) : (
+            <>
+              <span class="text-base font-bold text-zinc-100 group-hover:text-blue-400 transition-colors">{item.title}</span>
+              {item.origin_country && <span class="text-xs text-zinc-500">{item.origin_country}</span>}
+            </>
+          )}
+        </a>
+      ))}
+    </div>
+  )}
+
+  {!isUserSearch && !isStudioSearch && (
     <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
       {results.map((item) => (
         <MediaCard item={item} />

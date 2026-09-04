@@ -130,11 +130,27 @@ const originalLanguage = show?.original_language
                   </span>
                 )}
               </div>
-              {show.network && (
-                <div class="bg-zinc-900/40 p-3 rounded-xl border border-zinc-800/50 backdrop-blur-sm flex items-center">
-                  <span class="text-zinc-400 text-xs font-semibold">{show.network}</span>
-                </div>
-              )}
+              {(() => {
+                const withLogo = (show.networks ?? []).filter(n => n.logo_path).slice(0, 3);
+                if (withLogo.length) {
+                  return (
+                    <div class="flex flex-wrap items-center gap-2">
+                      {withLogo.map(n => {
+                        const inner = <div class="logo-swatch backdrop-blur-sm p-3 rounded-xl border border-gray-200/60 flex items-center"><img src={n.logo_path!} alt={n.name} title={n.name} class="h-5 max-w-[80px] object-contain" loading="lazy" /></div>;
+                        return n.id != null
+                          ? <a href={`/network/${n.id}`} title={`More from ${n.name}`} class="transition hover:brightness-110">{inner}</a>
+                          : inner;
+                      })}
+                    </div>
+                  );
+                }
+                const name = show.networks?.[0]?.name || show.network;
+                return name ? (
+                  <div class="bg-zinc-900/40 p-3 rounded-xl border border-zinc-800/50 backdrop-blur-sm flex items-center">
+                    <span class="text-zinc-400 text-xs font-semibold">{name}</span>
+                  </div>
+                ) : null;
+              })()}
             </div>
 
             {user && (

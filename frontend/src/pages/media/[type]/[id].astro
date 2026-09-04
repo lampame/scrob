@@ -218,7 +218,19 @@ const refreshUrl = isEpisode
                   </span>
                 )}
               </div>
-              {!isEpisode && (() => { const c = item.production_companies?.find(c => c.logo_path); return c ? <div class="bg-zinc-900/40 p-3 rounded-xl border border-zinc-800/50 backdrop-blur-sm flex items-center"><img src={c.logo_path!} alt={c.name} title={c.name} class="h-5 max-w-[80px] object-contain" loading="lazy" /></div> : null; })()}
+              {!isEpisode && (() => {
+                const cos = (item.production_companies ?? []).filter(c => c.logo_path).slice(0, 3);
+                return cos.length ? (
+                  <div class="flex flex-wrap items-center gap-2">
+                    {cos.map(c => {
+                      const inner = <div class="logo-swatch backdrop-blur-sm p-3 rounded-xl border border-gray-200/60 flex items-center"><img src={c.logo_path!} alt={c.name} title={c.name} class="h-5 max-w-[80px] object-contain" loading="lazy" /></div>;
+                      return c.id != null
+                        ? <a href={`/studio/${c.id}`} title={`More from ${c.name}`} class="transition hover:brightness-110">{inner}</a>
+                        : inner;
+                    })}
+                  </div>
+                ) : null;
+              })()}
             </div>
 
             {user && (

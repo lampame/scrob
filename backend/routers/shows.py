@@ -2167,9 +2167,23 @@ async def get_tvdb_show(
         else []
     )
 
-    # Networks (name only; TVDB doesn't provide logos)
-    networks = [{"id": None, "name": n.get("name"), "logo_path": None, "origin_country": None}
-                for n in (raw.get("networks") or []) if n.get("name")]
+    # Prefer TMDB's networks - they carry the id + logo the /network/{id} link
+    # needs, and a TVDB-ordered show still has a TMDB counterpart here whenever
+    # tmdb_id_cross is set. TVDB's own network list (name only, often empty) is
+    # just the fallback for a show with no TMDB presence at all.
+    if tmdb_show.get("networks"):
+        networks = [
+            {
+                "id": n["id"],
+                "name": n["name"],
+                "logo_path": tmdb.poster_url(n.get("logo_path"), size="w500") if n.get("logo_path") else None,
+                "origin_country": n.get("origin_country"),
+            }
+            for n in tmdb_show["networks"]
+        ]
+    else:
+        networks = [{"id": None, "name": n.get("name"), "logo_path": None, "origin_country": None}
+                    for n in (raw.get("networks") or []) if n.get("name")]
 
     rewatch_info = None
     if show:

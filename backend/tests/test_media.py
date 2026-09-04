@@ -1,10 +1,14 @@
 import os
 import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
 
+from models.base import MediaType
 from models.episode_order import EpisodeOrderMapping, UserShowEpisodeOrder
+from routers import media as media_router
 from routers.media import _attach_episode_order_fields, _resolve_add_overrides, RequestOverrides
 
 
@@ -141,6 +145,64 @@ class ResolveAddOverridesTests(unittest.TestCase):
 
     def test_no_overrides_sent_is_a_noop_for_a_non_admin(self) -> None:
         self.assertIsNone(_resolve_add_overrides(None, False))
+
+
+class _FakeExecResult:
+    def all(self):
+        return []
+
+    def scalars(self):
+        return self
+
+    def first(self):
+        return None
+
+
+class TmdbListStudioParamsTests(unittest.IsolatedAsyncioTestCase):
+    """/media/tmdb/list with network=/company= drives the /network/{id} and
+    /studio/{id} browse pages: network is TV-only and the vote-count floor is
+    dropped so a whole back-catalogue shows."""
+
+    async def _call(self, **kwargs):
+        base = dict(
+            type=MediaType.movie, category="popular", page=1, genre=[], year=[],
+            min_rating=None, status=None, original_language=None, network=None,
+            company=None, collection=[], watch=[], arr=[], in_list=[],
+            db=SimpleNamespace(execute=AsyncMock(return_value=_FakeExecResult())),
+            current_user=SimpleNamespace(id=7),
+        )
+        base.update(kwargs)
+        discover_shows = AsyncMock(return_value={"results": [], "page": 1, "total_pages": 1, "total_results": 0})
+        discover_movies = AsyncMock(return_value={"results": [], "page": 1, "total_pages": 1, "total_results": 0})
+        with patch.object(media_router, "get_user_tmdb_key", AsyncMock(return_value="k")), \
+             patch.object(media_router, "check_tmdb_key", lambda _k: True), \
+             patch.object(media_router, "get_user_metadata_language", AsyncMock(return_value=None)), \
+             patch.object(media_router, "enrich_with_state", AsyncMock(side_effect=lambda db, uid, items: items)), \
+             patch.object(media_router.tmdb, "discover_shows", discover_shows), \
+             patch.object(media_router.tmdb, "discover_movies", discover_movies):
+            await media_router.get_tmdb_list(**base)
+        return discover_shows, discover_movies
+
+    async def test_network_forces_series_and_zero_vote_floor(self) -> None:
+        shows, movies = await self._call(type=MediaType.movie, network=9)
+        movies.assert_not_called()
+        shows.assert_awaited_once()
+        kw = shows.await_args.kwargs
+        self.assertEqual(kw["with_networks"], 9)
+        self.assertEqual(kw["vote_count_min"], 0)
+
+    async def test_company_passes_with_companies_to_movies(self) -> None:
+        shows, movies = await self._call(type=MediaType.movie, company=1957)
+        movies.assert_awaited_once()
+        kw = movies.await_args.kwargs
+        self.assertEqual(kw["with_companies"], 1957)
+        self.assertEqual(kw["vote_count_min"], 0)
+
+    async def test_plain_list_keeps_default_vote_floor(self) -> None:
+        shows, movies = await self._call(type=MediaType.series, genre=["Drama"])
+        shows.assert_awaited_once()
+        self.assertIsNone(shows.await_args.kwargs["vote_count_min"])
+        self.assertIsNone(shows.await_args.kwargs["with_networks"])
 
 
 if __name__ == "__main__":

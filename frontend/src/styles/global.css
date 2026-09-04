@@ -247,6 +247,14 @@ html.light [data-action="request"][data-state="active"]:hover {
   background-color: #ffedd5; color: #7c2d12; /* orange-100 / orange-900 */
 }
 
+/* Network/studio logo swatch (show/movie badges, /network & /studio pages,
+   discover row, search results) - always a light backing so dark-colored
+   logos stay legible regardless of theme. Less translucent in dark mode,
+   where the near-black page behind it would otherwise wash the white toward
+   gray and undo the contrast it's there for. */
+.logo-swatch { background-color: rgba(255, 255, 255, 0.85); }
+html.light .logo-swatch { background-color: rgba(255, 255, 255, 0.6); }
+
 html.light .item-rating { color: #fbbf24; /* amber-400 */ }
 
 /* Post/mid-credits scene badge - amber-400 text is illegible on a white
