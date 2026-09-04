@@ -788,5 +788,77 @@ class RatePromptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["media"]["poster_path"], "/show.jpg")
 
 
+class ManualSessionEpisodeShowLinkTests(unittest.IsolatedAsyncioTestCase):
+    """#366: starting a manual session for an episode of a show never added
+    to Scrob before used to only ever look an existing local Show up, never
+    create one - the episode's Media row landed with show_id=None, and the
+    Now Playing bar (which sources an episode's title/poster/link from its
+    linked Show) showed a blank poster, the bare episode title, and no link
+    at all. Same root cause class as #192's webhook fast-path gap."""
+
+    def _body(self, show_tmdb_id=9999):
+        return SimpleNamespace(
+            media_id=None, tmdb_id=42, media_type=MediaType.episode,
+            title="Episode 1", runtime=46, show_tmdb_id=show_tmdb_id,
+            season_number=1, episode_number=1,
+        )
+
+    async def test_unknown_show_is_created_and_linked(self):
+        # First queued result: the "does a Media row for this tmdb_id already
+        # exist" lookup at the top of the function (miss, since body.tmdb_id
+        # is set) - then the Show lookup (also a miss).
+        db = _FakeSession([None, None])
+        new_show = SimpleNamespace(id=99, tmdb_id=9999, title="The Murder Detective", poster_path="/show.jpg")
+        media_stub = SimpleNamespace(id=10, show_id=None)
+        with patch("routers.history.get_user_tmdb_key", new_callable=AsyncMock, return_value="k"), \
+             patch("routers.webhooks._find_or_create_show", new_callable=AsyncMock, return_value=new_show) as find_or_create, \
+             patch("routers.history.create_media_safely", new_callable=AsyncMock, return_value=(media_stub, True)) as create_media:
+            media = await history._get_or_create_media_for_session(db, self._body(), user_id=1)
+
+        find_or_create.assert_awaited_once_with(db, 9999, "k")
+        self.assertEqual(create_media.await_args.kwargs["show_id"], 99)
+        self.assertEqual(media.show_id, 99)
+
+    async def test_existing_local_show_is_reused_without_creating(self):
+        existing_show = SimpleNamespace(id=5, tmdb_id=9999)
+        db = _FakeSession([None, existing_show])
+        media_stub = SimpleNamespace(id=10, show_id=None)
+        with patch("routers.history.get_user_tmdb_key", new_callable=AsyncMock, return_value="k"), \
+             patch("routers.webhooks._find_or_create_show", new_callable=AsyncMock) as find_or_create, \
+             patch("routers.history.create_media_safely", new_callable=AsyncMock, return_value=(media_stub, True)) as create_media:
+            media = await history._get_or_create_media_for_session(db, self._body(), user_id=1)
+
+        find_or_create.assert_not_awaited()
+        self.assertEqual(create_media.await_args.kwargs["show_id"], 5)
+        self.assertEqual(media.show_id, 5)
+
+    async def test_no_tmdb_key_skips_show_creation_without_erroring(self):
+        db = _FakeSession([None, None])
+        media_stub = SimpleNamespace(id=10, show_id=None)
+        with patch("routers.history.get_user_tmdb_key", new_callable=AsyncMock, return_value=None), \
+             patch("routers.history.check_tmdb_key", return_value=False), \
+             patch("routers.webhooks._find_or_create_show", new_callable=AsyncMock) as find_or_create, \
+             patch("routers.history.create_media_safely", new_callable=AsyncMock, return_value=(media_stub, True)):
+            media = await history._get_or_create_media_for_session(db, self._body(), user_id=1)
+
+        find_or_create.assert_not_awaited()
+        self.assertIsNone(media.show_id)
+
+    async def test_no_show_tmdb_id_is_a_noop_for_show_linking(self):
+        # Only the top-of-function "existing Media for this tmdb_id" lookup
+        # runs - show_tmdb_id is None, so the Show-lookup branch is skipped
+        # entirely.
+        db = _FakeSession([None])
+        media_stub = SimpleNamespace(id=10, show_id=None)
+        with patch("routers.history.get_user_tmdb_key", new_callable=AsyncMock, return_value="k"), \
+             patch("routers.webhooks._find_or_create_show", new_callable=AsyncMock) as find_or_create, \
+             patch("routers.history.create_media_safely", new_callable=AsyncMock, return_value=(media_stub, True)) as create_media:
+            media = await history._get_or_create_media_for_session(db, self._body(show_tmdb_id=None), user_id=1)
+
+        find_or_create.assert_not_awaited()
+        self.assertIsNone(create_media.await_args.kwargs["show_id"])
+        self.assertIsNone(media.show_id)
+
+
 if __name__ == "__main__":
     unittest.main()

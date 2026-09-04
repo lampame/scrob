@@ -2775,13 +2775,25 @@ async def _get_or_create_media_for_session(
         except Exception:
             pass
     else:
-        # Episode: create a minimal row from request data
-        show_id = None
+        # Episode: create a minimal row from request data. If the show isn't
+        # in the local DB yet - e.g. starting a manual session from an
+        # episode page for a show never added to Scrob before - resolve or
+        # create it now instead of only ever looking one up. Without this,
+        # the episode's Media row ends up with no show_id, and the Now
+        # Playing bar (which sources an episode's title/poster/link from its
+        # linked Show) shows a blank poster, the bare episode title, and no
+        # link at all (#366 - same root cause class as #192's webhook
+        # fast-path gap, just on the manual-session path instead).
+        show = None
         if body.show_tmdb_id:
             show_q = await db.execute(select(Show).where(Show.tmdb_id == body.show_tmdb_id))
             show = show_q.scalar_one_or_none()
-            if show:
-                show_id = show.id
+            if not show and check_tmdb_key(api_key):
+                from routers.webhooks import _find_or_create_show
+                try:
+                    show = await _find_or_create_show(db, body.show_tmdb_id, api_key)
+                except Exception:
+                    show = None
         media, _created = await create_media_safely(
             db,
             body.tmdb_id,
@@ -2790,10 +2802,10 @@ async def _get_or_create_media_for_session(
             runtime=body.runtime,
             season_number=body.season_number,
             episode_number=body.episode_number,
-            show_id=show_id,
+            show_id=show.id if show else None,
         )
-        if show_id is not None and media.show_id is None:
-            media.show_id = show_id
+        if show is not None and media.show_id is None:
+            media.show_id = show.id
 
     return media
 
