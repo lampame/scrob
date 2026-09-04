@@ -5,6 +5,7 @@ import ActionBar from "../../components/ActionBar.astro";
 import CommentsSection from "../../components/CommentsSection.astro";
 import EpisodeOrderSelector from "../../components/EpisodeOrderSelector.astro";
 import { api, type Show } from "../../lib/api";
+import { countAiredRegularSeasons } from "../../lib/seasonCount";
 export const prerender = false;
 
 const { id } = Astro.params;
@@ -37,6 +38,14 @@ if (show?.episode_order === "tvdb" && show.tvdb_id) {
 const seasons = Object.entries(show?.seasons ?? {}).sort(
   ([a], [b]) => Number(a.replace("season_", "")) - Number(b.replace("season_", ""))
 );
+
+// "N Seasons" stat (#360) - Specials (season 0) and anything not aired yet
+// don't count, even though the season grid further down still lists them.
+// Falls back to a plain season-number count when seasons_meta (TMDB-backed,
+// carries air_date) isn't available at all.
+const seasonCount = show?.seasons_meta?.length
+  ? countAiredRegularSeasons(show.seasons_meta)
+  : seasons.filter(([k]) => Number(k.replace("season_", "")) > 0).length;
 
 const year = show?.first_air_date?.slice(0, 4) ?? null;
 const rating = show?.tmdb_rating ? show.tmdb_rating.toFixed(1) : null;
@@ -124,7 +133,7 @@ const originalLanguage = show?.original_language
                     <span class="text-lg leading-none">★</span> {rating}
                   </span>
                 )}
-                <span class="font-medium text-zinc-400">{show.seasons_meta?.length || seasons.length} Seasons</span>
+                <span class="font-medium text-zinc-400">{seasonCount} Season{seasonCount !== 1 ? "s" : ""}</span>
                 {show.age_rating && (
                   <span class="px-2 py-0.5 border border-zinc-600 rounded text-[10px] font-black text-zinc-400 tracking-widest">
                     {show.age_rating}
