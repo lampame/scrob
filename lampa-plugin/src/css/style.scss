@@ -1,0 +1,30 @@
+/* Scrob plugin styles */
+
+/* Header profile button avatar */
+.scrob-avatar {
+    width: 1.8em;
+    height: 1.8em;
+    border-radius: 50%;
+    object-fit: cover;
+    display: block;
+}
+
+/* Letter avatar: first letter of username on colored background */
+.scrob-avatar--letter {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.9em;
+    line-height: 1;
+    text-transform: uppercase;
+    user-select: none;
+}
+
+/* Larger avatar inside the profile selectbox list */
+.selectbox-item .scrob-avatar {
+    width: 2.6em;
+    height: 2.6em;
+    font-size: 1em;
+}
