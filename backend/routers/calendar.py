@@ -162,7 +162,15 @@ async def compute_calendar(db: AsyncSession, user_id: int) -> dict:
                     "show_id": show.id,
                     "show_tmdb_id": show.tmdb_id,
                     "show_tvdb_id": show.tvdb_id,
-                    "show_title": show.title,
+                    # show_title — локалізована назва (з уже отриманого live-запиту
+                    # вище, тією ж мовою метаданих користувача) — для показу.
+                    # show_original_title — мовно-незалежна оригінальна назва TMDB
+                    # (не залежить від language) — окремо, бо клієнти хешують по ній
+                    # прогрес перегляду (Lampa: Utils.hash(original_name)); підміняти
+                    # її локалізованою не можна — зламає прив'язку до збереженого
+                    # таймкоду.
+                    "show_title": detail.get("name") or show.title,
+                    "show_original_title": detail.get("original_name") or show.original_title or show.title,
                     "poster_path": show.poster_path,
                     "season_number": ep.get("season_number"),
                     "episode_number": ep.get("episode_number"),
