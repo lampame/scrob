@@ -72,11 +72,28 @@ const tabs: [string | undefined, string][] = [
   // Searching for other users has no anonymous use case.
   ...(currentUser ? ([["user", "Users"]] as [string, string][]) : []),
 ];
+
+// Empty-state prompt: narrowed to whatever tab is active instead of always
+// listing every searchable kind.
+const searchPromptNouns: Record<string, string> = {
+  movie: "movies",
+  series: "shows",
+  episode: "episodes",
+  person: "people",
+  collection: "collections",
+  network: "networks",
+  studio: "studios",
+  user: "users",
+};
+const searchPrompt = `Type something in the search bar to find ${
+  (type && searchPromptNouns[type]) || "movies, shows, episodes, people, collections, or users"
+}.`;
 ---
 
 <Base title={q ? `Search: ${q}` : "Search"}>
   <div id="app-data" data-token={token} class="hidden" aria-hidden="true"></div>
 
+  <div id="search-page-content">
   <div class="mb-8">
     <h1 class="page-title mb-2">
       {q ? `Search results for "${q}"` : "Search"}
@@ -138,7 +155,7 @@ const tabs: [string | undefined, string][] = [
 
   {!q && (
     <div class="text-center py-20">
-      <p class="text-zinc-500">Type something in the search bar to find movies, shows, episodes, people, collections, or users.</p>
+      <p class="text-zinc-500">{searchPrompt}</p>
     </div>
   )}
 
@@ -252,6 +269,7 @@ const tabs: [string | undefined, string][] = [
   {!isUserSearch && totalPages > 1 && (
     <Pagination currentPage={page} totalPages={totalPages} baseUrl={baseUrl} />
   )}
+  </div>
 </Base>
 
 <script>
@@ -304,7 +322,101 @@ const tabs: [string | undefined, string][] = [
     });
   }
 
+  // Live search: this page has no search input of its own - typing in the
+  // global nav search box (Base.astro) normally submits a full-page GET to
+  // /search. While already viewing this page, re-run the search in place
+  // instead, keeping whatever type/year/in_library filters are already in
+  // the URL. Bound once at load, not from setup() - these inputs live in
+  // Base.astro and are never replaced by the content swap below, unlike
+  // everything else setup() rebinds.
+  function setupLiveSearch() {
+    if (window.location.pathname !== '/search') return;
+
+    const inputs = [
+      document.getElementById('desktop-search-input'),
+      document.getElementById('mobile-search-input'),
+    ].filter((el): el is HTMLInputElement => el instanceof HTMLInputElement);
+    let contentEl = document.getElementById('search-page-content');
+    if (inputs.length === 0 || !contentEl) return;
+
+    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+    let controller: AbortController | undefined;
+
+    // Swaps the "/" hint for a spinner on the desktop box, and shows one
+    // inside the mobile box - the only cue a slow connection gets that
+    // typing actually did something, since nothing else on the page moves
+    // until the fetch below resolves.
+    const desktopHint = document.getElementById('desktop-search-hint');
+    const desktopSpinner = document.getElementById('desktop-search-spinner');
+    const mobileSpinner = document.getElementById('mobile-search-spinner');
+    function setLoading(loading: boolean) {
+      desktopHint?.classList.toggle('hidden', loading);
+      desktopSpinner?.classList.toggle('hidden', !loading);
+      mobileSpinner?.classList.toggle('hidden', !loading);
+    }
+
+    async function runSearch(newQ: string) {
+      const params = new URLSearchParams(window.location.search);
+      if (newQ) params.set('q', newQ); else params.delete('q');
+      params.delete('page'); // a new query starts back at page 1
+      const url = `/search${params.toString() ? `?${params}` : ''}`;
+
+      controller?.abort();
+      controller = new AbortController();
+      setLoading(true);
+      let res: Response;
+      try {
+        res = await fetch(url, { signal: controller.signal });
+      } catch (e) {
+        // An aborted request was superseded by a newer one already showing
+        // its own spinner - only a real failure should turn it off here.
+        if ((e as Error).name !== 'AbortError') { console.error('Live search failed:', e); setLoading(false); }
+        return;
+      }
+      if (!res.ok || !contentEl) { setLoading(false); return; }
+
+      const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+      const freshContent = doc.getElementById('search-page-content');
+      if (!freshContent) { setLoading(false); return; }
+
+      contentEl.replaceWith(freshContent);
+      contentEl = freshContent;
+      // Parsed via DOMParser, so any <script> inside (e.g. Pagination's
+      // page-jump form) never actually ran - recreate each so it does.
+      contentEl.querySelectorAll('script').forEach((old) => {
+        const fresh = document.createElement('script');
+        fresh.textContent = old.textContent;
+        old.replaceWith(fresh);
+      });
+
+      // replaceState, not push - a history entry per keystroke would make
+      // "back" useless. The page title still needs the manual update since
+      // this never actually navigates.
+      window.history.replaceState(null, '', url);
+      document.title = doc.title;
+      setLoading(false);
+      setup();
+    }
+
+    inputs.forEach((input) => {
+      input.addEventListener('input', () => {
+        const val = input.value;
+        inputs.forEach((other) => { if (other !== input) other.value = val; });
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => runSearch(val), 350);
+      });
+      // Enter (or the mobile "Go" button) searches immediately instead of
+      // waiting out the debounce, without falling through to a real submit.
+      input.closest('form')?.addEventListener('submit', (e) => {
+        e.preventDefault();
+        clearTimeout(debounceTimer);
+        runSearch(input.value);
+      });
+    });
+  }
+
   setup();
+  setupLiveSearch();
   document.addEventListener('astro:after-swap', setup);
 </script>
 

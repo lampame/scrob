@@ -53,7 +53,7 @@ const baseUrl = historyUrl();
     <h1 class="page-title mb-8">Watch History</h1>
 
     <div class="flex flex-col md:flex-row md:items-center gap-3 mb-8">
-      <div class="flex gap-3">
+      <div id="history-tabs" class="flex gap-3">
         <a
           href={historyUrl({ type: "" })}
           class={`px-4 py-1.5 rounded-full text-sm font-medium transition active:scale-95 active:opacity-70 ${!type ? 'bg-zinc-100 text-zinc-900' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-100'}`}
@@ -76,10 +76,15 @@ const baseUrl = historyUrl();
 
       <form action="/history" method="GET" class="relative md:ml-auto md:w-72">
         {type && <input type="hidden" name="type" value={type} />}
-        <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
+        <svg id="history-search-icon" xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
         </svg>
+        <svg id="history-search-spinner" class="hidden absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 animate-spin text-zinc-500 pointer-events-none" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
         <input
+          id="history-search-input"
           type="search"
           name="q"
           value={q}
@@ -89,6 +94,7 @@ const baseUrl = historyUrl();
       </form>
     </div>
 
+    <div id="history-results">
     {dates.length === 0 ? (
       <div class="bg-zinc-900/50 rounded-2xl p-12 text-center">
         <div class="text-zinc-500 mb-2">{q ? `No results for "${q}"` : "No history yet"}</div>
@@ -114,8 +120,87 @@ const baseUrl = historyUrl();
     )}
 
     <Pagination currentPage={page} totalPages={history.total_pages} baseUrl={baseUrl} />
+    </div>
   </div>
 </Base>
 
 <script>
+  // Live search: debounced re-fetch in place instead of a full-page submit,
+  // keeping whatever type tab is already selected. Only #history-tabs and
+  // #history-results get swapped - the search input itself (and its form)
+  // must never be replaced mid-typing, or it loses focus on every keystroke.
+  function setup() {
+    const input = document.getElementById('history-search-input') as HTMLInputElement | null;
+    let tabsEl = document.getElementById('history-tabs');
+    let resultsEl = document.getElementById('history-results');
+    if (!input || !tabsEl || !resultsEl) return;
+
+    const icon = document.getElementById('history-search-icon');
+    const spinner = document.getElementById('history-search-spinner');
+    function setLoading(loading: boolean) {
+      icon?.classList.toggle('hidden', loading);
+      spinner?.classList.toggle('hidden', !loading);
+    }
+
+    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+    let controller: AbortController | undefined;
+
+    async function runSearch(newQ: string) {
+      const params = new URLSearchParams(window.location.search);
+      if (newQ) params.set('q', newQ); else params.delete('q');
+      params.delete('page'); // a new query starts back at page 1
+      const url = `/history${params.toString() ? `?${params}` : ''}`;
+
+      controller?.abort();
+      controller = new AbortController();
+      setLoading(true);
+      let res: Response;
+      try {
+        res = await fetch(url, { signal: controller.signal });
+      } catch (e) {
+        // Aborted means a newer request already took over and is showing
+        // its own spinner - only a real failure should turn it off here.
+        if ((e as Error).name !== 'AbortError') { console.error('Live search failed:', e); setLoading(false); }
+        return;
+      }
+      if (!res.ok || !tabsEl || !resultsEl) { setLoading(false); return; }
+
+      const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+      const freshTabs = doc.getElementById('history-tabs');
+      const freshResults = doc.getElementById('history-results');
+      if (!freshTabs || !freshResults) { setLoading(false); return; }
+
+      tabsEl.replaceWith(freshTabs);
+      tabsEl = freshTabs;
+      resultsEl.replaceWith(freshResults);
+      resultsEl = freshResults;
+      // Parsed via DOMParser, so any <script> inside (e.g. Pagination's
+      // page-jump form) never actually ran - recreate each so it does.
+      resultsEl.querySelectorAll('script').forEach((old) => {
+        const fresh = document.createElement('script');
+        fresh.textContent = old.textContent;
+        old.replaceWith(fresh);
+      });
+
+      // replaceState, not push - a history entry per keystroke would make
+      // "back" useless.
+      window.history.replaceState(null, '', url);
+      setLoading(false);
+    }
+
+    input.addEventListener('input', () => {
+      const val = input.value;
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => runSearch(val), 350);
+    });
+    // Enter searches immediately instead of waiting out the debounce, and
+    // without falling through to a real submit.
+    input.closest('form')?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      clearTimeout(debounceTimer);
+      runSearch(input.value);
+    });
+  }
+
+  setup();
 </script>
