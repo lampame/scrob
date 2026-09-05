@@ -21,6 +21,7 @@ from models.sync import SyncJob, SyncStatus
 from models.users import User, UserSettings
 from models.episode_order import EpisodeOrderMapping, UserShowEpisodeOrder
 from models.rewatch import RewatchProgress
+from models.playback_progress import PlaybackProgress
 from routers.media import format_media, get_user_tmdb_key, check_tmdb_key, enrich_with_state, refresh_technical_data, _extract_show_content_rating, get_where_to_watch, _effective_sonarr, _get_global_settings, require_anon_nav_allowed
 
 from dependencies import get_current_user, get_current_user_or_api_key, get_optional_user_or_api_key, ANON_USER_ID
@@ -649,6 +650,43 @@ async def get_show(
         )
         episodes = episodes_result.scalars().all()
 
+        # Визначаємо статус перегляду та активний прогрес для кожного епізоду
+        local_media_ids = [ep.id for ep in episodes]
+        watched_ep_ids: set[int] = set()
+        progress_map: dict[int, float] = {}
+        if local_media_ids and effective_user_id:
+            active_rewatch = await get_active_rewatch(db, effective_user_id, show.id)
+            if active_rewatch:
+                watched_q = await db.execute(
+                    select(RewatchProgress.media_id)
+                    .where(
+                        RewatchProgress.rewatch_id == active_rewatch.id,
+                        RewatchProgress.media_id.in_(local_media_ids),
+                    )
+                    .distinct()
+                )
+            else:
+                watched_q = await db.execute(
+                    select(WatchEvent.media_id)
+                    .where(
+                        WatchEvent.user_id == effective_user_id,
+                        WatchEvent.media_id.in_(local_media_ids),
+                    )
+                    .distinct()
+                )
+            watched_ep_ids = {row[0] for row in watched_q.all()}
+
+            progress_q = await db.execute(
+                select(PlaybackProgress.media_id, PlaybackProgress.progress_percent)
+                .where(
+                    PlaybackProgress.user_id == effective_user_id,
+                    PlaybackProgress.media_id.in_(local_media_ids),
+                )
+            )
+            for m_id, p_pct in progress_q.all():
+                if p_pct is not None:
+                    progress_map[m_id] = round(p_pct * 100, 1)
+
         seasons_meta = {
             s["season_number"]: s for s in (show.tmdb_data or {}).get("seasons", [])
         }
@@ -661,6 +699,8 @@ async def get_show(
             )
             ep_formatted = format_media(ep)
             ep_formatted["poster_path"] = ep.poster_path or season_poster
+            ep_formatted["watched"] = ep.id in watched_ep_ids
+            ep_formatted["progress_pct"] = progress_map.get(ep.id)
             seasons.setdefault(s_num, []).append(ep_formatted)
 
         # Fetch networks + recommendations from TMDB if key is available
