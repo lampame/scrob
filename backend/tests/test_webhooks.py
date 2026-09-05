@@ -24,6 +24,7 @@ from routers.webhooks import (
     _resolve_plex_progress,
     _resolve_tvdb_episode_to_tmdb_position,
     _translate_plex_tvdb_episode_position,
+    _write_completed_events_and_filter_echoes,
     _write_watch_event,
     find_or_create_media_jellyfin,
     find_or_create_media_jellyfin_multi,
@@ -85,15 +86,18 @@ class WriteWatchEventDedupTests(IsolatedAsyncioTestCase):
 
     async def test_first_completed_event_is_recorded(self):
         db = _FakeDB(queued_scalars=[None])  # no recent WatchEvent found
-        await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
+        result = await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
         self.assertEqual(len(db.added), 1)
+        self.assertTrue(result)
 
     async def test_second_completed_event_for_same_media_within_window_is_skipped(self):
         # Simulates media.scrobble having already written a WatchEvent moments
-        # ago, then media.stop firing for the same viewing.
+        # ago, then media.stop firing for the same viewing. Not an echo, so
+        # callers scrobbling this onward should still treat it as real (#369).
         db = _FakeDB(queued_scalars=[123])  # a recent WatchEvent id is found
-        await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
+        result = await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
         self.assertEqual(len(db.added), 0)
+        self.assertTrue(result)
 
     async def test_echo_of_a_just_pushed_mark_watched_is_skipped(self):
         # Regression for #247/#251: pushing "mark watched" to Jellyfin/Emby can
@@ -103,8 +107,11 @@ class WriteWatchEventDedupTests(IsolatedAsyncioTestCase):
         # stamped at push time - even though no recent duplicate is queued here.
         mark_pushed_watched(user_id=1, media_id=2)
         db = _FakeDB(queued_scalars=[None])
-        await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
+        result = await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
         self.assertEqual(len(db.added), 0)
+        # False here is the signal callers use to also skip scrobbling this
+        # row onward to Trakt/MDBList/Simkl/Bingebase (#369).
+        self.assertFalse(result)
 
     async def test_echo_suppression_is_scoped_to_the_pushed_user_and_media(self):
         mark_pushed_watched(user_id=1, media_id=2)
@@ -136,6 +143,37 @@ class WriteWatchEventDedupTests(IsolatedAsyncioTestCase):
         compiled = str(db.executed_statements[0])
         self.assertIn("watch_events.created_at", compiled)
         self.assertIn("watch_events.watched_at IS NULL", compiled)
+
+
+class WriteCompletedEventsAndFilterEchoesTests(IsolatedAsyncioTestCase):
+    """#369: a Jellyfin/Emby "mark played" webhook for a multi-episode file
+    carries several media rows in one call - only the ones that turn out to
+    be push-watched echoes should be dropped before scrobbling onward, not
+    the whole batch and not none of it."""
+
+    def setUp(self):
+        webhooks._recently_pushed_watched.clear()
+
+    async def test_filters_out_only_the_echoed_media(self):
+        # media_id=2 was just pushed (an echo is expected back for it);
+        # media_id=3 is a genuine, unrelated completion in the same payload.
+        mark_pushed_watched(user_id=1, media_id=2)
+        db = _FakeDB(queued_scalars=[None])  # only media_id=3 reaches a real query
+        media_list = [SimpleNamespace(id=2), SimpleNamespace(id=3)]
+
+        result = await _write_completed_events_and_filter_echoes(db, 1, media_list, progress_seconds=120)
+
+        self.assertEqual([m.id for m in result], [3])
+        self.assertEqual(len(db.added), 1)
+
+    async def test_nothing_echoed_keeps_the_whole_list(self):
+        db = _FakeDB(queued_scalars=[None, None])
+        media_list = [SimpleNamespace(id=2), SimpleNamespace(id=3)]
+
+        result = await _write_completed_events_and_filter_echoes(db, 1, media_list, progress_seconds=120)
+
+        self.assertEqual([m.id for m in result], [2, 3])
+        self.assertEqual(len(db.added), 2)
 
 
 class _CollectionIdResult:
