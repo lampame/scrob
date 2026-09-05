@@ -266,5 +266,63 @@ class ExtractCreditsStingersTests(unittest.TestCase):
         self.assertEqual(tmdb.extract_credits_stingers(data), (True, True))
 
 
+class DiscoverStudioParamsTests(unittest.IsolatedAsyncioTestCase):
+    """with_networks / with_companies must reach TMDB's discover endpoints, and
+    get_network / get_company must hit the right paths - these power the
+    /network/{id} and /studio/{id} browse pages (#358 follow-up)."""
+
+    def setUp(self) -> None:
+        tmdb._cache._store.clear()
+
+    def _capturing_transport(self, seen: list[httpx.Request]):
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"id": 1, "name": "ITV", "results": []})
+        return httpx.MockTransport(handler)
+
+    async def _run(self, coro_factory):
+        seen: list[httpx.Request] = []
+        transport = self._capturing_transport(seen)
+        with patch.object(
+            tmdb.httpx, "AsyncClient", side_effect=lambda **kw: _REAL_ASYNC_CLIENT(transport=transport, **kw),
+        ):
+            await coro_factory()
+        return seen[-1]
+
+    async def test_discover_shows_forwards_with_networks_and_companies(self) -> None:
+        req = await self._run(lambda: tmdb.discover_shows(with_networks=9, api_key="k"))
+        self.assertEqual(req.url.path, "/3/discover/tv")
+        self.assertEqual(req.url.params.get("with_networks"), "9")
+
+        req = await self._run(lambda: tmdb.discover_shows(with_companies=1957, api_key="k"))
+        self.assertEqual(req.url.params.get("with_companies"), "1957")
+
+    async def test_discover_movies_forwards_with_companies(self) -> None:
+        req = await self._run(lambda: tmdb.discover_movies(with_companies=1957, api_key="k"))
+        self.assertEqual(req.url.path, "/3/discover/movie")
+        self.assertEqual(req.url.params.get("with_companies"), "1957")
+
+    async def test_discover_shows_omits_studio_params_when_unset(self) -> None:
+        req = await self._run(lambda: tmdb.discover_shows(api_key="k"))
+        self.assertNotIn("with_networks", req.url.params)
+        self.assertNotIn("with_companies", req.url.params)
+
+    async def test_vote_count_min_zero_is_honoured(self) -> None:
+        req = await self._run(lambda: tmdb.discover_shows(with_networks=9, vote_count_min=0, api_key="k"))
+        self.assertEqual(req.url.params.get("vote_count.gte"), "0")
+
+    async def test_get_network_and_get_company_paths(self) -> None:
+        req = await self._run(lambda: tmdb.get_network(9, api_key="k"))
+        self.assertEqual(req.url.path, "/3/network/9")
+
+        req = await self._run(lambda: tmdb.get_company(1957, api_key="k"))
+        self.assertEqual(req.url.path, "/3/company/1957")
+
+    async def test_search_company_hits_search_company(self) -> None:
+        req = await self._run(lambda: tmdb.search_company("A24", api_key="k"))
+        self.assertEqual(req.url.path, "/3/search/company")
+        self.assertEqual(req.url.params.get("query"), "A24")
+
+
 if __name__ == "__main__":
     unittest.main()

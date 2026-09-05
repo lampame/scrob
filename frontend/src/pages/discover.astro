@@ -92,6 +92,31 @@ const TV_GENRES = [
   { label: "Western", emoji: "🤠" },
 ];
 
+// Featured TV networks for the "Browse by Network" row (static — logo paths
+// are content-addressed and stable). Each links to its /network/{id} page.
+const FEATURED_NETWORKS = [
+  { id: 213, name: "Netflix", logo: "https://image.tmdb.org/t/p/w500/wwemzKWzjKYJFfCeiB57q3r4Bcm.png" },
+  { id: 1024, name: "Prime Video", logo: "https://image.tmdb.org/t/p/w500/w7HfLNm9CWwRmAMU58udl2L7We7.png" },
+  { id: 2552, name: "Apple TV+", logo: "https://image.tmdb.org/t/p/w500/bngHRFi794mnMq34gfVcm9nDxN1.png" },
+  { id: 2739, name: "Disney+", logo: "https://image.tmdb.org/t/p/w500/1edZOYAfoyZyZ3rklNSiUpXX30Q.png" },
+  { id: 6783, name: "Max", logo: "https://image.tmdb.org/t/p/w500/rAb4M1LjGpWASxpk6Va791A7Nkw.png" },
+  { id: 453, name: "Hulu", logo: "https://image.tmdb.org/t/p/w500/pqUTCleNUiTLAVlelGxUgWn1ELh.png" },
+  { id: 4330, name: "Paramount+", logo: "https://image.tmdb.org/t/p/w500/fi83B1oztoS47xxcemFdPMhIzK.png" },
+  { id: 3353, name: "Peacock", logo: "https://image.tmdb.org/t/p/w500/gIAcGTjKKr0KOHL5s4O36roJ8p7.png" },
+  { id: 49, name: "HBO", logo: "https://image.tmdb.org/t/p/w500/tuomPhY2UtuPTqqFnKMVHvSb724.png" },
+  { id: 88, name: "FX", logo: "https://image.tmdb.org/t/p/w500/aexGjtcs42DgRtZh7zOxayiry4J.png" },
+  { id: 174, name: "AMC", logo: "https://image.tmdb.org/t/p/w500/pmvRmATOCaDykE6JrVoeYxlFHw3.png" },
+  { id: 67, name: "Showtime", logo: "https://image.tmdb.org/t/p/w500/Allse9kbjiP6ExaQrnSpIhkurEi.png" },
+  { id: 318, name: "Starz", logo: "https://image.tmdb.org/t/p/w500/qx3Y9LCaK4mq1ykFuDIfjshlo3U.png" },
+  { id: 2, name: "ABC", logo: "https://image.tmdb.org/t/p/w500/2uy2ZWcplrSObIyt4x0Y9rkG6qO.png" },
+  { id: 6, name: "NBC", logo: "https://image.tmdb.org/t/p/w500/cm111bsDVlYaC1foL0itvEI4yLG.png" },
+  { id: 16, name: "CBS", logo: "https://image.tmdb.org/t/p/w500/wju8KhOUsR5y4bH9p3Jc50hhaLO.png" },
+  { id: 19, name: "FOX", logo: "https://image.tmdb.org/t/p/w500/1DSpHrWyOORkL9N2QHX7Adt31mQ.png" },
+  { id: 71, name: "The CW", logo: "https://image.tmdb.org/t/p/w500/hEpcdJ4O6eitG9ADSnDXNUrlovS.png" },
+  { id: 4, name: "BBC One", logo: "https://image.tmdb.org/t/p/w500/uJjcCg3O4DMEjM0xtno9OWFciRP.png" },
+  { id: 9, name: "ITV1", logo: "https://image.tmdb.org/t/p/w500/oz9pjTHnBUmlju8OkaTymhKbh6C.png" },
+];
+
 // Poster skeleton (2:3, for movies)
 function skeleton() {
   return Array.from({ length: 8 }).map(() => `
@@ -272,6 +297,22 @@ function skeletonWide() {
         <h2 class="section-headline mb-5">Coming Soon</h2>
         <div id="coming-soon" class="flex gap-3 overflow-x-auto pb-3 scrollbar-none -mx-6 px-6 md:mx-0 md:px-0">
           <Fragment set:html={skeleton()} />
+        </div>
+      </section>
+
+      <!-- Browse by Network (static) -->
+      <section class="mb-10">
+        <h2 class="text-sm font-black text-zinc-400 uppercase tracking-widest mb-4">Browse by Network</h2>
+        <div class="grid grid-cols-4 sm:grid-cols-5 lg:grid-cols-10 gap-3">
+          {FEATURED_NETWORKS.map(n => (
+            <a
+              href={`/network/${n.id}`}
+              title={n.name}
+              class="logo-swatch group flex items-center justify-center h-16 rounded-xl backdrop-blur-sm border border-gray-200/60 hover:border-blue-500/50 transition-all active:scale-95"
+            >
+              <img src={n.logo} alt={n.name} loading="lazy" decoding="async" class="max-h-8 max-w-[75%] object-contain" />
+            </a>
+          ))}
         </div>
       </section>
 

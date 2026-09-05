@@ -203,11 +203,16 @@ async def search_series(query: str, api_key: str, cache_ttl: float | None = DEFA
             tvdb_id = int(str(tvdb_id_str).lstrip("series-"))
         except (ValueError, TypeError):
             continue
+        # The search endpoint's own "year" is sometimes blank even though it
+        # returns a first_air_time - fall back to that so results still sort
+        # out remakes/reboots that share a title (e.g. Ranma 1/2) instead of
+        # showing up identical and unpickable (#364).
+        year = item.get("year") or (item.get("first_air_time") or "")[:4] or None
         results.append({
             "tvdb_id": tvdb_id,
             "title": item.get("name") or item.get("translations", {}).get("eng", ""),
             "overview": item.get("overview") or item.get("overviews", {}).get("eng"),
-            "year": item.get("year"),
+            "year": year,
             "image_url": _image_url(item.get("image_url") or item.get("thumbnail")),
             "status": item.get("status"),
             "network": item.get("network"),

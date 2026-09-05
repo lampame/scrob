@@ -61,6 +61,32 @@ async def _raise_if_cancelled(db: AsyncSession, job_id: int | None) -> None:
         raise SyncCancelled()
 
 
+async def _mark_job_running_unless_cancelled(db: AsyncSession, job_id: int, **values) -> bool:
+    """Every _run_*_sync entry point's first write flips its SyncJob from
+    pending to running. Since they all share one _sync_semaphore (only one
+    sync at a time across the whole instance), a job can sit pending for a
+    while queued behind another one - long enough for the user to cancel it
+    before it ever starts. Without the WHERE status=pending guard here, that
+    first write would unconditionally stamp the row back to running,
+    silently reviving a job the user already cancelled while it was queued
+    (confirmed live: cancel-while-queued left a job stuck running with a
+    stale "Cancelled by user" error_message next to it).
+
+    Returns False - and leaves the row untouched - when the job was already
+    cancelled by the time this runs; callers must return immediately rather
+    than proceed. `values` are the same extra columns (current_step,
+    processed_items, etc.) each call site already reset at job start.
+    """
+    result = await db.execute(
+        update(SyncJob)
+        .where(SyncJob.id == job_id, SyncJob.status == SyncStatus.pending)
+        .values(status=SyncStatus.running, **values)
+        .returning(SyncJob.id)
+    )
+    await db.commit()
+    return result.scalar_one_or_none() is not None
+
+
 async def _get_effective_tmdb_key(db: AsyncSession, user_settings: UserSettings | None) -> str | None:
     if user_settings and user_settings.tmdb_api_key:
         return user_settings.tmdb_api_key
@@ -2392,8 +2418,9 @@ async def _run_jellyfin_sync(user_id: int, job_id: int, movie_limit: int, show_l
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
         try:
-            await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.running, processed_items=0, total_items=0))
-            await db.commit()
+            if not await _mark_job_running_unless_cancelled(db, job_id, processed_items=0, total_items=0):
+                print(f"Jellyfin sync job {job_id} was cancelled before it started - skipping")
+                return
 
             settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
             settings = settings_result.scalar_one_or_none()
@@ -2592,8 +2619,9 @@ async def _run_emby_sync(user_id: int, job_id: int, movie_limit: int, show_limit
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
         try:
-            await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.running, processed_items=0, total_items=0))
-            await db.commit()
+            if not await _mark_job_running_unless_cancelled(db, job_id, processed_items=0, total_items=0):
+                print(f"Emby sync job {job_id} was cancelled before it started - skipping")
+                return
 
             if connection_id is not None:
                 conn_result = await db.execute(
@@ -3468,8 +3496,11 @@ async def _run_plex_sync(user_id: int, job_id: int, movie_limit: int, show_limit
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
         try:
-            await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.running, processed_items=0, total_items=0, current_step="Pulling library"))
-            await db.commit()
+            if not await _mark_job_running_unless_cancelled(
+                db, job_id, processed_items=0, total_items=0, current_step="Pulling library",
+            ):
+                print(f"Plex sync job {job_id} was cancelled before it started - skipping")
+                return
 
             if connection_id is not None:
                 conn_result = await db.execute(
@@ -4006,20 +4037,20 @@ async def _apply_nuvio_watch_history(
     include_unknown_dates: bool = False,
     dedupe_by_media_id_only: bool = False,
 ) -> set[int]:
+    # Only movies are "standalone" watch targets. A show-level row (no
+    # season/episode) is a rollup of its episodes and is skipped below, so it
+    # never needs a Media lookup here. See #358.
     standalone_tmdb_ids = {
         tmdb_id
         for row in rows
-        if (
-            str(row.get("content_type") or "").lower() == "movie"
-            or (row.get("season") is None and row.get("episode") is None)
-        )
+        if str(row.get("content_type") or "").lower() == "movie"
         if (tmdb_id := tmdb_ids.get(str(row.get("content_id") or ""))) is not None
     }
     standalone_by_key: dict[tuple[MediaType, int], Media] = {}
     if standalone_tmdb_ids:
         result = await db.execute(
             select(Media).where(
-                Media.media_type.in_([MediaType.movie, MediaType.series]),
+                Media.media_type == MediaType.movie,
                 Media.tmdb_id.in_(standalone_tmdb_ids),
             )
         )
@@ -4059,7 +4090,11 @@ async def _apply_nuvio_watch_history(
         if content_type == "movie":
             media = standalone_by_key.get((MediaType.movie, tmdb_id))
         elif season is None or episode is None:
-            media = standalone_by_key.get((MediaType.series, tmdb_id))
+            # A show-level "watched" row (no season/episode) is a rollup of its
+            # episodes, not a watchable item - recording it would create a
+            # bogus series-level watch event alongside the real episode ones.
+            # See #358.
+            continue
         else:
             show_id = show_map.get(content_id)
             media = (
@@ -4239,12 +4274,11 @@ async def _run_nuvio_sync(
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
         try:
-            await db.execute(
-                update(SyncJob)
-                .where(SyncJob.id == job_id)
-                .values(status=SyncStatus.running, processed_items=0, total_items=0, current_step="Pulling from Nuvio")
-            )
-            await db.commit()
+            if not await _mark_job_running_unless_cancelled(
+                db, job_id, processed_items=0, total_items=0, current_step="Pulling from Nuvio",
+            ):
+                logger.info("Nuvio sync job %s was cancelled before it started - skipping", job_id)
+                return
 
             settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
             settings = settings_result.scalar_one_or_none()
@@ -4782,12 +4816,11 @@ async def _run_stremio_sync(
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
         try:
-            await db.execute(
-                update(SyncJob)
-                .where(SyncJob.id == job_id)
-                .values(status=SyncStatus.running, processed_items=0, total_items=0, current_step="Pulling from Stremio")
-            )
-            await db.commit()
+            if not await _mark_job_running_unless_cancelled(
+                db, job_id, processed_items=0, total_items=0, current_step="Pulling from Stremio",
+            ):
+                logger.info("Stremio sync job %s was cancelled before it started - skipping", job_id)
+                return
             settings_result = await db.execute(
                 select(UserSettings).where(UserSettings.user_id == user_id)
             )
@@ -5601,12 +5634,11 @@ async def _run_arvio_sync(
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
         try:
-            await db.execute(
-                update(SyncJob)
-                .where(SyncJob.id == job_id)
-                .values(status=SyncStatus.running, processed_items=0, total_items=0, updated_at=func.now())
-            )
-            await db.commit()
+            if not await _mark_job_running_unless_cancelled(
+                db, job_id, processed_items=0, total_items=0, updated_at=func.now(),
+            ):
+                logger.info("ARVIO sync job %s was cancelled before it started - skipping", job_id)
+                return
 
             settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
             settings = settings_result.scalar_one_or_none()
@@ -6173,8 +6205,9 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
 
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
-        await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.running))
-        await db.commit()
+        if not await _mark_job_running_unless_cancelled(db, job_id):
+            print(f"Full push job {job_id} was cancelled before it started - skipping")
+            return
 
         try:
             conn_result = await db.execute(
@@ -6478,6 +6511,11 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
             # it - balances the books: one echo, expanded over exactly the
             # rows whose tokens were armed for it.
             watched_sid_to_mids: dict[str, set[int]] = {}
+            # Jellyfin/Emby's own watched state for every sid in
+            # watched_sid_to_mids, batch-fetched right before the push loop
+            # below runs (see #362) - _already_watched_on_server then reads
+            # this instead of making its own request per item.
+            jellyfin_watched_state: dict[str, bool] = {}
 
             if conn.push_watched:
                 for mid in watched_ids:
@@ -6599,11 +6637,11 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                             return None
                         return int(item.get("viewCount") or 0) > 0
                     else:
-                        client_mod = jellyfin if conn.type == "jellyfin" else emby
-                        item = await client_mod.get_item(conn.url, conn.token, sid, user_id=conn.server_user_id)
-                        if item is None:
-                            return None
-                        return bool((item.get("UserData") or {}).get("Played"))
+                        # Batch-fetched up front into jellyfin_watched_state
+                        # (#362) instead of a get_item call per sid here - a
+                        # sid missing from it means "not found", the same
+                        # signal get_item's None used to carry.
+                        return jellyfin_watched_state.get(sid)
                 except Exception:
                     return None
 
@@ -6750,6 +6788,20 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                         await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(processed_items=done))
                         await db.commit()
                         await _raise_if_cancelled(db, job_id)
+
+                # Every sid that will need an already-watched check below is
+                # now known (watched_sid_to_mids is fully populated, including
+                # anything just resolved above) - fetch Jellyfin/Emby's own
+                # watched state for all of them in one batched pass instead of
+                # a get_item call per sid inside _already_watched_on_server
+                # (#362). Plex still checks per-item (plex.get_item), which
+                # this doesn't touch.
+                if conn.type in ("jellyfin", "emby") and watched_sid_to_mids:
+                    client_mod = jellyfin if conn.type == "jellyfin" else emby
+                    jellyfin_watched_state = await client_mod.get_items_watched_state(
+                        conn.url, conn.token, list(watched_sid_to_mids.keys()),
+                        user_id=conn.server_user_id, client=client,
+                    )
 
                 # (coroutine, weight) pairs - a grouped watched push counts as
                 # every media row it covers once it resolves, not as 1, so

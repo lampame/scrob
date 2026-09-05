@@ -925,7 +925,7 @@ class NuvioFullPushTests(unittest.IsolatedAsyncioTestCase):
         db = SimpleNamespace(
             execute=AsyncMock(
                 side_effect=[
-                    None,  # SyncJob status=running update
+                    _Result(scalars=[99]),  # SyncJob status=running update (job was pending)
                     _Result(scalars=[conn]),  # conn_result
                     _Result(scalars=[user_settings]),  # settings_result
                     None,  # SyncJob total_items update

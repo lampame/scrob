@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from fastapi.responses import StreamingResponse, Response
 from starlette.background import BackgroundTask
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, and_, delete, func, cast as sa_cast, Text
+from sqlalchemy import select, or_, and_, delete, func, cast as sa_cast, Text, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload
 
@@ -30,6 +30,7 @@ from core.episode_order import get_episode_orders_for_series, get_tmdb_to_tvdb_p
 from models.profile import UserProfileData
 from core import tmdb
 from core.limiter import limiter
+from core.networks import search_curated_networks
 from core.rewatch import get_active_rewatches_for_shows
 from models.rewatch import ShowRewatch, RewatchProgress
 from core.translations import (
@@ -1093,7 +1094,7 @@ async def search_media(
         await require_anon_nav_allowed(db)
     effective_user_id = current_user.id if current_user else ANON_USER_ID
 
-    valid_types = {m.value for m in MediaType} | {"person", "collection"}
+    valid_types = {m.value for m in MediaType} | {"person", "collection", "network", "studio"}
     if type is not None and type not in valid_types:
         type = None
 
@@ -1156,6 +1157,95 @@ async def search_media(
             "total_pages": data.get("total_pages", 1),
             "total_results": data.get("total_results", 0),
             "results": people,
+        }
+
+    # Studio (production company) search: TMDB /search/company. Results link to
+    # the /studio/{id} browse page.
+    if type == "studio":
+        tmdb_key = await get_user_tmdb_key(db, effective_user_id)
+        if not check_tmdb_key(tmdb_key):
+            return {"page": page, "total_pages": 1, "total_results": 0, "results": []}
+        try:
+            data = await tmdb.search_company(q, page=page, api_key=tmdb_key)
+        except Exception as e:
+            print(f"TMDB company search error: {e}")
+            data = {}
+        studios = [
+            {
+                "id": None,
+                "tmdb_id": c.get("id"),
+                "type": "studio",
+                "title": c.get("name"),
+                "logo_path": tmdb.poster_url(c.get("logo_path")) if c.get("logo_path") else None,
+                "origin_country": c.get("origin_country") or None,
+                "in_library": False,
+            }
+            for c in data.get("results", [])
+            if c.get("id")
+        ]
+        return {
+            "page": page,
+            "total_pages": data.get("total_pages", 1),
+            "total_results": data.get("total_results", len(studios)),
+            "results": studios,
+        }
+
+    # Network search: TMDB has no network-search endpoint, so match a curated
+    # list of major networks (core/networks.py) unioned with the networks
+    # actually attached to shows in the local DB. Results link to /network/{id}.
+    if type == "network":
+        db_rows = await db.execute(
+            text(
+                """
+                SELECT (n->>'id')::int AS id,
+                       max(n->>'name') AS name,
+                       max(n->>'logo_path') AS logo_path,
+                       max(n->>'origin_country') AS origin_country,
+                       count(*) AS shows
+                FROM shows, jsonb_array_elements(coalesce(tmdb_data->'networks', '[]'::jsonb)) n
+                WHERE n->>'id' IS NOT NULL AND n->>'name' ILIKE :pat
+                GROUP BY 1
+                ORDER BY shows DESC
+                LIMIT 60
+                """
+            ),
+            {"pat": f"%{q}%"},
+        )
+        by_id: dict[int, dict] = {}
+        for row in db_rows:
+            logo = row.logo_path
+            by_id[row.id] = {
+                "id": None,
+                "tmdb_id": row.id,
+                "type": "network",
+                "title": row.name,
+                "logo_path": (logo if (logo or "").startswith("http") else tmdb.poster_url(logo)) if logo else None,
+                "origin_country": row.origin_country or None,
+                "in_library": False,
+                "_shows": row.shows,
+            }
+        for cur in search_curated_networks(q):
+            by_id.setdefault(
+                cur["id"],
+                {
+                    "id": None,
+                    "tmdb_id": cur["id"],
+                    "type": "network",
+                    "title": cur["name"],
+                    "logo_path": None,
+                    "origin_country": cur.get("origin_country") or None,
+                    "in_library": False,
+                    "_shows": 0,
+                },
+            )
+        networks = sorted(by_id.values(), key=lambda n: (-n["_shows"], n["title"].lower()))
+        for n in networks:
+            n.pop("_shows", None)
+        return {
+            "page": 1,
+            "total_pages": 1,
+            "total_results": len(networks),
+            "results": networks,
         }
 
     # Episode search: local DB only (TMDB has no episode search endpoint)
@@ -2036,6 +2126,60 @@ async def get_collection_details(
         raise HTTPException(status_code=404, detail=f"Collection not found: {e}")
 
 
+def _format_studio(data: dict) -> dict:
+    return {
+        "id": data.get("id"),
+        "name": data.get("name"),
+        "logo_path": tmdb.poster_url(data.get("logo_path"), size="w500") if data.get("logo_path") else None,
+        "origin_country": data.get("origin_country") or None,
+        "homepage": data.get("homepage") or None,
+    }
+
+
+@router.get("/network/{network_id}")
+async def get_network_details(
+    network_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user_or_api_key),
+):
+    """Header data for the /network/{id} browse page (its titles come from
+    /media/tmdb/list?network=)."""
+    if current_user is None:
+        await require_anon_nav_allowed(db)
+    effective_user_id = current_user.id if current_user else ANON_USER_ID
+    tmdb_key = await get_user_tmdb_key(db, effective_user_id)
+    if not check_tmdb_key(tmdb_key):
+        raise HTTPException(status_code=404, detail="TMDB API Key not configured")
+    try:
+        return _format_studio(await tmdb.get_network(network_id, api_key=tmdb_key))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Network not found: {e}")
+
+
+@router.get("/company/{company_id}")
+async def get_company_details(
+    company_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user_or_api_key),
+):
+    """Header data for the /studio/{id} browse page (its titles come from
+    /media/tmdb/list?company=)."""
+    if current_user is None:
+        await require_anon_nav_allowed(db)
+    effective_user_id = current_user.id if current_user else ANON_USER_ID
+    tmdb_key = await get_user_tmdb_key(db, effective_user_id)
+    if not check_tmdb_key(tmdb_key):
+        raise HTTPException(status_code=404, detail="TMDB API Key not configured")
+    try:
+        return _format_studio(await tmdb.get_company(company_id, api_key=tmdb_key))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Company not found: {e}")
+
+
 _COLLECTION_CHECKS = {
     "in": lambda i: bool(i.get("in_library")),
     "out": lambda i: not i.get("in_library"),
@@ -2111,6 +2255,11 @@ async def get_tmdb_list(
     min_rating: float | None = Query(None),
     status: str | None = Query(None),
     original_language: str | None = Query(None),
+    # Restrict discover to one TV network (with_networks, TV only) or one
+    # production company (with_companies, movie or TV). Powers the
+    # /network/{id} and /studio/{id} browse pages.
+    network: int | None = Query(None),
+    company: int | None = Query(None),
     # Local-state filters, applied after TMDB enrichment (OR'd within each,
     # same convention as genre above): collection = in|out,
     # watch = watched|unwatched|started, arr = added|notadded.
@@ -2137,6 +2286,11 @@ async def get_tmdb_list(
     else:
         tmdb_key = await get_user_tmdb_key(db, current_user.id)
 
+    # with_networks is a TV-only discover constraint - a /network/{id} page only
+    # ever wants shows regardless of what `type` the client passed.
+    if network is not None:
+        type = MediaType.series
+
     try:
         if not check_tmdb_key(tmdb_key):
             return {"page": page, "total_pages": 1, "total_results": 0, "results": []}
@@ -2146,7 +2300,10 @@ async def get_tmdb_list(
             "top_rated": "vote_average.desc",
             "trending": "popularity.desc",
         }
-        has_filters = bool(genre or min_rating or status or original_language)
+        # A network/company constraint always goes through discover (there's no
+        # "popular titles on network X" list endpoint).
+        by_studio = network is not None or company is not None
+        has_filters = bool(genre or min_rating or status or original_language) or by_studio
 
         # Explore cards render straight from these TMDB responses, so ask TMDB
         # for the user's Metadata Language directly - detail pages and list
@@ -2158,12 +2315,18 @@ async def get_tmdb_list(
         async def _fetch_tmdb_page(fetch_page: int) -> dict:
             if has_filters:
                 sort_by = category_sort_map.get(category, "popularity.desc")
+                # Browsing a whole network/company catalogue: drop the default
+                # vote-count floor so older/low-vote back-catalogue still shows
+                # (popularity sort keeps the obscure stuff at the bottom).
+                studio_vote_min = 0 if by_studio else None
                 if type == MediaType.movie:
                     genre_ids = [MOVIE_GENRE_IDS[g] for g in genre if g in MOVIE_GENRE_IDS]
                     return await tmdb.discover_movies(
                         page=fetch_page, genre_ids=genre_ids or None,
                         min_rating=min_rating, sort_by=sort_by,
-                        with_original_language=original_language, api_key=tmdb_key,
+                        vote_count_min=studio_vote_min,
+                        with_original_language=original_language,
+                        with_companies=company, api_key=tmdb_key,
                         language=metadata_lang,
                     )
                 genre_ids = [TV_GENRE_IDS[g] for g in genre if g in TV_GENRE_IDS]
@@ -2171,7 +2334,9 @@ async def get_tmdb_list(
                 return await tmdb.discover_shows(
                     page=fetch_page, genre_ids=genre_ids or None,
                     min_rating=min_rating, sort_by=sort_by,
+                    vote_count_min=studio_vote_min,
                     status=status_id, with_original_language=original_language,
+                    with_networks=network, with_companies=company,
                     api_key=tmdb_key, language=metadata_lang,
                 )
             if type == MediaType.movie:

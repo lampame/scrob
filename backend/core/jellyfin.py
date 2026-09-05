@@ -1,3 +1,4 @@
+import asyncio
 import re
 import httpx
 from typing import Optional, List, Dict
@@ -48,6 +49,79 @@ async def get_item(url: str, token: str, item_id: str, user_id: Optional[str] = 
         return data
     except Exception:
         return None
+
+
+# Items?Ids= accepts at most this many comma-separated ids per request in
+# practice - stay well under any server-side query-length limit.
+_ITEMS_BATCH_CHUNK = 100
+
+
+async def get_items_batch(
+    url: str,
+    token: str,
+    item_ids: List[str],
+    user_id: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Dict[str, Dict]:
+    """Fetch just UserData for up to _ITEMS_BATCH_CHUNK items in a single
+    Items?Ids= request (~0.5ms/item vs. ~55-800ms/item for one get_item call
+    each - see GitHub #362). Returns {item_id: item_dict}; an id the caller
+    passed in but that's missing from the result no longer exists on the
+    server - the same signal get_item's None return used to carry for one id
+    at a time. Callers with more than _ITEMS_BATCH_CHUNK ids must chunk
+    themselves (see get_items_watched_state below) - this makes exactly one
+    request per call, accepts an optional shared client the same way
+    mark_watched/set_rating do, and never raises."""
+    if not item_ids:
+        return {}
+    headers = _auth_headers(token)
+    path = f"Users/{user_id}/Items" if user_id else "Items"
+    full_url = f"{url.rstrip('/')}/{path}"
+    params = {"Ids": ",".join(item_ids), "Fields": "UserData"}
+    try:
+        if client:
+            r = await client.get(full_url, headers=headers, params=params)
+            r.raise_for_status()
+            data = r.json()
+        else:
+            async with httpx.AsyncClient(timeout=PUSH_TIMEOUT, follow_redirects=False) as c:
+                r = await c.get(full_url, headers=headers, params=params)
+                r.raise_for_status()
+                data = r.json()
+        return {item["Id"]: item for item in data.get("Items", []) if item.get("Id")}
+    except Exception:
+        return {}
+
+
+async def get_items_watched_state(
+    url: str,
+    token: str,
+    item_ids: List[str],
+    user_id: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Dict[str, bool]:
+    """UserData.Played for every id in item_ids that still exists on the
+    server, fetched in chunks of _ITEMS_BATCH_CHUNK via get_items_batch
+    instead of one get_item call per id (#362). An id absent from the
+    returned dict means "not found" - not "unplayed" - matching how callers
+    already treat get_item returning None."""
+    result: Dict[str, bool] = {}
+    if not item_ids:
+        return result
+    chunks = [item_ids[i : i + _ITEMS_BATCH_CHUNK] for i in range(0, len(item_ids), _ITEMS_BATCH_CHUNK)]
+    # Same concurrency cap the full-push loop itself uses elsewhere - plenty
+    # for ~0.5ms/item batches, without firing every chunk at the server at once.
+    sem = asyncio.Semaphore(10)
+
+    async def _fetch(chunk: List[str]) -> Dict[str, Dict]:
+        async with sem:
+            return await get_items_batch(url, token, chunk, user_id=user_id, client=client)
+
+    batches = await asyncio.gather(*(_fetch(chunk) for chunk in chunks))
+    for items in batches:
+        for item_id, item in items.items():
+            result[item_id] = bool((item.get("UserData") or {}).get("Played"))
+    return result
 
 
 async def validate_connection(url: str, token: str, user_id: Optional[str] = None) -> bool:

@@ -1,0 +1,133 @@
+---
+import Base from "../../layouts/Base.astro";
+import FilterPanel from "../../components/FilterPanel.astro";
+import SortButton from "../../components/SortButton.astro";
+import StudioBrowse from "../../components/StudioBrowse.astro";
+import { api, type MediaItem, type StudioHeader } from "../../lib/api";
+export const prerender = false;
+
+const companyId = Number(Astro.params.id);
+const rawType = Astro.url.searchParams.get("type");
+const type: "movie" | "series" = rawType === "series" ? "series" : "movie";
+const category = Astro.url.searchParams.get("category") ?? "popular";
+const genre = Astro.url.searchParams.getAll("genre");
+const year = Astro.url.searchParams.getAll("year").map(Number);
+const minRating = Astro.url.searchParams.get("min_rating") ? Number(Astro.url.searchParams.get("min_rating")) : undefined;
+const collection = Astro.url.searchParams.getAll("collection");
+const watch = Astro.url.searchParams.getAll("watch");
+const inList = Astro.url.searchParams.getAll("in_list");
+const page = Number(Astro.url.searchParams.get("page") ?? 1);
+const { token, user } = Astro.locals;
+Astro.response.headers.set("Cache-Control", "no-store");
+
+let hasTmdbKey = false;
+if (token) {
+  const settings = await api.auth.getSettings(token);
+  hasTmdbKey = !!settings?.has_effective_tmdb_key;
+} else {
+  const status = await api.profile.publicAccessStatus().catch(() => ({ enable_logged_out_navigation: false }));
+  hasTmdbKey = status.enable_logged_out_navigation;
+}
+
+let header: StudioHeader | null = null;
+let data: { results: MediaItem[]; total_pages: number; page: number } = { results: [], total_pages: 0, page: 1 };
+if (hasTmdbKey && Number.isFinite(companyId)) {
+  const [h, d] = await Promise.allSettled([
+    api.media.getCompany(companyId, token),
+    api.media.tmdbList({
+      type,
+      company: companyId,
+      category,
+      page,
+      ...(genre.length ? { genre } : {}),
+      ...(year.length ? { year } : {}),
+      ...(minRating ? { min_rating: minRating } : {}),
+      ...(collection.length ? { collection } : {}),
+      ...(watch.length ? { watch } : {}),
+      ...(inList.length ? { in_list: inList } : {}),
+    }, token),
+  ]);
+  if (h.status === "fulfilled") header = h.value;
+  if (d.status === "fulfilled") data = d.value;
+}
+
+const MOVIE_GENRES = [
+  "Action", "Adventure", "Animation", "Comedy", "Crime", "Documentary",
+  "Drama", "Family", "Fantasy", "History", "Horror", "Music", "Mystery",
+  "Romance", "Science Fiction", "Thriller", "War", "Western",
+];
+const TV_GENRES = [
+  "Action & Adventure", "Animation", "Comedy", "Crime", "Documentary",
+  "Drama", "Family", "Kids", "Mystery", "News", "Reality",
+  "Sci-Fi & Fantasy", "Soap", "Talk", "War & Politics", "Western",
+];
+const genres = type === "movie" ? MOVIE_GENRES : TV_GENRES;
+
+const currentYear = new Date().getFullYear();
+const years = Array.from({ length: currentYear - 1949 }, (_, i) => currentYear - i);
+
+const baseParams = new URLSearchParams();
+baseParams.set("type", type);
+baseParams.set("category", category);
+genre.forEach((v) => baseParams.append("genre", v));
+year.forEach((v) => baseParams.append("year", String(v)));
+if (minRating) baseParams.set("min_rating", String(minRating));
+collection.forEach((v) => baseParams.append("collection", v));
+watch.forEach((v) => baseParams.append("watch", v));
+inList.forEach((v) => baseParams.append("in_list", v));
+const basePath = `/studio/${companyId}`;
+const baseUrl = `${basePath}?${baseParams.toString()}`;
+
+const title = header?.name ? `${header.name} — Studio` : "Studio";
+const tabClass = (active: boolean) =>
+  `px-4 py-1.5 rounded-lg text-sm font-medium transition-colors active:scale-95 ${active ? "bg-blue-600 text-white" : "text-zinc-400 hover:text-zinc-100"}`;
+---
+
+<Base title={title}>
+  <StudioBrowse
+    header={header}
+    kindLabel="Studio"
+    fallbackName="Unknown studio"
+    data={data}
+    baseUrl={baseUrl}
+    hasTmdbKey={hasTmdbKey}
+  >
+    {hasTmdbKey && (
+      <div slot="toolbar" class="flex flex-wrap items-center gap-3">
+        <div class="flex items-center gap-1 bg-zinc-900 border border-zinc-800 rounded-xl p-1">
+          <a href={`${basePath}?type=movie`} class={tabClass(type === "movie")}>Movies</a>
+          <a href={`${basePath}?type=series`} class={tabClass(type === "series")}>Shows</a>
+        </div>
+        <SortButton
+          id="studio-category"
+          current={category}
+          paramKey="category"
+          label="Category"
+          iconPaths={[
+            "M9.568 3H5.25A2.25 2.25 0 0 0 3 5.25v4.318c0 .597.237 1.169.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 0 0 5.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 0 0 9.568 3Z",
+            "M6 6h.008v.008H6V6Z",
+          ]}
+          options={[
+            { value: "popular", label: "Popular" },
+            { value: "top_rated", label: "Top Rated" },
+          ]}
+        />
+        <FilterPanel
+          id="studio-filters"
+          basePath={basePath}
+          extraParams={{ type, category }}
+          sections={[
+            { key: "genre", label: "Genre", options: genres.map((g) => ({ value: g, label: g })), selected: genre },
+            { key: "year", label: "Year", options: years.map((y) => ({ value: String(y), label: String(y) })), selected: year.map(String) },
+            { key: "min_rating", label: "Rating", options: [9, 8, 7, 6, 5].map((r) => ({ value: String(r), label: `${r}+ Stars` })), selected: minRating ? [String(minRating)] : [], multi: false },
+            ...(user ? [
+              { key: "collection", label: "Collection", options: [{ value: "in", label: "In My Collection" }, { value: "out", label: "Not In My Collection" }], selected: collection },
+              { key: "watch", label: "Watched", options: [{ value: "watched", label: "Watched" }, { value: "unwatched", label: "Unwatched" }, { value: "started", label: "In Progress" }], selected: watch },
+              { key: "in_list", label: "Lists", options: [{ value: "in", label: "In a List" }, { value: "out", label: "Not In a List" }], selected: inList },
+            ] : []),
+          ]}
+        />
+      </div>
+    )}
+  </StudioBrowse>
+</Base>

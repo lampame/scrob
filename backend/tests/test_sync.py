@@ -943,5 +943,58 @@ class HealStuckUnwatchedTests(unittest.IsolatedAsyncioTestCase):
         db.commit.assert_not_awaited()
 
 
+class _MarkJobRunningResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
+class MarkJobRunningUnlessCancelledTests(unittest.IsolatedAsyncioTestCase):
+    """Live-testing follow-up: every _run_*_sync entry point (Jellyfin, Emby,
+    Plex, Nuvio, Stremio, ARVIO, and the full push) shares one global
+    _sync_semaphore - only one sync runs across the whole instance at a
+    time - so a job can sit pending for a while, queued behind another one.
+    If it's cancelled while still queued, the first write that flips it to
+    running must not silently resurrect it. Confirmed live: a cancel-while-
+    queued Jellyfin pull ended up stuck running with a stale "Cancelled by
+    user" error_message next to it, because that write had no WHERE on the
+    job's current status."""
+
+    async def _run(self, matched: bool, **values):
+        captured: list = []
+
+        async def execute(stmt):
+            captured.append(stmt)
+            return _MarkJobRunningResult(42 if matched else None)
+
+        db = SimpleNamespace(execute=execute, commit=AsyncMock())
+        started = await sync._mark_job_running_unless_cancelled(db, 42, **values)
+        return started, db, captured[0]
+
+    async def test_statement_only_matches_a_still_pending_job(self):
+        _, _, stmt = await self._run(matched=True)
+        compiled = str(stmt)
+        self.assertIn("sync_jobs.id", compiled)
+        self.assertIn("sync_jobs.status", compiled)
+        # Both id and status must be in the WHERE - a bare id match (the old
+        # behavior) would let this stomp a job regardless of its status.
+        self.assertIn("AND", compiled)
+
+    async def test_pending_job_transitions_to_running(self):
+        started, db, _ = await self._run(matched=True, current_step="Pulling library")
+        self.assertTrue(started)
+        db.commit.assert_awaited_once()
+
+    async def test_already_cancelled_job_is_left_alone(self):
+        # The UPDATE matched zero rows (status was already 'cancelled', not
+        # 'pending') - the row is untouched, and the caller must bail out
+        # rather than proceed as if the job had started normally.
+        started, db, _ = await self._run(matched=False)
+        self.assertFalse(started)
+        db.commit.assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()
