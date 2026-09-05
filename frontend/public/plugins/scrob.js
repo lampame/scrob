@@ -593,30 +593,6 @@
       });
     }
 
-    // POST /socket/events — socket-plane ingest, same services as REST
-    // Body: { type, payload }. Auth via X-Api-Key header.
-    function socketIngest(type, payload, onDone, onFail) {
-      var network = new Lampa.Reguest();
-      network.timeout(15000);
-      network.native(base() + '/socket/events', function (data) {
-        network.clear();
-        var json = parse$1(data);
-        if (json) onDone(json);else onFail();
-      }, function (a, c) {
-        network.clear();
-        // Pass HTTP status to onFail so callers can handle 409 (already exists)
-        var status = a && a.status;
-        onFail(network.errorDecode(a, c), status);
-      }, JSON.stringify({
-        type: type,
-        payload: payload || {}
-      }), {
-        headers: Object.assign({
-          'Content-Type': 'application/json'
-        }, apiKeyHeaders())
-      });
-    }
-
     // ─── Admin & history API methods ──────────────────────────
 
     // GET /admin/settings — socket configuration for the server
@@ -683,12 +659,14 @@
         ws.onopen = function () {
           reconnectAttempts = 0;
           console.log('ScrobSocket', 'connected');
+          emitLifecycle('open');
         };
         ws.onmessage = function (event) {
           handleMessage(event.data);
         };
         ws.onclose = function (event) {
           console.log('ScrobSocket', 'disconnected', event.code);
+          emitLifecycle('close');
           scheduleReconnect();
         };
         ws.onerror = function (error) {
@@ -735,6 +713,33 @@
           } catch (e) {
             console.error('ScrobSocket', 'handler error', e);
           }
+        });
+      }
+    }
+
+    // Lifecycle hooks: 'open' converges on stale snapshot, 'close' resumes polling.
+    // Subscribed by sync.engine via onLifecycle (core socket open → update pattern).
+    var lifecycle = {
+      open: [],
+      close: []
+    };
+    function emitLifecycle(which) {
+      var list = lifecycle[which] || [];
+      for (var i = 0; i < list.length; i++) {
+        try {
+          list[i]();
+        } catch (e) {
+          console.error('ScrobSocket', 'lifecycle error', e);
+        }
+      }
+    }
+    function scrobSocketOnLifecycle(which, handler) {
+      if (lifecycle[which] && lifecycle[which].indexOf(handler) === -1) lifecycle[which].push(handler);
+    }
+    function scrobSocketOffLifecycle(which, handler) {
+      if (lifecycle[which]) {
+        lifecycle[which] = lifecycle[which].filter(function (h) {
+          return h !== handler;
         });
       }
     }
@@ -789,14 +794,83 @@
       handlers = {};
     }
 
-    // Get socket interface object for sync.engine.
-    // Relay client is inbound-only (emit subscriptions); writes go via POST /socket/events.
+    // Get socket interface object for sync.engine (inbound-only notify).
+    // REST is the only write path; the server broadcasts REST writes to all devices.
     function getScrobSocket() {
       return {
         on: scrobSocketOn,
         off: scrobSocketOff,
-        isConnected: scrobSocketIsConnected
+        isConnected: scrobSocketIsConnected,
+        onLifecycle: scrobSocketOnLifecycle,
+        offLifecycle: scrobSocketOffLifecycle
       };
+    }
+
+    // Scrob sync — socket notification hub.
+    // Socket is inbound-only: every event only invalidates state and calls engine.update().
+    // No direct writes to Lampa.Storage here (mirrors src/core/socket.js: inbound
+    // 'bookmarks' only triggers Account.Bookmarks.update()).
+
+    // Registered update callback from the engine (set via bindUpdate)
+    var updateFn = null;
+
+    // Named handlers: stable references so off() actually unregisters (unlike
+    // anonymous closures, which silently leak and double-fire after restarts).
+    function onItemAdded(payload) {
+      requestUpdate('list.item_added');
+    }
+    function onItemRemoved(payload) {
+      requestUpdate('list.item_removed');
+    }
+    function onListCreated(payload) {
+      requestUpdate('list.created');
+    }
+    function onListUpdated(payload) {
+      requestUpdate('list.updated');
+    }
+    function onListDeleted(payload) {
+      requestUpdate('list.deleted');
+    }
+    function onWatchEvent(payload) {
+      requestUpdate('watch_event.created');
+    }
+    function onPlaybackCompleted(payload) {
+      requestUpdate('playback_session.completed');
+    }
+
+    // Bind the engine update() entry point. Called once from engine.start().
+    function bindUpdate(fn) {
+      updateFn = fn;
+    }
+
+    // Single notification path: ask the engine to refetch and converge.
+    function requestUpdate(reason) {
+      if (typeof updateFn === 'function') updateFn(reason || 'socket');
+    }
+
+    // ─── Public API ───────────────────────────────────────────
+
+    // Register invalidation handlers on the socket.
+    // Every event funnels into requestUpdate — no Storage writes here.
+    function registerHandlers(socket) {
+      socket.on('list.item_added', onItemAdded);
+      socket.on('list.item_removed', onItemRemoved);
+      socket.on('list.created', onListCreated);
+      socket.on('list.updated', onListUpdated);
+      socket.on('list.deleted', onListDeleted);
+      socket.on('watch_event.created', onWatchEvent);
+      socket.on('playback_session.completed', onPlaybackCompleted);
+    }
+
+    // Unregister invalidation handlers from the socket.
+    function unregisterHandlers(socket) {
+      socket.off('list.item_added', onItemAdded);
+      socket.off('list.item_removed', onItemRemoved);
+      socket.off('list.created', onListCreated);
+      socket.off('list.updated', onListUpdated);
+      socket.off('list.deleted', onListDeleted);
+      socket.off('watch_event.created', onWatchEvent);
+      socket.off('playback_session.completed', onPlaybackCompleted);
     }
 
     // Scrob sync — category mapping between Lampa favorite keys and Scrob list names.
@@ -923,88 +997,151 @@
       return card;
     }
 
-    // Profile management: letter avatars and profile switching with per-profile data isolation.
+    // ─── Unified KeyResolver (single implementation for REST + socket paths) ───
+    // map: mapstore mapping object { lampaKey: { list_id, list_name } }
+    // mirrorLists: mirror.get().lists ({ name: { list_id } })
+    // favorite: parsed favorite object (for custom keys discovered at runtime)
 
-    // Fixed palette for deterministic letter avatar colors.
-    var COLORS = ['#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#009688', '#4caf50', '#ff9800'];
-
-    // Deterministic color from username hash (pattern: GramLink sdk/avatars.js avatarColor).
-    function avatarColor(name) {
-      if (!name) return COLORS[0];
-      var hash = 0;
-      for (var i = 0; i < name.length; i++) {
-        hash = name.charCodeAt(i) + ((hash << 5) - hash);
+    // Resolve the Lampa key for a Scrob list name.
+    // Priority: 1) mapstore reverse lookup by name, 2) canonical names, 3) custom keys.
+    function resolveKeyForListName(listName, map, favorite) {
+      if (!listName) return null;
+      if (map) {
+        var mapKeys = Object.keys(map);
+        for (var i = 0; i < mapKeys.length; i++) {
+          if (map[mapKeys[i]].list_name === listName) return mapKeys[i];
+        }
       }
-      return COLORS[Math.abs(hash) % COLORS.length];
+      var canonicals = ['book', 'like', 'wath', 'scheduled', 'continued', 'thrown', 'look'];
+      for (var j = 0; j < canonicals.length; j++) {
+        if (CANONICAL[canonicals[j]] === listName) return canonicals[j];
+      }
+      if (favorite) {
+        var keys = syncableKeys(favorite);
+        for (var k = 0; k < keys.length; k++) {
+          if (listNameForKey(keys[k]) === listName) return keys[k];
+        }
+      }
+      return null;
     }
 
-    // Avatar HTML: server image when avatar_url is set, uppercase first letter otherwise.
-    // Image URL needs ?api_key= because <img> cannot send headers.
-    function avatarHtml(user) {
-      var server = serverUrl();
-      var ownKey = Lampa.Storage.get(KEYS.OWN_API_KEY) || '';
-      if (user && user.avatar_url && server) {
-        var sep = user.avatar_url.indexOf('?') >= 0 ? '&' : '?';
-        return '<img class="scrob-avatar" src="' + server + '/api/proxy' + user.avatar_url + sep + 'api_key=' + encodeURIComponent(ownKey) + '">';
+    // Resolve the Scrob list name for a list_id via the mirror index.
+    function resolveNameForListId(listId, mirrorLists) {
+      if (listId == null || !mirrorLists) return null;
+      var names = Object.keys(mirrorLists);
+      for (var i = 0; i < names.length; i++) {
+        if (mirrorLists[names[i]].list_id == listId) return names[i];
       }
-      var name = user && user.username || '?';
-      var letter = name.charAt(0).toUpperCase();
-      return '<div class="scrob-avatar scrob-avatar--letter" style="background:' + avatarColor(name) + '">' + letter + '</div>';
+      return null;
     }
 
-    // Soft refresh of the active page (pattern: docs/gramsync/profile_levende.js softRefresh).
-    function softRefresh() {
-      var activity = Lampa.Activity.active();
-      if (activity.page) activity.page = 1;
-      Lampa.Activity.replace(activity);
-      activity.outdated = false;
+    // Resolve the Lampa key for a Scrob list_id.
+    // Priority: 1) mapstore reverse lookup by id, 2) mirror name → key.
+    function resolveKeyForListId(listId, map, mirrorLists, favorite) {
+      if (listId == null) return null;
+      if (map) {
+        var keys = Object.keys(map);
+        for (var i = 0; i < keys.length; i++) {
+          if (map[keys[i]].list_id == listId) return keys[i];
+        }
+      }
+      var name = resolveNameForListId(listId, mirrorLists);
+      if (name) return resolveKeyForListName(name, map, favorite);
+      return null;
     }
 
-    // Switch active profile:
-    // 1. backup isolated keys of the current profile
-    // 2. restore target profile data or defaults
-    // 3. activate target credentials
-    // 4. re-read timeline/favorite into UI
-    // 5. soft refresh the active page
-    function switchProfile(targetId) {
-      var currentId = Lampa.Storage.get(KEYS.ACTIVE_PROFILE_ID);
-      var list = getProfiles();
-      var target = null;
-      for (var i = 0; i < list.length; i++) {
-        if (list[i].id == targetId) target = list[i];
+    // ─── Unified applicator (single write path with core marks logic) ───
+    // All functions mutate the passed favorite object; the caller performs
+    // exactly one Lampa.Storage.set('favorite') after the batch.
+
+    // Remove a card from all mark categories except the specified one.
+    // Mirrors Favorite.toggle() exclusivity in src/core/favorite.js.
+    function removeFromOtherMarks(favorite, cardId, exceptKey) {
+      for (var i = 0; i < MARK_KEYS.length; i++) {
+        var key = MARK_KEYS[i];
+        if (key === exceptKey) continue;
+        if (!Array.isArray(favorite[key])) continue;
+        var idx = favorite[key].indexOf(cardId);
+        if (idx !== -1) favorite[key].splice(idx, 1);
       }
-      if (!target || target.id == currentId) return false;
-
-      // 1. Backup isolated keys of the current profile
-      if (currentId) {
-        ISOLATED_KEYS.forEach(function (key) {
-          var value = Lampa.Storage.get(key, 'none');
-          if (value != 'none') Lampa.Storage.set(backupKey(currentId, key), value);
-        });
-      }
-
-      // 2. Restore target profile data or defaults
-      ISOLATED_KEYS.forEach(function (key) {
-        var saved = Lampa.Storage.get(backupKey(target.id, key), 'none');
-        Lampa.Storage.set(key, saved != 'none' ? saved : defaultValue(key));
-      });
-
-      // 3. Activate target credentials
-      Lampa.Storage.set(KEYS.ACTIVE_PROFILE_ID, target.id);
-      Lampa.Storage.set(KEYS.ACTIVE_API_KEY, target.api_key);
-
-      // 4. Re-read data into UI
-      Lampa.Timeline.read();
-      Lampa.Favorite.read();
-
-      // 5. Soft refresh of the active page
-      softRefresh();
-      return true;
     }
 
-    // Scrob sync — mirror storage.
+    // Find a card by id in the shared pool.
+    function findCardById(cards, id) {
+      if (!Array.isArray(cards)) return null;
+      for (var i = 0; i < cards.length; i++) {
+        if (cards[i].id == id) return cards[i];
+      }
+      return null;
+    }
+
+    // Build the local element set for one category: { "type:tmdb_id": cardId }
+    function localElementSet(favorite, lampaKey) {
+      var set = {};
+      var localIds = lampaKey && Array.isArray(favorite[lampaKey]) ? favorite[lampaKey] : [];
+      for (var j = 0; j < localIds.length; j++) {
+        var card = findCardById(favorite.card, localIds[j]);
+        if (!card || !card.id) continue;
+        var idNum = parseInt(card.id, 10);
+        if (!idNum) continue;
+        set[elementKey(detectMediaType(card), idNum)] = card.id;
+      }
+      return set;
+    }
+
+    // Build the server element set from GET /lists/{id} items.
+    function scrobElementSet(scrobItems) {
+      var set = {};
+      for (var i = 0; i < scrobItems.length; i++) {
+        var item = scrobItems[i];
+        if (item.media && item.media.tmdb_id) {
+          var key = elementKey(toScrobType(item.media.type || 'movie'), item.media.tmdb_id);
+          set[key] = {
+            itemId: item.id,
+            media: item.media
+          };
+        }
+      }
+      return set;
+    }
+
+    // Apply one remote addition to the favorite object (card pool + category + marks).
+    function applyRemoteAdd(favorite, lampaKey, tmdbId, media) {
+      if (!tmdbId) return;
+      if (!Array.isArray(favorite.card)) favorite.card = [];
+      var card = findCardById(favorite.card, tmdbId);
+      if (!card) {
+        card = media && cardFromScrobMedia(media) || null;
+        if (!card) {
+          card = {
+            id: tmdbId,
+            method: 'movie',
+            title: String(tmdbId),
+            poster_path: ''
+          };
+        }
+        favorite.card.push(card);
+      }
+      if (lampaKey) {
+        if (!Array.isArray(favorite[lampaKey])) favorite[lampaKey] = [];
+        if (favorite[lampaKey].indexOf(card.id) === -1) favorite[lampaKey].push(card.id);
+        if (MARK_KEYS.indexOf(lampaKey) !== -1) removeFromOtherMarks(favorite, card.id, lampaKey);
+      }
+    }
+
+    // Apply one remote removal to the favorite object.
+    function applyRemoteRemove(favorite, lampaKey, tmdbId) {
+      if (!tmdbId || !lampaKey || !Array.isArray(favorite[lampaKey])) return;
+      var idx = favorite[lampaKey].indexOf(tmdbId);
+      if (idx !== -1) favorite[lampaKey].splice(idx, 1);
+    }
+
+    // Scrob sync — mirror storage with Tracker-model staleness.
     // Per-profile mirror: scrob_sync_mirror_{profile_id}
-    // Structure: { lists: { "[Lampa] Name": { list_id, items: { "type:tmdb_id": item_id } } }, updated_at }
+    // Structure: { lists: { "[Lampa] Name": { list_id, items: { "type:tmdb_id": item_id } } },
+    //              version, time, updated_at }
+    // version/time follow Lampa core Tracker (src/core/tracker.js): bumped on every
+    // converged save; profile switch resets them so the next update fetches fresh state.
 
 
     // Get the storage key for the active profile's mirror
@@ -1023,6 +1160,8 @@
     function emptyMirror() {
       return {
         lists: {},
+        version: 0,
+        time: 0,
         updated_at: 0
       };
     }
@@ -1043,13 +1182,28 @@
 
     // Save the mirror to storage
     function save(mirror) {
-      mirror.updated_at = Date.now();
+      var now = Date.now();
+      mirror.time = now;
+      mirror.version = (mirror.version || 0) + 1;
+      mirror.updated_at = now;
       Lampa.Storage.set(mirrorKey(), mirror);
+    }
+
+    // True when the mirror snapshot is older than the given age (ms)
+    function isStale(maxAgeMs) {
+      var m = get();
+      return Date.now() - (m.time || 0) > maxAgeMs;
     }
 
     // Reset the mirror to empty
     function reset() {
       Lampa.Storage.set(mirrorKey(), emptyMirror());
+    }
+
+    // Get a list entry by name (returns undefined if not found)
+    function getList(name) {
+      var m = get();
+      return m.lists[name];
     }
 
     // Set a list entry by name
@@ -1060,6 +1214,13 @@
         items: m.lists[name] ? m.lists[name].items : {}
       };
       save(m);
+    }
+
+    // Get item_id from mirror for a specific list and element key
+    function getItemId(listName, elemKey) {
+      var list = getList(listName);
+      if (!list) return null;
+      return list.items[elemKey] || null;
     }
 
     // Set item_id in mirror for a specific list and element key
@@ -1097,228 +1258,6 @@
     // Clear initial done flag (for profile switch re-sync)
     function clearInitialDone() {
       Lampa.Storage.set(initialDoneKey(), false);
-    }
-
-    // WebSocket event handlers for Scrob sync.
-    // Receives real-time events from the server and applies them to local Lampa storage.
-
-
-    // ─── Echo guard ───────────────────────────────────────────
-
-    // Counter: >0 when engine is applying local changes (skip inbound events)
-    var applying$1 = 0;
-
-    // Set echo guard state. Called by engine before outbound sync.
-    function setApplying(value) {
-      applying$1 = value;
-    }
-
-    // ─── Favorite storage helpers ─────────────────────────────
-
-    // Read favorite from storage, normalize from string if needed.
-    function readFavorite() {
-      var favorite = Lampa.Storage.get('favorite', '{}');
-      if (typeof favorite === 'string') {
-        try {
-          favorite = JSON.parse(favorite);
-        } catch (e) {
-          favorite = {};
-        }
-      }
-      return favorite;
-    }
-
-    // Save favorite to storage.
-    function saveFavorite(favorite) {
-      Lampa.Storage.set('favorite', favorite);
-    }
-
-    // ─── List name mapping ────────────────────────────────────
-
-    // Map Scrob list name to Lampa favorite key.
-    function lampaKeyForListName(listName) {
-      var map = {
-        '[Lampa] Bookmarks': 'book',
-        '[Lampa] Like': 'like',
-        '[Lampa] Later': 'wath',
-        '[Lampa] Scheduled': 'scheduled',
-        '[Lampa] To be continued': 'continued',
-        '[Lampa] Thrown': 'thrown',
-        '[Lampa] Look': 'look'
-      };
-      return map[listName] || null;
-    }
-
-    // ─── Event handlers ───────────────────────────────────────
-
-    // Resolve TMDB identity from emit payload (canonical schema: media_id wins,
-    // otherwise media_tmdb_id/tmdb_id + media_type). Returns { tmdbId, mediaType } or null.
-    function resolveTmdbIdentity(payload) {
-      if (!payload) return null;
-      // Numeric internal media_id alone cannot map to TMDB — need TMDB pair
-      var tmdbId = payload.media_tmdb_id || payload.tmdb_id || null;
-      var mediaType = payload.media_type || null;
-      if (tmdbId && mediaType) {
-        return {
-          tmdbId: parseInt(tmdbId, 10),
-          mediaType: mediaType
-        };
-      }
-      return null;
-    }
-
-    // Resolve list name: mirror lookup by list_id first, legacy list_name fallback.
-    function resolveListName(payload) {
-      if (payload.list_id) {
-        var m = get();
-        var names = Object.keys(m.lists);
-        for (var i = 0; i < names.length; i++) {
-          if (m.lists[names[i]].list_id == payload.list_id) return names[i];
-        }
-      }
-      return payload.list_name || null;
-    }
-
-    // Handle item added to a Scrob list.
-    function onListItemAdded(payload) {
-      // Emit payload: { list_id, media_id + media_tmdb_id/media_type, ... } (+ legacy list_name)
-
-      var listName = resolveListName(payload);
-      if (!listName || listName.indexOf('[Lampa] ') !== 0) return;
-      var lampaKey = lampaKeyForListName(listName);
-      if (!lampaKey) return;
-      if (applying$1 > 0) return;
-      var identity = resolveTmdbIdentity(payload);
-      if (!identity) return;
-      var favorite = readFavorite();
-      var ids = Array.isArray(favorite[lampaKey]) ? favorite[lampaKey] : [];
-      var mediaId = identity.tmdbId;
-      if (ids.indexOf(mediaId) === -1) {
-        ids.push(mediaId);
-        favorite[lampaKey] = ids;
-
-        // Add card to pool if not exists
-        var card = cardFromScrobMedia({
-          tmdb_id: identity.tmdbId,
-          type: identity.mediaType,
-          title: payload.media_title
-        });
-        if (card) {
-          var pool = Array.isArray(favorite.card) ? favorite.card : [];
-          var exists = pool.some(function (c) {
-            return c.id === card.id;
-          });
-          if (!exists) {
-            pool.push(card);
-            favorite.card = pool;
-          }
-        }
-        saveFavorite(favorite);
-      }
-    }
-
-    // Handle item removed from a Scrob list.
-    function onListItemRemoved(payload) {
-      // Emit payload: { list_id, media_id + media_tmdb_id/media_type, ... } (+ legacy list_name)
-
-      var listName = resolveListName(payload);
-      if (!listName || listName.indexOf('[Lampa] ') !== 0) return;
-      var lampaKey = lampaKeyForListName(listName);
-      if (!lampaKey) return;
-      if (applying$1 > 0) return;
-      var identity = resolveTmdbIdentity(payload);
-      if (!identity) return;
-      var favorite = readFavorite();
-      var ids = Array.isArray(favorite[lampaKey]) ? favorite[lampaKey] : [];
-      var mediaId = identity.tmdbId;
-      var idx = ids.indexOf(mediaId);
-      if (idx !== -1) {
-        ids.splice(idx, 1);
-        favorite[lampaKey] = ids;
-        saveFavorite(favorite);
-      }
-    }
-
-    // Handle new list created on Scrob.
-    // Only [Lampa] lists — usually echo, but could be from another device.
-    function onListCreated(payload) {
-      // payload: { id, name, ... }
-
-      if (!payload.name || payload.name.indexOf('[Lampa] ') !== 0) return;
-      if (applying$1 > 0) return;
-      var m = get();
-      if (!m.lists[payload.name]) {
-        m.lists[payload.name] = {
-          list_id: payload.id,
-          items: {},
-          server_updated_at: Date.now()
-        };
-        save(m);
-      }
-    }
-
-    // Handle new watch event (history).
-    function onWatchEventCreated(payload) {
-      // Emit payload: { media_id + media_tmdb_id/media_type, watched_at, completed, ... }
-
-      if (applying$1 > 0) return;
-      var identity = resolveTmdbIdentity(payload);
-      if (!identity) return;
-      var favorite = readFavorite();
-      var mediaId = identity.tmdbId;
-      if (payload.completed) {
-        // Mark as viewed
-        var viewedIds = Array.isArray(favorite.viewed) ? favorite.viewed : [];
-        if (viewedIds.indexOf(mediaId) === -1) {
-          viewedIds.push(mediaId);
-          favorite.viewed = viewedIds;
-        }
-      } else {
-        // Add to history (not completed)
-        var historyIds = Array.isArray(favorite.history) ? favorite.history : [];
-        if (historyIds.indexOf(mediaId) === -1) {
-          historyIds.push(mediaId);
-          favorite.history = historyIds;
-        }
-      }
-      saveFavorite(favorite);
-    }
-
-    // Handle playback session completed.
-    function onPlaybackCompleted(payload) {
-      // Emit payload: { session_key, media_id + media_tmdb_id/media_type, ... }
-
-      if (applying$1 > 0) return;
-      var identity = resolveTmdbIdentity(payload);
-      if (!identity) return;
-      var favorite = readFavorite();
-      var mediaId = identity.tmdbId;
-      var viewedIds = Array.isArray(favorite.viewed) ? favorite.viewed : [];
-      if (viewedIds.indexOf(mediaId) === -1) {
-        viewedIds.push(mediaId);
-        favorite.viewed = viewedIds;
-        saveFavorite(favorite);
-      }
-    }
-
-    // ─── Public API ───────────────────────────────────────────
-
-    // Register all event handlers on the socket.
-    function registerHandlers(socket) {
-      socket.on('list.item_added', onListItemAdded);
-      socket.on('list.item_removed', onListItemRemoved);
-      socket.on('list.created', onListCreated);
-      socket.on('watch_event.created', onWatchEventCreated);
-      socket.on('playback_session.completed', onPlaybackCompleted);
-    }
-
-    // Unregister all event handlers from the socket.
-    function unregisterHandlers(socket) {
-      socket.off('list.item_added', onListItemAdded);
-      socket.off('list.item_removed', onListItemRemoved);
-      socket.off('list.created', onListCreated);
-      socket.off('watch_event.created', onWatchEventCreated);
-      socket.off('playback_session.completed', onPlaybackCompleted);
     }
 
     // Scrob sync — manual mapping storage.
@@ -1446,25 +1385,38 @@
       return map[lampaKey];
     }
 
-    // Scrob sync engine — orchestrator for bidirectional list synchronization.
-    // Exports start/stop/detectConflicts. Settings registration is a separate task.
+    // Scrob sync engine — single-convergence orchestrator for list synchronization.
+    // Model: Lampa core Account.Bookmarks (src/core/account/bookmarks.js).
+    // - Outbound: Favorite.listener add/remove + state:changed (custom keys) into one
+    //   serial push_queue with 500ms debounce. REST is the only write path.
+    // - Socket: inbound-only notify/invalidate hub (handler.js) → update(). Writes never
+    //   branch on isSocketActive(): the server already broadcasts REST writes to all devices.
+    // - Inbound/polling: one update() entry — fetch all lists, converge each pair
+    //   via applyRemoteDiff with the unified KeyResolver/applicator (mapping.js).
+    // - Mirror: Tracker-model {version,time} stamp; 409 resolves the real item_id,
+    //   deletes always use a resolved item_id. received flag guards echo.
 
 
     // ─── State ────────────────────────────────────────────────
 
-    var applying = 0; // Echo guard counter
-    var outboundTimer = null; // Debounce timer for outbound diff
+    var received = false; // Echo guard: true while engine itself writes favorite
+    var outboundTimer = null; // Debounce timer for outbound push (core: 500ms)
+    var pushQueue = []; // Serial outbound queue { method, lampaKey, card }
+    var pushRunning = false; // Serial guard (core: push_running)
+    var updateTimer = null; // Socket/poll invalidate debounce (core: update_timer 500ms)
+    var updateRunning = false; // Single-flight update() guard
     var pollTimer = null; // Polling interval timer
-    var retryQueue = []; // Failed outbound operations for retry
+    var retryQueue = []; // Failed REST operations for retry
     var retryTimer = null; // Retry interval timer
     var running = false; // Engine active flag
-    var storageListener = null; // Reference to Storage listener for cleanup
-    var profileListener = null; // Reference to profile change listener
+    var profileListener = null; // Profile change listener reference
     var brokenMappings = []; // Keys whose mapped list was deleted on server
     var healing = false; // Self-heal guard: prevent re-entrant missing-key resolution
-    var activeSocket = null; // Current WebSocket instance
+    var activeSocket = null; // Current WebSocket instance (inbound-only notify)
+    var handlersBound = false; // Socket handlers registered flag
+    var socketPollBound = null; // Socket open/close hook reference
 
-    // Debounce window for batching outbound changes (ms)
+    // Debounce window for batching outbound changes (ms, core bookmarks.js: 500)
     var DEBOUNCE_MS = 500;
     var RETRY_DELAY = 5000;
     var RETRY_MAX = 3;
@@ -1496,15 +1448,231 @@
 
     // ─── Socket integration ───────────────────────────────────
 
-    // Provide a WebSocket instance for real-time sync.
+    // Provide a WebSocket instance for real-time sync (inbound-only notify).
     function useSocket(socketInstance) {
+      // Rebinding: drop handlers from the previous socket before switching.
+      if (activeSocket && activeSocket !== socketInstance) unbindSocketHandlers();
       activeSocket = socketInstance;
+      if (running) {
+        bindSocketHandlers();
+        if (isSocketActive()) stopPolling();else startPolling();
+      }
     }
 
     // Check if socket is currently connected and active.
-    // Relay client is inbound-only (emit subscriptions); writes go via POST /socket/events.
     function isSocketActive() {
-      return activeSocket && activeSocket.isConnected();
+      return !!(activeSocket && activeSocket.isConnected && activeSocket.isConnected());
+    }
+
+    // ─── Favorite helpers ─────────────────────────────────────
+
+    // Read favorite from storage, normalize from string if needed.
+    function readFavorite() {
+      var favorite = Lampa.Storage.get('favorite', '{}');
+      if (typeof favorite === 'string') {
+        try {
+          favorite = JSON.parse(favorite);
+        } catch (e) {
+          favorite = {};
+        }
+      }
+      if (!favorite.card) favorite.card = [];
+      return favorite;
+    }
+
+    // Single favorite write under the received guard (core Timeline received pattern).
+    function writeFavorite(favorite) {
+      received = true;
+      Lampa.Storage.set('favorite', favorite);
+      received = false;
+    }
+
+    // ─── Outbound: Favorite.listener + state:changed → serial queue ───
+    // Core pattern: Favorite.listener.follow('add,added'/'remove') in bookmarks.js init().
+
+    function onFavoriteAdd(e) {
+      if (!running || received) return;
+      if (!e || !e.where || !e.card || !e.card.id) return;
+      push('add', e.where, e.card);
+    }
+    function onFavoriteRemove(e) {
+      if (!running || received) return;
+      if (!e || !e.where || !e.card) return;
+      if (e.method && e.method !== 'id') return;
+      if (!e.card.id) return;
+      push('remove', e.where, e.card);
+    }
+
+    // Custom categories bypass core Favorite (see main.js toggleCustomCategory) and
+    // only emit state:changed with type=custom key — bridge them into the same queue.
+    // Dedupe: core keys already arrived via Favorite.listener; skip if identical op queued.
+    function onStateChanged(e) {
+      if (!running || received) return;
+      if (!e || e.target !== 'favorite' || e.reason !== 'update') return;
+      if (!e.type || !e.card || !e.card.id) return;
+      if (e.method !== 'add' && e.method !== 'added' && e.method !== 'remove') return;
+      var fav = readFavorite();
+      if (!Array.isArray(fav[e.type])) return;
+      var method = e.method === 'remove' ? 'remove' : 'add';
+      for (var i = 0; i < pushQueue.length; i++) {
+        if (pushQueue[i].method === method && pushQueue[i].lampaKey === e.type && pushQueue[i].card.id == e.card.id) return;
+      }
+      push(method, e.type, e.card);
+    }
+    function push(method, lampaKey, card) {
+      pushQueue.push({
+        method: method,
+        lampaKey: lampaKey,
+        card: card
+      });
+      if (outboundTimer) clearTimeout(outboundTimer);
+      outboundTimer = setTimeout(processQueue, DEBOUNCE_MS);
+    }
+
+    // Serial outbound drain: one REST write at a time, then mirror + invalidate.
+    function processQueue() {
+      outboundTimer = null;
+      if (pushRunning || pushQueue.length === 0) return;
+      pushRunning = true;
+      var op = pushQueue.shift();
+      writeOne(op, function () {
+        pushRunning = false;
+        if (pushQueue.length > 0) {
+          outboundTimer = setTimeout(processQueue, DEBOUNCE_MS);
+        }
+      });
+    }
+
+    // Resolve list_id for a Lampa key: mapstore first, then mirror by canonical name.
+    function resolveListId(lampaKey) {
+      var mapping = getMapping(lampaKey);
+      if (mapping && mapping.list_id) return {
+        listId: mapping.list_id,
+        listName: mapping.list_name || listNameForKey(lampaKey)
+      };
+      var name = listNameForKey(lampaKey);
+      if (!name) return null;
+      var m = get();
+      if (m.lists[name] && m.lists[name].list_id) return {
+        listId: m.lists[name].list_id,
+        listName: name
+      };
+      return null;
+    }
+
+    // Single REST write. Socket is notify-only: no socketIngest branch here.
+    function writeOne(op, done) {
+      var target = resolveListId(op.lampaKey);
+      if (!target) {
+        // Unknown list (e.g. new custom key before self-heal) — defer to update().
+        update('self-heal');
+        done();
+        return;
+      }
+      var cardId = parseInt(op.card.id, 10);
+      if (!cardId) {
+        done();
+        return;
+      }
+      var mediaType = detectMediaType(op.card);
+      var key = elementKey(mediaType, cardId);
+      if (op.method === 'add') {
+        addListItem(target.listId, cardId, mediaType, function (response) {
+          setItemId(target.listName, key, response && response.id ? response.id : null);
+          // Notify other devices; our own state already converged via the queue.
+          done();
+        }, function (err, status) {
+          if (status === 409 || String(err).indexOf('409') !== -1) {
+            // Already on server: fetch the real item_id so delete stays possible.
+            fetchItemId(target.listId, target.listName, key, done);
+            return;
+          }
+          if (isAuthError(err)) {
+            pauseSync('Authentication expired');
+            done();
+            return;
+          }
+          enqueueRetry({
+            type: 'add',
+            listId: target.listId,
+            listName: target.listName,
+            key: key,
+            tmdbId: cardId,
+            mediaType: mediaType
+          });
+          done();
+        });
+      } else {
+        var itemId = getItemId(target.listName, key);
+        if (!itemId) {
+          // No item_id (409 null-mark or missed ingest): resolve before delete.
+          fetchItemId(target.listId, target.listName, key, function (resolved) {
+            var rid = getItemId(target.listName, key);
+            if (rid) {
+              deleteListItem(target.listId, rid, function () {
+                removeItemId(target.listName, key);
+                done();
+              }, function (err) {
+                if (isAuthError(err)) {
+                  pauseSync('Authentication expired');
+                  done();
+                  return;
+                }
+                enqueueRetry({
+                  type: 'remove',
+                  listId: target.listId,
+                  listName: target.listName,
+                  key: key,
+                  itemId: rid
+                });
+                done();
+              });
+            } else {
+              // Item is neither on server nor in mirror — converge by dropping the mark.
+              removeItemId(target.listName, key);
+              done();
+            }
+          }, true);
+          return;
+        }
+        deleteListItem(target.listId, itemId, function () {
+          removeItemId(target.listName, key);
+          done();
+        }, function (err) {
+          if (isAuthError(err)) {
+            pauseSync('Authentication expired');
+            done();
+            return;
+          }
+          enqueueRetry({
+            type: 'remove',
+            listId: target.listId,
+            listName: target.listName,
+            key: key,
+            itemId: itemId
+          });
+          done();
+        });
+      }
+    }
+
+    // Fetch the server item_id for one element key (fixes 409 null-marks).
+    // When onlyCheck is set, never creates — just resolves or drops the mark.
+    function fetchItemId(listId, listName, key, callback, onlyCheck) {
+      getListItems(listId, function (items) {
+        var set = scrobElementSet(items);
+        if (set[key]) {
+          setItemId(listName, key, set[key].itemId);
+        } else if (onlyCheck) {
+          removeItemId(listName, key);
+        } else {
+          setItemId(listName, key, null);
+        }
+        if (callback) callback(set[key] ? set[key].itemId : null);
+      }, function () {
+        if (!onlyCheck) setItemId(listName, key, null);
+        if (callback) callback(null);
+      });
     }
 
     // ─── List resolution ──────────────────────────────────────
@@ -1523,14 +1691,7 @@
         }
 
         // Read current favorite to get all syncable keys
-        var favorite = Lampa.Storage.get('favorite', '{}');
-        if (typeof favorite === 'string') {
-          try {
-            favorite = JSON.parse(favorite);
-          } catch (e) {
-            favorite = {};
-          }
-        }
+        var favorite = readFavorite();
         var keys = syncableKeys(favorite);
         var resolved = {};
         var pending = 0;
@@ -1573,7 +1734,7 @@
                 serverList = byName[mapping.list_name];
               }
               if (serverList) {
-                resolved[key] = serverList.id;
+                resolved[mapping.list_name || listNameForKey(key)] = serverList.id;
                 setList(mapping.list_name || listNameForKey(key), serverList.id);
                 checkDone();
               } else {
@@ -1611,22 +1772,318 @@
       });
     }
 
-    // Ensure a single list exists on server, merge into mirror.
-    // Simplified one-shot resolution for self-heal in outboundDiff.
+    // Ensure a single list exists on server, merge into mirror, then re-run update.
+    // Self-heal completion always triggers a повторний диф (converge), never just fills the mirror.
     function ensureList(name, lampaKey, callback) {
+      function afterResolve(listId) {
+        mergePair(lampaKey, listId, name, function () {
+          update('self-heal');
+          if (callback) callback();
+        });
+      }
       getLists(function (serverLists) {
         var byName = {};
         for (var i = 0; i < serverLists.length; i++) {
           byName[serverLists[i].name] = serverLists[i];
         }
         if (byName[name]) {
-          mergePair(lampaKey, byName[name].id, name, callback);
+          setList(name, byName[name].id);
+          afterResolve(byName[name].id);
         } else {
           createList(name, function (created) {
-            mergePair(lampaKey, created.id, name, callback);
+            setList(name, created.id);
+            afterResolve(created.id);
           }, callback);
         }
       }, callback);
+    }
+
+    // ─── Converge: single update() for inbound WS + polling ───
+    // Mirrors Account.Bookmarks.update(): fetch everything, converge every pair,
+    // single favorite write, bump the Tracker stamp.
+
+    function update(reason) {
+      if (!running || !hasSession()) return;
+      if (updateRunning) {
+        // Coalesce concurrent invalidations into one trailing run.
+        if (updateTimer) clearTimeout(updateTimer);
+        updateTimer = setTimeout(function () {
+          updateTimer = null;
+          update(reason);
+        }, DEBOUNCE_MS);
+        return;
+      }
+      updateRunning = true;
+      getLists(function (serverLists) {
+        convergeAll(serverLists, function () {
+          updateRunning = false;
+        });
+      }, function () {
+        console.warn('ScrobSync', 'update getLists failed (' + (reason || 'poll') + ')');
+        updateRunning = false;
+      });
+    }
+
+    // Debounced invalidate entry used by the socket hub and the poll timer.
+    function invalidate(reason) {
+      if (!running || !hasSession()) return;
+      if (updateRunning) return;
+      if (updateTimer) clearTimeout(updateTimer);
+      updateTimer = setTimeout(function () {
+        updateTimer = null;
+        update(reason || 'invalidate');
+      }, DEBOUNCE_MS);
+    }
+    function convergeAll(serverLists, done) {
+      var favorite = readFavorite();
+      var map = getMap();
+      var m = get();
+
+      // Index server lists by id.
+      var byId = {};
+      for (var i = 0; i < serverLists.length; i++) {
+        if (serverLists[i].id != null) byId[serverLists[i].id] = serverLists[i];
+      }
+
+      // Build converge targets: every known pair exactly once.
+      // Sources: mirror entries + mapstore mappings + local syncable keys.
+      var targets = {}; // listName -> { listId, lampaKey }
+      var mirrorNames = Object.keys(m.lists);
+      for (var a = 0; a < mirrorNames.length; a++) {
+        var entry = m.lists[mirrorNames[a]];
+        if (entry && entry.list_id) {
+          targets[mirrorNames[a]] = {
+            listId: entry.list_id,
+            lampaKey: resolveKeyForListId(entry.list_id, map, m.lists, favorite)
+          };
+        }
+      }
+      var mapKeys = Object.keys(map);
+      for (var b = 0; b < mapKeys.length; b++) {
+        var me = map[mapKeys[b]];
+        if (me && me.list_id && byId[me.list_id]) {
+          var mname = me.list_name || byId[me.list_id].name;
+          if (!targets[mname]) targets[mname] = {
+            listId: me.list_id,
+            lampaKey: mapKeys[b]
+          };
+        }
+      }
+      var keys = syncableKeys(favorite);
+      for (var c = 0; c < keys.length; c++) {
+        var dname = listNameForKey(keys[c]);
+        if (dname && !targets[dname] && byId && m.lists[dname]) {
+          targets[dname] = {
+            listId: m.lists[dname].list_id,
+            lampaKey: keys[c]
+          };
+        }
+      }
+      var names = Object.keys(targets);
+      var changed = false;
+      function next(index) {
+        if (index >= names.length) {
+          if (changed) {
+            writeFavorite(favorite);
+            save(get());
+          } else {
+            // Still bump the Tracker stamp: converged-noop is a successful sync.
+            save(get());
+          }
+          // Self-heal pass: brand-new local keys with no server list yet.
+          selfHeal(favorite, map, function () {
+            done();
+          });
+          return;
+        }
+        var listName = names[index];
+        var target = targets[listName];
+        if (!target.listId || !target.lampaKey) {
+          next(index + 1);
+          return;
+        }
+        convergeOneList(listName, target.listId, target.lampaKey, favorite, function (listChanged) {
+          if (listChanged) changed = true;
+          next(index + 1);
+        });
+      }
+      if (names.length === 0) {
+        selfHeal(favorite, map, function () {
+          done();
+        });
+        return;
+      }
+      next(0);
+    }
+
+    // Converge one pair: pull remote→local and push local→remote, REST only.
+    function convergeOneList(listName, listId, lampaKey, favorite, callback) {
+      getListItems(listId, function (scrobItems) {
+        var scrobSet = scrobElementSet(scrobItems);
+        var localSet = localElementSet(favorite, lampaKey);
+        var mirrorItems = (getList(listName) || {}).items || {};
+
+        // Remote-first: additions and removals relative to the converged mirror.
+        var toAddLocal = [];
+        for (var sk in scrobSet) {
+          if (typeof mirrorItems[sk] === 'undefined' && !localSet[sk]) {
+            toAddLocal.push({
+              key: sk,
+              media: scrobSet[sk].media
+            });
+          } else if (typeof mirrorItems[sk] === 'undefined' && localSet[sk]) {
+            // Both sides added the same item while offline — adopt the server item_id.
+            setItemId(listName, sk, scrobSet[sk].itemId);
+          }
+        }
+        var toRemoveLocal = [];
+        for (var mk in mirrorItems) {
+          if (!scrobSet[mk] && localSet[mk]) {
+            // Gone on server but present locally: another device removed it — follow.
+            // Our own queued removes carry a real item_id and win on push below.
+            var stillQueued = false;
+            for (var q = 0; q < pushQueue.length; q++) {
+              if (pushQueue[q].lampaKey === lampaKey && pushQueue[q].method === 'remove') {
+                var qp = parseElementKey(mk);
+                if (String(pushQueue[q].card.id) === String(qp.tmdbId)) {
+                  stillQueued = true;
+                  break;
+                }
+              }
+            }
+            if (!stillQueued) toRemoveLocal.push(mk);
+          } else if (!scrobSet[mk] && !localSet[mk]) {
+            removeItemId(listName, mk);
+          }
+        }
+        var listChanged = toAddLocal.length > 0 || toRemoveLocal.length > 0;
+        for (var ai = 0; ai < toAddLocal.length; ai++) {
+          var parsed = parseElementKey(toAddLocal[ai].key);
+          applyRemoteAdd(favorite, lampaKey, parseInt(parsed.tmdbId, 10), toAddLocal[ai].media);
+          setItemId(listName, toAddLocal[ai].key, scrobSet[toAddLocal[ai].key].itemId);
+        }
+        for (var ri = 0; ri < toRemoveLocal.length; ri++) {
+          var rparsed = parseElementKey(toRemoveLocal[ri]);
+          applyRemoteRemove(favorite, lampaKey, parseInt(rparsed.tmdbId, 10));
+          removeItemId(listName, toRemoveLocal[ri]);
+        }
+
+        // Local-first: push what is local but missing on the server.
+        var toPush = [];
+        var freshLocal = localElementSet(favorite, lampaKey);
+        for (var lk in freshLocal) {
+          if (!scrobSet[lk]) toPush.push(lk);
+        }
+        if (toPush.length === 0) {
+          callback(listChanged);
+          return;
+        }
+        if (listChanged) listChanged = true;
+        pushRestItems(listId, listName, toPush, 0, function () {
+          callback(true);
+        });
+      }, function () {
+        callback(false);
+      });
+    }
+
+    // Sequential REST push with 150ms pause between writes.
+    function pushRestItems(listId, listName, items, index, callback) {
+      if (index >= items.length) {
+        callback();
+        return;
+      }
+      var parts = parseElementKey(items[index]);
+      var tmdbId = parseInt(parts.tmdbId, 10);
+      if (!tmdbId) {
+        pushRestItems(listId, listName, items, index + 1, callback);
+        return;
+      }
+      addListItem(listId, tmdbId, parts.mediaType, function (response) {
+        setItemId(listName, items[index], response && response.id ? response.id : null);
+        setTimeout(function () {
+          pushRestItems(listId, listName, items, index + 1, callback);
+        }, 150);
+      }, function (err, status) {
+        if (status === 409 || String(err).indexOf('409') !== -1) {
+          fetchItemId(listId, listName, items[index], function () {
+            setTimeout(function () {
+              pushRestItems(listId, listName, items, index + 1, callback);
+            }, 150);
+          });
+          return;
+        }
+        if (isAuthError(err)) {
+          pauseSync('Authentication expired');
+          callback();
+          return;
+        }
+        enqueueRetry({
+          type: 'add',
+          listId: listId,
+          listName: listName,
+          key: items[index],
+          tmdbId: tmdbId,
+          mediaType: parts.mediaType
+        });
+        setTimeout(function () {
+          pushRestItems(listId, listName, items, index + 1, callback);
+        }, 150);
+      });
+    }
+
+    // Self-heal: brand-new local keys with no server list yet → ensureList + re-diff.
+    function selfHeal(favorite, map, done) {
+      if (healing) {
+        done();
+        return;
+      }
+      var m = get();
+      var missing = [];
+      var keys = syncableKeys(favorite);
+      for (var i = 0; i < keys.length; i++) {
+        var key = keys[i];
+        var mapped = map[key];
+        if (mapped) {
+          if (mapped.list_id && !m.lists[mapped.list_name]) {
+            missing.push({
+              key: key,
+              name: mapped.list_name,
+              listId: mapped.list_id
+            });
+          }
+          continue;
+        }
+        var name = listNameForKey(key);
+        if (name && !m.lists[name]) missing.push({
+          key: key,
+          name: name,
+          listId: null
+        });
+      }
+      if (missing.length === 0) {
+        done();
+        return;
+      }
+      healing = true;
+      var pending = missing.length;
+      function oneDone() {
+        pending--;
+        if (pending <= 0) {
+          healing = false;
+          done();
+        }
+      }
+      for (var j = 0; j < missing.length; j++) {
+        (function (entry) {
+          if (entry.listId) {
+            setList(entry.name, entry.listId);
+            mergePair(entry.key, entry.listId, entry.name, oneDone);
+          } else {
+            ensureList(entry.name, entry.key, oneDone);
+          }
+        })(missing[j]);
+      }
     }
 
     // ─── Initial sync (section 7) ─────────────────────────────
@@ -1647,598 +2104,9 @@
           }
           return;
         }
-        var favorite = Lampa.Storage.get('favorite', '{}');
-        if (typeof favorite === 'string') {
-          try {
-            favorite = JSON.parse(favorite);
-          } catch (e) {
-            favorite = {};
-          }
-        }
-        if (!favorite.card) favorite.card = [];
-        var processed = 0;
-        var total = listNames.length;
-        function onListDone() {
-          processed++;
-          if (processed >= total) {
-            // Save one Storage.set('favorite') after all pulls
-            applying++;
-            setApplying(applying);
-            Lampa.Storage.set('favorite', favorite);
-            setTimeout(function () {
-              applying--;
-              setApplying(applying);
-            }, 0);
-            save(get());
-            markInitialDone();
-            console.log('ScrobSync', 'initial sync completed', {
-              lists: total
-            });
-          }
-        }
-        for (var i = 0; i < listNames.length; i++) {
-          syncOneList(listMap, listNames[i], favorite, onListDone);
-        }
-      });
-    }
-
-    // Sync a single list: push local→scrob, pull scrob→local
-    function syncOneList(listMap, listName, favorite, callback) {
-      var listId = listMap[listName];
-      if (!listId) {
-        callback();
-        return;
-      }
-
-      // Find the Lampa key that maps to this list name
-      var lampaKey = findKeyForListName(listName);
-      getListItems(listId, function (scrobItems) {
-        // Build scrob element set
-        var scrobSet = {};
-        for (var i = 0; i < scrobItems.length; i++) {
-          var item = scrobItems[i];
-          if (item.media && item.media.tmdb_id) {
-            var type = toScrobType(item.media.type || 'movie');
-            var key = elementKey(type, item.media.tmdb_id);
-            scrobSet[key] = {
-              itemId: item.id,
-              media: item.media
-            };
-          }
-        }
-
-        // Build local element set from the specific category
-        var localIds = lampaKey && Array.isArray(favorite[lampaKey]) ? favorite[lampaKey] : [];
-        var localSet = {};
-        for (var j = 0; j < localIds.length; j++) {
-          var card = findCardById(favorite.card, localIds[j]);
-          if (!card) continue;
-
-          // Skip items without TMDB id
-          if (!card.id) continue;
-
-          // Skip non-numeric IDs (slugs etc.) — they cannot be pushed to Scrob
-          var idNum = parseInt(card.id, 10);
-          if (!idNum) continue;
-          var mediaType = detectMediaType(card);
-          var key = elementKey(mediaType, idNum);
-          localSet[key] = true;
-        }
-
-        // PUSH: localSet − scrobSet → POST /lists/{id}/items
-        var toAdd = [];
-        for (var k in localSet) {
-          if (!scrobSet[k]) toAdd.push(k);
-        }
-
-        // PULL: scrobSet − localSet → reconstruct minimal cards
-        var toRemove = [];
-        for (var sk in scrobSet) {
-          if (!localSet[sk]) toRemove.push({
-            key: sk,
-            itemId: scrobSet[sk].itemId,
-            media: scrobSet[sk].media
-          });
-        }
-
-        // Execute push sequentially with 150ms pause
-        pushItems(listId, listName, toAdd, 0, function () {
-          // Execute pull: add missing items to local
-          pullItems(listId, lampaKey, favorite, toRemove, 0, function () {
-            callback();
-          });
-        });
-      }, function () {
-        callback();
-      });
-    }
-
-    // Find the Lampa key that maps to a given Scrob list name
-    // Priority: 1) mapstore reverse lookup, 2) canonical names
-    function findKeyForListName(listName) {
-      // First check mapstore (mapped lists by name)
-      var map = getMap();
-      var mapKeys = Object.keys(map);
-      for (var i = 0; i < mapKeys.length; i++) {
-        if (map[mapKeys[i]].list_name === listName) return mapKeys[i];
-      }
-
-      // Then check canonical names
-      var canonicals = ['book', 'like', 'wath', 'scheduled', 'continued', 'thrown', 'look'];
-      for (var j = 0; j < canonicals.length; j++) {
-        if (listNameForKey(canonicals[j]) === listName) return canonicals[j];
-      }
-
-      // Check custom keys by reverse-mapping
-      var favorite = Lampa.Storage.get('favorite', '{}');
-      if (typeof favorite === 'string') {
-        try {
-          favorite = JSON.parse(favorite);
-        } catch (e) {
-          return null;
-        }
-      }
-      var allKeys = syncableKeys(favorite);
-      for (var k = 0; k < allKeys.length; k++) {
-        if (listNameForKey(allKeys[k]) === listName) return allKeys[k];
-      }
-      return null;
-    }
-
-    // Find a card by id in the card array
-    function findCardById(cards, id) {
-      for (var i = 0; i < cards.length; i++) {
-        if (cards[i].id == id) return cards[i];
-      }
-      return null;
-    }
-
-    // Push items sequentially with 150ms pause
-    function pushItems(listId, listName, items, index, callback) {
-      if (index >= items.length) {
-        callback();
-        return;
-      }
-      var parts = parseElementKey(items[index]);
-      var tmdbId = parseInt(parts.tmdbId, 10);
-      if (!tmdbId) {
-        // Skip items without valid TMDB id
-        pushItems(listId, listName, items, index + 1, callback);
-        return;
-      }
-
-      // Socket-plane write via POST /socket/events; REST path when socket inactive
-      if (isSocketActive()) {
-        socketIngest('list.item_added', {
-          list_id: listId,
-          media_tmdb_id: tmdbId,
-          media_type: parts.mediaType
-        }, function (response) {
-          // Store item_id in mirror if server returned it, otherwise null mark
-          setItemId(listName, items[index], response && response.id ? response.id : null);
-          setTimeout(function () {
-            pushItems(listId, listName, items, index + 1, callback);
-          }, 150);
-        }, function (err, status) {
-          // 409 means the item already exists — treat as success for the mirror
-          if (status === 409 || String(err).indexOf('409') !== -1) {
-            setItemId(listName, items[index], null);
-            setTimeout(function () {
-              pushItems(listId, listName, items, index + 1, callback);
-            }, 150);
-            return;
-          }
-          // Ingest errors go to retry queue, no REST fallback
-          enqueueRetry({
-            type: 'add',
-            listId: listId,
-            listName: listName,
-            key: items[index]
-          });
-          setTimeout(function () {
-            pushItems(listId, listName, items, index + 1, callback);
-          }, 150);
-        });
-        return;
-      }
-      addListItem(listId, tmdbId, parts.mediaType, function (response) {
-        // Store item_id in mirror if server returned it, otherwise null mark (key existence still counts)
-        setItemId(listName, items[index], response && response.id ? response.id : null);
-        setTimeout(function () {
-          pushItems(listId, listName, items, index + 1, callback);
-        }, 150);
-      }, function (err, status) {
-        // 409 means the item already exists — treat as success for the mirror
-        if (status === 409 || String(err).indexOf('409') !== -1) {
-          setItemId(listName, items[index], null);
-          setTimeout(function () {
-            pushItems(listId, listName, items, index + 1, callback);
-          }, 150);
-          return;
-        }
-        // Skip failed items, continue with next
-        setTimeout(function () {
-          pushItems(listId, listName, items, index + 1, callback);
-        }, 150);
-      });
-    }
-
-    // Find list name by list_id in mirror
-    function findListNameById(listId) {
-      var m = get();
-      var names = Object.keys(m.lists);
-      for (var i = 0; i < names.length; i++) {
-        if (m.lists[names[i]].list_id == listId) return names[i];
-      }
-      return null;
-    }
-
-    // Pull items: add missing Scrob items to local Lampa storage
-    function pullItems(listId, lampaKey, favorite, items, index, callback) {
-      if (index >= items.length) {
-        callback();
-        return;
-      }
-      var item = items[index];
-      var parsed = parseElementKey(item.key);
-
-      // Build card from Scrob media if available, otherwise minimal fallback
-      var card = null;
-      if (item.media) {
-        card = cardFromScrobMedia(item.media);
-      }
-      if (!card) {
-        card = {
-          id: parseInt(parsed.tmdbId, 10),
-          method: toLampaMethod(parsed.mediaType),
-          title: parsed.tmdbId,
-          poster_path: ''
-        };
-        if (parsed.mediaType === 'series') {
-          card.name = parsed.tmdbId;
-          card.original_name = parsed.tmdbId;
-        }
-      }
-
-      // Add card to card array if not present
-      var exists = findCardById(favorite.card, card.id);
-      if (!exists) {
-        favorite.card.push(card);
-      }
-
-      // Add to category array
-      if (lampaKey && Array.isArray(favorite[lampaKey])) {
-        if (favorite[lampaKey].indexOf(card.id) === -1) {
-          favorite[lampaKey].push(card.id);
-        }
-      }
-
-      // For mark categories: remove from other marks (section 13, point 3)
-      if (lampaKey && MARK_KEYS.indexOf(lampaKey) !== -1) {
-        removeCardFromOtherMarks(favorite, card.id, lampaKey);
-      }
-
-      // Update mirror
-      var m = get();
-      var listName = findListNameById(listId);
-      if (listName) {
-        if (!m.lists[listName]) {
-          m.lists[listName] = {
-            list_id: listId,
-            items: {}
-          };
-        }
-        m.lists[listName].items[item.key] = item.itemId;
-      }
-      setTimeout(function () {
-        pullItems(listId, lampaKey, favorite, items, index + 1, callback);
-      }, 0);
-    }
-
-    // Remove a card from all mark categories except the specified one
-    function removeCardFromOtherMarks(favorite, cardId, exceptKey) {
-      for (var i = 0; i < MARK_KEYS.length; i++) {
-        var key = MARK_KEYS[i];
-        if (key === exceptKey) continue;
-        if (!Array.isArray(favorite[key])) continue;
-        var idx = favorite[key].indexOf(cardId);
-        if (idx !== -1) {
-          favorite[key].splice(idx, 1);
-        }
-      }
-    }
-
-    // ─── Outbound real-time (section 8.1) ─────────────────────
-
-    function setupOutboundListener() {
-      storageListener = function storageListener(e) {
-        if (!running) return;
-        if (e.name !== 'favorite') return;
-        if (applying > 0) {
-          console.log('ScrobSync', 'outbound skipped: echo guard');
-          return; // Echo guard
-        }
-
-        // Debounce: batch changes within 500ms
-        if (outboundTimer) clearTimeout(outboundTimer);
-        outboundTimer = setTimeout(function () {
-          outboundDiff();
-        }, DEBOUNCE_MS);
-      };
-      Lampa.Storage.listener.follow('change', storageListener);
-    }
-
-    // Compute diff and push changes to Scrob
-    function outboundDiff() {
-      if (!hasSession()) return;
-      var favorite = Lampa.Storage.get('favorite', '{}');
-      if (typeof favorite === 'string') {
-        try {
-          favorite = JSON.parse(favorite);
-        } catch (e) {
-          return;
-        }
-      }
-      if (!favorite.card) favorite.card = [];
-      var m = get();
-      var listNames = Object.keys(m.lists);
-      console.log('ScrobSync', 'outbound diff', {
-        lists: listNames.length
-      });
-
-      // Self-heal: find syncable keys missing from mirror
-      if (!healing) {
-        var missing = [];
-        syncableKeys(favorite).forEach(function (key) {
-          var name = listNameForKey(key);
-          if (!name) return;
-          var mapped = getMapping(key);
-          if (mapped) {
-            if (!m.lists[mapped.list_name]) missing.push({
-              key: key,
-              name: mapped.list_name,
-              listId: mapped.list_id
-            });
-            return;
-          }
-          if (!m.lists[name]) missing.push({
-            key: key,
-            name: name,
-            listId: null
-          });
-        });
-        if (missing.length > 0) {
-          healing = true;
-          console.log('ScrobSync', 'self-heal', missing.length);
-
-          // Fully empty mirror → full initial sync
-          if (listNames.length === 0) {
-            healing = false;
-            initialSync();
-            return;
-          }
-
-          // Partial: resolve each missing key via ensureList, then let next debounce pick up filled mirror
-          var pending = missing.length;
-          missing.forEach(function (entry) {
-            if (entry.listId) {
-              mergePair(entry.key, entry.listId, entry.name, function () {
-                pending--;
-                if (pending <= 0) healing = false;
-              });
-            } else {
-              ensureList(entry.name, entry.key, function () {
-                pending--;
-                if (pending <= 0) healing = false;
-              });
-            }
-          });
-          return;
-        }
-      }
-      for (var i = 0; i < listNames.length; i++) {
-        var listName = listNames[i];
-        var listData = m.lists[listName];
-        var listId = listData.list_id;
-        if (!listId) continue;
-
-        // Find the Lampa key for this list
-        var lampaKey = findKeyForListName(listName);
-        if (!lampaKey) continue;
-        var localIds = Array.isArray(favorite[lampaKey]) ? favorite[lampaKey] : [];
-        var localSet = {};
-        for (var j = 0; j < localIds.length; j++) {
-          var card = findCardById(favorite.card, localIds[j]);
-          if (!card || !card.id) continue;
-          var mediaType = detectMediaType(card);
-          // Skip non-numeric IDs (slugs etc.) — they cannot be pushed to Scrob
-          var idNum = parseInt(card.id, 10);
-          if (!idNum) continue;
-          var key = elementKey(mediaType, idNum);
-          localSet[key] = true;
-        }
-
-        // Diff against mirror
-        var mirrorItems = listData.items || {};
-
-        // Added locally: in localSet but not in mirror (key existence — null marks count as present)
-        var toAdd = [];
-        for (var k in localSet) {
-          if (typeof mirrorItems[k] === 'undefined') toAdd.push(k);
-        }
-
-        // Removed locally: in mirror but not in localSet
-        var toRemove = [];
-        for (var mk in mirrorItems) {
-          if (!localSet[mk]) toRemove.push({
-            key: mk,
-            itemId: mirrorItems[mk]
-          });
-        }
-        if (toAdd.length > 0 || toRemove.length > 0) {
-          console.log('ScrobSync', 'outbound', listName, {
-            add: toAdd.length,
-            remove: toRemove.length
-          });
-        }
-
-        // Execute add operations
-        pushOutboundItems(listId, listName, toAdd, 0, function () {
-          // Execute remove operations
-          removeOutboundItems(listId, listName, toRemove, 0, function () {
-            save(get());
-          });
-        });
-      }
-    }
-
-    // Push added items to Scrob: REST first guarantees server persistence,
-    // socket notification afterwards is fire-and-forget realtime for other devices
-    function pushOutboundItems(listId, listName, items, index, callback) {
-      if (index >= items.length) {
-        callback();
-        return;
-      }
-      var parts = parseElementKey(items[index]);
-      var tmdbId = parseInt(parts.tmdbId, 10);
-      if (!tmdbId) {
-        pushOutboundItems(listId, listName, items, index + 1, callback);
-        return;
-      }
-
-      // Socket-plane write via POST /socket/events; REST path when socket inactive
-      if (isSocketActive()) {
-        socketIngest('list.item_added', {
-          list_id: listId,
-          media_tmdb_id: tmdbId,
-          media_type: parts.mediaType
-        }, function (response) {
-          // Store item_id in mirror if provided, otherwise null mark
-          setItemId(listName, items[index], response && response.id ? response.id : null);
-          setTimeout(function () {
-            pushOutboundItems(listId, listName, items, index + 1, callback);
-          }, 150);
-        }, function (err, status) {
-          // 409 means the item already exists — treat as success for the mirror
-          if (status === 409 || String(err).indexOf('409') !== -1) {
-            setItemId(listName, items[index], null);
-            setTimeout(function () {
-              pushOutboundItems(listId, listName, items, index + 1, callback);
-            }, 150);
-            return;
-          }
-          // Ingest errors go to retry queue, no REST fallback
-          enqueueRetry({
-            type: 'add',
-            listId: listId,
-            listName: listName,
-            key: items[index]
-          });
-          setTimeout(function () {
-            pushOutboundItems(listId, listName, items, index + 1, callback);
-          }, 150);
-        });
-        return;
-      }
-      addListItem(listId, tmdbId, parts.mediaType, function (response) {
-        // Store item_id in mirror if provided, otherwise null mark (key existence still counts)
-        setItemId(listName, items[index], response && response.id ? response.id : null);
-        setTimeout(function () {
-          pushOutboundItems(listId, listName, items, index + 1, callback);
-        }, 150);
-      }, function (err, status) {
-        // 409 means the item already exists — treat as success for the mirror
-        if (status === 409 || String(err).indexOf('409') !== -1) {
-          setItemId(listName, items[index], null);
-          setTimeout(function () {
-            pushOutboundItems(listId, listName, items, index + 1, callback);
-          }, 150);
-          return;
-        }
-        // Retry queue
-        enqueueRetry({
-          type: 'add',
-          listId: listId,
-          listName: listName,
-          key: items[index]
-        });
-        setTimeout(function () {
-          pushOutboundItems(listId, listName, items, index + 1, callback);
-        }, 150);
-      });
-    }
-
-    // Remove items from Scrob
-    function removeOutboundItems(listId, listName, items, index, callback) {
-      if (index >= items.length) {
-        callback();
-        return;
-      }
-      var item = items[index];
-
-      // Socket-plane write via POST /socket/events; uses TMDB identity, no item_id needed
-      if (isSocketActive()) {
-        var ingestParts = parseElementKey(item.key);
-        var ingestTmdbId = parseInt(ingestParts.tmdbId, 10);
-        if (!ingestTmdbId) {
-          removeOutboundItems(listId, listName, items, index + 1, callback);
-          return;
-        }
-        socketIngest('list.item_removed', {
-          list_id: listId,
-          media_tmdb_id: ingestTmdbId,
-          media_type: ingestParts.mediaType
-        }, function () {
-          removeItemId(listName, item.key);
-          setTimeout(function () {
-            removeOutboundItems(listId, listName, items, index + 1, callback);
-          }, 150);
-        }, function (err) {
-          // Check for 401/403
-          if (isAuthError(err)) {
-            pauseSync('Authentication expired');
-            return;
-          }
-          // Ingest errors go to retry queue, no REST fallback
-          enqueueRetry({
-            type: 'remove',
-            listId: listId,
-            listName: listName,
-            key: item.key,
-            itemId: item.itemId
-          });
-          setTimeout(function () {
-            removeOutboundItems(listId, listName, items, index + 1, callback);
-          }, 150);
-        });
-        return;
-      }
-      if (!item.itemId) {
-        // No item_id — can't delete; skip
-        removeOutboundItems(listId, listName, items, index + 1, callback);
-        return;
-      }
-      deleteListItem(listId, item.itemId, function () {
-        removeItemId(listName, item.key);
-        setTimeout(function () {
-          removeOutboundItems(listId, listName, items, index + 1, callback);
-        }, 150);
-      }, function (err) {
-        // Check for 401/403
-        if (isAuthError(err)) {
-          pauseSync('Authentication expired');
-          return;
-        }
-        enqueueRetry({
-          type: 'remove',
-          listId: listId,
-          listName: listName,
-          key: item.key,
-          itemId: item.itemId
-        });
-        setTimeout(function () {
-          removeOutboundItems(listId, listName, items, index + 1, callback);
-        }, 150);
+        // First converge goes through the single update() path.
+        markInitialDone();
+        update('initial');
       });
     }
 
@@ -2252,73 +2120,56 @@
         Lampa.Noty.show(Lampa.Lang.translate('scrob_sync_lost'));
       }
     }
+    function processRetryOp(op) {
+      if (op.type === 'add') {
+        var parts = parseElementKey(op.key);
+        var tmdbId = op.tmdbId || parseInt(parts.tmdbId, 10);
+        var mediaType = op.mediaType || parts.mediaType;
+        if (!tmdbId) return;
+        addListItem(op.listId, tmdbId, mediaType, function (response) {
+          setItemId(op.listName, op.key, response && response.id ? response.id : null);
+        }, function (err, status) {
+          if (status === 409 || String(err).indexOf('409') !== -1) {
+            fetchItemId(op.listId, op.listName, op.key, null);
+            return;
+          }
+          op.retries = (op.retries || 0) + 1;
+          if (op.retries <= RETRY_MAX) retryQueue.push(op);
+        });
+      } else if (op.type === 'remove') {
+        var itemId = op.itemId || getItemId(op.listName, op.key);
+        if (!itemId) {
+          // Resolve the real item_id first — deletes never use a null mark.
+          fetchItemId(op.listId, op.listName, op.key, function (resolved) {
+            var rid = resolved || getItemId(op.listName, op.key);
+            if (rid) {
+              deleteListItem(op.listId, rid, function () {
+                removeItemId(op.listName, op.key);
+              }, function () {
+                op.retries = (op.retries || 0) + 1;
+                if (op.retries <= RETRY_MAX) retryQueue.push(op);
+              });
+            } else {
+              removeItemId(op.listName, op.key);
+            }
+          }, true);
+          return;
+        }
+        deleteListItem(op.listId, itemId, function () {
+          removeItemId(op.listName, op.key);
+        }, function () {
+          op.retries = (op.retries || 0) + 1;
+          if (op.retries <= RETRY_MAX) retryQueue.push(op);
+        });
+      }
+    }
     function startRetryLoop() {
       if (retryTimer) return;
       retryTimer = setInterval(function () {
         if (!running || retryQueue.length === 0) return;
         var batch = retryQueue.splice(0, retryQueue.length);
         for (var i = 0; i < batch.length; i++) {
-          var op = batch[i];
-          if (op.type === 'add') {
-            var parts = parseElementKey(op.key);
-            var tmdbId = parseInt(parts.tmdbId, 10);
-            if (tmdbId) {
-              // Socket-plane write via POST /socket/events when active; REST otherwise
-              if (isSocketActive()) {
-                socketIngest('list.item_added', {
-                  list_id: op.listId,
-                  media_tmdb_id: tmdbId,
-                  media_type: parts.mediaType
-                }, function (response) {
-                  setItemId(op.listName, op.key, response && response.id ? response.id : null);
-                }, function (err, status) {
-                  if (status === 409 || String(err).indexOf('409') !== -1) {
-                    // Already exists — treat as success
-                    setItemId(op.listName, op.key, null);
-                    return;
-                  }
-                  op.retries = (op.retries || 0) + 1;
-                  if (op.retries <= RETRY_MAX) retryQueue.push(op);
-                });
-              } else {
-                addListItem(op.listId, tmdbId, parts.mediaType, function (response) {
-                  setItemId(op.listName, op.key, response && response.id ? response.id : null);
-                }, function (err, status) {
-                  if (status === 409 || String(err).indexOf('409') !== -1) {
-                    // Already exists — treat as success
-                    setItemId(op.listName, op.key, null);
-                    return;
-                  }
-                  op.retries = (op.retries || 0) + 1;
-                  if (op.retries <= RETRY_MAX) retryQueue.push(op);
-                });
-              }
-            }
-          } else if (op.type === 'remove') {
-            // Socket-plane write via POST /socket/events when active; REST otherwise
-            if (isSocketActive()) {
-              var retryParts = parseElementKey(op.key);
-              var retryTmdbId = parseInt(retryParts.tmdbId, 10);
-              if (!retryTmdbId) continue;
-              socketIngest('list.item_removed', {
-                list_id: op.listId,
-                media_tmdb_id: retryTmdbId,
-                media_type: retryParts.mediaType
-              }, function () {
-                removeItemId(op.listName, op.key);
-              }, function () {
-                op.retries = (op.retries || 0) + 1;
-                if (op.retries <= RETRY_MAX) retryQueue.push(op);
-              });
-              continue;
-            }
-            deleteListItem(op.listId, op.itemId, function () {
-              removeItemId(op.listName, op.key);
-            }, function () {
-              op.retries = (op.retries || 0) + 1;
-              if (op.retries <= RETRY_MAX) retryQueue.push(op);
-            });
-          }
+          processRetryOp(batch[i]);
         }
       }, RETRY_DELAY);
     }
@@ -2330,7 +2181,7 @@
       retryQueue = [];
     }
 
-    // ─── Inbound polling (section 8.2) ────────────────────────
+    // ─── Inbound polling ────────────────────────
 
     function getPollInterval() {
       var val = Lampa.Storage.get('scrob_sync_interval', '30');
@@ -2340,9 +2191,9 @@
       if (pollTimer) return;
       pollTimer = setInterval(function () {
         if (!running || !hasSession()) return;
-        // Skip polling when socket is active (real-time via WebSocket)
-        if (isSocketActive()) return;
-        pollChanges();
+        // Socket-active mode invalidates via WS; polling is the fallback path.
+        // Both funnel into the same update() — never two parallel writers.
+        invalidate('poll');
       }, getPollInterval());
     }
     function stopPolling() {
@@ -2350,188 +2201,6 @@
         clearInterval(pollTimer);
         pollTimer = null;
       }
-    }
-    function pollChanges() {
-      getLists(function (serverLists) {
-        var m = get();
-        var changedLists = [];
-        var mappedIds = getMappedIds();
-
-        // Find [Lampa] lists and mapped lists that have changed
-        for (var i = 0; i < serverLists.length; i++) {
-          var sl = serverLists[i];
-          if (!sl.name) continue;
-          var isLampaList = sl.name.indexOf('[Lampa] ') === 0;
-          var isMapped = mappedIds.indexOf(sl.id) !== -1;
-          if (!isLampaList && !isMapped) continue;
-
-          // Use list name as mirror key (mapped lists stored under their real name)
-          var mirrorKey = sl.name;
-          var mirrorList = m.lists[mirrorKey];
-          if (!mirrorList) {
-            // New list on server — need to fetch items
-            changedLists.push(sl);
-            continue;
-          }
-
-          // Check if updated_at or item_count changed
-          if (sl.updated_at !== mirrorList.server_updated_at || sl.item_count !== Object.keys(mirrorList.items).length) {
-            changedLists.push(sl);
-          }
-        }
-        if (changedLists.length === 0) return;
-        console.log('ScrobSync', 'poll changes', changedLists.length);
-
-        // Fetch items for changed lists and apply inbound changes
-        processChangedLists(changedLists, 0);
-      }, function () {
-        // Network error on poll — silent, will retry on next interval
-        console.warn('ScrobSync', 'poll getLists failed');
-      });
-    }
-    function processChangedLists(lists, index) {
-      if (index >= lists.length) return;
-      var sl = lists[index];
-      getListItems(sl.id, function (items) {
-        applyInboundItems(sl.name, sl.id, items, sl.updated_at);
-        processChangedLists(lists, index + 1);
-      }, function () {
-        processChangedLists(lists, index + 1);
-      });
-    }
-    function applyInboundItems(listName, listId, scrobItems, serverUpdatedAt) {
-      var m = get();
-      var mirrorList = m.lists[listName] || {
-        list_id: listId,
-        items: {}
-      };
-
-      // Build current scrob element set
-      var scrobSet = {};
-      for (var i = 0; i < scrobItems.length; i++) {
-        var item = scrobItems[i];
-        if (item.media && item.media.tmdb_id) {
-          var type = toScrobType(item.media.type || 'movie');
-          var key = elementKey(type, item.media.tmdb_id);
-          scrobSet[key] = {
-            itemId: item.id,
-            media: item.media
-          };
-        }
-      }
-      var mirrorItems = mirrorList.items || {};
-
-      // Find added items (in scrob but not in mirror — key existence, null marks count as present)
-      var added = [];
-      for (var sk in scrobSet) {
-        if (typeof mirrorItems[sk] === 'undefined') {
-          added.push({
-            key: sk,
-            media: scrobSet[sk].media,
-            itemId: scrobSet[sk].itemId
-          });
-        }
-      }
-
-      // Find removed items (in mirror but not in scrob)
-      var removed = [];
-      for (var mk in mirrorItems) {
-        if (!scrobSet[mk]) {
-          removed.push(mk);
-        }
-      }
-      if (added.length === 0 && removed.length === 0) {
-        // Only update server_updated_at
-        mirrorList.server_updated_at = serverUpdatedAt;
-        m.lists[listName] = mirrorList;
-        save(m);
-        return;
-      }
-
-      // Apply inbound changes under echo guard
-      applying++;
-      setApplying(applying);
-      var favorite = Lampa.Storage.get('favorite', '{}');
-      if (typeof favorite === 'string') {
-        try {
-          favorite = JSON.parse(favorite);
-        } catch (e) {
-          favorite = {};
-        }
-      }
-      if (!favorite.card) favorite.card = [];
-      var lampaKey = findKeyForListName(listName);
-
-      // Process additions
-      for (var a = 0; a < added.length; a++) {
-        var add = added[a];
-        var parsed = parseElementKey(add.key);
-        var tmdbId = parseInt(parsed.tmdbId, 10);
-        if (!tmdbId) continue;
-
-        // Build or find card
-        var card = findCardById(favorite.card, tmdbId);
-        if (!card) {
-          card = cardFromScrobMedia(add.media) || function () {
-            var c = {
-              id: tmdbId,
-              method: toLampaMethod(parsed.mediaType),
-              title: add.media.title || parsed.tmdbId,
-              poster_path: add.media.poster_path || '',
-              release_date: add.media.release_date || ''
-            };
-            if (parsed.mediaType === 'series') {
-              c.name = c.title;
-              c.original_name = c.title;
-            }
-            return c;
-          }();
-          favorite.card.push(card);
-        }
-
-        // Add to category
-        if (lampaKey && Array.isArray(favorite[lampaKey])) {
-          if (favorite[lampaKey].indexOf(tmdbId) === -1) {
-            favorite[lampaKey].push(tmdbId);
-          }
-        }
-
-        // Mark categories: remove from other marks (section 13, point 3)
-        if (lampaKey && MARK_KEYS.indexOf(lampaKey) !== -1) {
-          removeCardFromOtherMarks(favorite, tmdbId, lampaKey);
-        }
-
-        // Update mirror
-        mirrorList.items[add.key] = add.itemId;
-      }
-
-      // Process removals
-      for (var r = 0; r < removed.length; r++) {
-        var rmKey = removed[r];
-        var rmParsed = parseElementKey(rmKey);
-        var rmId = parseInt(rmParsed.tmdbId, 10);
-        if (lampaKey && Array.isArray(favorite[lampaKey])) {
-          var idx = favorite[lampaKey].indexOf(rmId);
-          if (idx !== -1) {
-            favorite[lampaKey].splice(idx, 1);
-          }
-        }
-        delete mirrorList.items[rmKey];
-      }
-
-      // Single Storage.set after all changes
-      Lampa.Storage.set('favorite', favorite);
-
-      // Update mirror with server_updated_at and save
-      mirrorList.server_updated_at = serverUpdatedAt;
-      m.lists[listName] = mirrorList;
-      save(m);
-
-      // Release echo guard
-      setTimeout(function () {
-        applying--;
-        setApplying(applying);
-      }, 0);
     }
 
     // ─── Auth error handling ──────────────────────────────────
@@ -2558,7 +2227,8 @@
           var newId = Lampa.Storage.get(KEYS.ACTIVE_PROFILE_ID);
           if (newId !== lastProfileId) {
             lastProfileId = newId;
-            // Stop, reset mirror, re-sync for new profile
+            // Stop, reset mirror + tracker stamp, re-sync for new profile.
+            // Mirrors core: profile_select resets tracker time/version to force a dump.
             stop();
             reset();
             clearInitialDone();
@@ -2569,92 +2239,90 @@
       Lampa.Storage.listener.follow('change', profileListener);
     }
 
+    // ─── Socket lifecycle ─────────────────────────────────────
+
+    // Socket open converges on a stale tracker snapshot (core socket open → update).
+    function onSocketOpen() {
+      if (!running) return;
+      stopPolling();
+      if (isStale(getPollInterval())) update('socket-open');
+    }
+
+    // Socket close resumes polling fallback.
+    function onSocketClose() {
+      if (!running) return;
+      startPolling();
+    }
+
+    // Register WS invalidate handlers after start (core: socket open → update on stale).
+    function bindSocketHandlers() {
+      if (!activeSocket || handlersBound) return;
+      bindUpdate(invalidate);
+      registerHandlers(activeSocket);
+      if (activeSocket.onLifecycle) {
+        activeSocket.onLifecycle('open', onSocketOpen);
+        activeSocket.onLifecycle('close', onSocketClose);
+      }
+      handlersBound = true;
+      // Already-connected socket with a stale tracker snapshot converges immediately.
+      if (isSocketActive() && isStale(getPollInterval())) update('socket-open');
+    }
+    function unbindSocketHandlers() {
+      if (activeSocket && handlersBound) {
+        unregisterHandlers(activeSocket);
+        if (activeSocket.offLifecycle) {
+          activeSocket.offLifecycle('open', onSocketOpen);
+          activeSocket.offLifecycle('close', onSocketClose);
+        }
+      }
+      handlersBound = false;
+      bindUpdate(null);
+    }
+
     // ─── Mapping merge (section 14.3) ─────────────────────────
 
-    // Merge a single pair: union of local category and Scrob list.
-    // Push local→scrob, pull scrob→local, under echo guard.
+    // Merge a single pair: union of local category and Scrob list, REST only.
     function mergePair(lampaKey, listId, listName, callback) {
       console.log('ScrobSync', 'merge pair', listName);
       getListItems(listId, function (scrobItems) {
-        var favorite = Lampa.Storage.get('favorite', '{}');
-        if (typeof favorite === 'string') {
-          try {
-            favorite = JSON.parse(favorite);
-          } catch (e) {
-            favorite = {};
-          }
-        }
-        if (!favorite.card) favorite.card = [];
+        var favorite = readFavorite();
+        var scrobSet = scrobElementSet(scrobItems);
+        var localSet = localElementSet(favorite, lampaKey);
 
-        // Build scrob element set
-        var scrobSet = {};
-        for (var i = 0; i < scrobItems.length; i++) {
-          var item = scrobItems[i];
-          if (item.media && item.media.tmdb_id) {
-            var type = toScrobType(item.media.type || 'movie');
-            var key = elementKey(type, item.media.tmdb_id);
-            scrobSet[key] = {
-              itemId: item.id,
-              media: item.media
-            };
-          }
-        }
-
-        // Build local element set
-        var localIds = Array.isArray(favorite[lampaKey]) ? favorite[lampaKey] : [];
-        var localSet = {};
-        for (var j = 0; j < localIds.length; j++) {
-          var card = findCardById(favorite.card, localIds[j]);
-          if (!card || !card.id) continue;
-          var mediaType = detectMediaType(card);
-          var ek = elementKey(mediaType, card.id);
-          localSet[ek] = true;
-        }
-
-        // Push: localSet − scrobSet
+        // Push: localSet − scrobSet (REST only).
         var toAdd = [];
         for (var k in localSet) {
           if (!scrobSet[k]) toAdd.push(k);
         }
 
-        // Pull: scrobSet − localSet
-        var toRemove = [];
+        // Pull: scrobSet − localSet (unified applicator).
+        var toPull = [];
         for (var sk in scrobSet) {
-          if (!localSet[sk]) toRemove.push({
+          if (!localSet[sk]) toPull.push({
             key: sk,
-            itemId: scrobSet[sk].itemId,
             media: scrobSet[sk].media
           });
         }
-        pushItems(listId, listName, toAdd, 0, function () {
-          // Pull under echo guard
-          applying++;
-          setApplying(applying);
-          pullItems(listId, lampaKey, favorite, toRemove, 0, function () {
-            // Single Storage.set for all pull changes
-            Lampa.Storage.set('favorite', favorite);
-            setTimeout(function () {
-              applying--;
-              setApplying(applying);
-            }, 0);
-
-            // Update mirror with the mapped list's real name
-            var m = get();
-            if (!m.lists[listName]) {
-              m.lists[listName] = {
-                list_id: listId,
-                items: {}
-              };
+        pushRestItems(listId, listName, toAdd, 0, function () {
+          for (var p = 0; p < toPull.length; p++) {
+            var parsed = parseElementKey(toPull[p].key);
+            applyRemoteAdd(favorite, lampaKey, parseInt(parsed.tmdbId, 10), toPull[p].media);
+            setItemId(listName, toPull[p].key, scrobSet[toPull[p].key].itemId);
+          }
+          // Adopt server item_ids for keys the push just created (409 or fresh).
+          getListItems(listId, function (fresh) {
+            var freshSet = scrobElementSet(fresh);
+            for (var fk in freshSet) {
+              setItemId(listName, fk, freshSet[fk].itemId);
             }
-            // Update mirror items from scrobSet
-            for (var sk2 in scrobSet) {
-              m.lists[listName].items[sk2] = scrobSet[sk2].itemId;
-            }
-            // Add pushed items to mirror
-            for (var a = 0; a < toAdd.length; a++) {
-              m.lists[listName].items[toAdd[a]] = null;
-            }
-            save(m);
+            writeFavorite(favorite);
+            if (!getList(listName)) setList(listName, listId);
+            save(get());
+            callback();
+          }, function () {
+            writeFavorite(favorite);
+            if (!getList(listName)) setList(listName, listId);
+            save(get());
             callback();
           });
         });
@@ -2714,46 +2382,20 @@
       if (defaultName && m.lists[defaultName]) {
         // Clear items so reconcile does a full diff
         m.lists[defaultName].items = {};
-        m.lists[defaultName].server_updated_at = 0;
       }
       save(m);
 
-      // Re-resolve the default [Lampa] list and reconcile
+      // Re-resolve the default [Lampa] list and reconcile via the single update() path
       getLists(function (serverLists) {
         var byName = {};
         for (var i = 0; i < serverLists.length; i++) {
           byName[serverLists[i].name] = serverLists[i];
         }
         if (defaultName && byName[defaultName]) {
-          // Full reconcile of this pair
-          var favorite = Lampa.Storage.get('favorite', '{}');
-          if (typeof favorite === 'string') {
-            try {
-              favorite = JSON.parse(favorite);
-            } catch (e) {
-              favorite = {};
-            }
-          }
-          if (!favorite.card) favorite.card = [];
-          syncOneList(function () {
-            var r = {};
-            r[defaultName] = byName[defaultName].id;
-            return r;
-          }(), defaultName, favorite, function () {
-            applying++;
-            setApplying(applying);
-            Lampa.Storage.set('favorite', favorite);
-            setTimeout(function () {
-              applying--;
-              setApplying(applying);
-            }, 0);
-            save(get());
-            if (onDone) onDone();
-          });
-        } else {
-          // Default list doesn't exist on server yet — resolveLists will create it on next cycle
-          if (onDone) onDone();
+          setList(defaultName, byName[defaultName].id);
+          update('mapping-remove');
         }
+        if (onDone) onDone();
       }, function () {
         if (onDone) onDone();
       });
@@ -2784,26 +2426,33 @@
       }
       running = true;
 
-      // Register socket handlers if socket is provided
-      if (activeSocket) {
-        registerHandlers(activeSocket);
+      // Outbound: Favorite add/remove + state:changed bridge (custom keys), guarded.
+      if (Lampa.Favorite && Lampa.Favorite.listener) {
+        if (!Lampa.Favorite.listener.has('add', onFavoriteAdd)) {
+          Lampa.Favorite.listener.follow('add,added', onFavoriteAdd);
+        }
+        if (!Lampa.Favorite.listener.has('remove', onFavoriteRemove)) {
+          Lampa.Favorite.listener.follow('remove', onFavoriteRemove);
+        }
       }
+      if (Lampa.Listener && !socketPollBound) {
+        socketPollBound = true;
+        Lampa.Listener.follow('state:changed', onStateChanged);
+      }
+
+      // Socket handlers register after start; polling stops once WS is live.
+      bindSocketHandlers();
+      if (isSocketActive()) stopPolling();else startPolling();
+      setupProfileListener();
+      startRetryLoop();
 
       // Initial sync if no mirror exists
       var m = get();
       if (Object.keys(m.lists).length === 0) {
         initialSync();
+      } else if (isStale(getPollInterval())) {
+        update('start-stale');
       }
-
-      // Setup listeners
-      setupOutboundListener();
-      setupProfileListener();
-
-      // Start polling only if socket is not active (fallback mode)
-      if (!isSocketActive()) {
-        startPolling();
-      }
-      startRetryLoop();
       console.log('ScrobSync', 'started', {
         mirrorLists: Object.keys(get().lists).length
       });
@@ -2813,15 +2462,16 @@
     function stop() {
       running = false;
       console.log('ScrobSync', 'stopped');
-
-      // Unregister socket handlers
-      if (activeSocket) {
-        unregisterHandlers(activeSocket);
-        activeSocket = null;
+      unbindSocketHandlers();
+      activeSocket = null;
+      if (Lampa.Favorite && Lampa.Favorite.listener) {
+        Lampa.Favorite.listener.remove('add', onFavoriteAdd);
+        Lampa.Favorite.listener.remove('added', onFavoriteAdd);
+        Lampa.Favorite.listener.remove('remove', onFavoriteRemove);
       }
-      if (storageListener) {
-        Lampa.Storage.listener.remove('change', storageListener);
-        storageListener = null;
+      if (Lampa.Listener && typeof Lampa.Listener.remove === 'function' && socketPollBound) {
+        Lampa.Listener.remove('state:changed', onStateChanged);
+        socketPollBound = null;
       }
       if (profileListener) {
         Lampa.Storage.listener.remove('change', profileListener);
@@ -2831,6 +2481,13 @@
         clearTimeout(outboundTimer);
         outboundTimer = null;
       }
+      if (updateTimer) {
+        clearTimeout(updateTimer);
+        updateTimer = null;
+      }
+      updateRunning = false;
+      pushRunning = false;
+      pushQueue = [];
       stopPolling();
       stopRetryLoop();
     }
@@ -2905,6 +2562,85 @@
         if (list[i].key === key) return list[i];
       }
       return null;
+    }
+
+    // Profile management: letter avatars and profile switching with per-profile data isolation.
+
+    // Fixed palette for deterministic letter avatar colors.
+    var COLORS = ['#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#009688', '#4caf50', '#ff9800'];
+
+    // Deterministic color from username hash (pattern: GramLink sdk/avatars.js avatarColor).
+    function avatarColor(name) {
+      if (!name) return COLORS[0];
+      var hash = 0;
+      for (var i = 0; i < name.length; i++) {
+        hash = name.charCodeAt(i) + ((hash << 5) - hash);
+      }
+      return COLORS[Math.abs(hash) % COLORS.length];
+    }
+
+    // Avatar HTML: server image when avatar_url is set, uppercase first letter otherwise.
+    // Image URL needs ?api_key= because <img> cannot send headers.
+    function avatarHtml(user) {
+      var server = serverUrl();
+      var ownKey = Lampa.Storage.get(KEYS.OWN_API_KEY) || '';
+      if (user && user.avatar_url && server) {
+        var sep = user.avatar_url.indexOf('?') >= 0 ? '&' : '?';
+        return '<img class="scrob-avatar" src="' + server + '/api/proxy' + user.avatar_url + sep + 'api_key=' + encodeURIComponent(ownKey) + '">';
+      }
+      var name = user && user.username || '?';
+      var letter = name.charAt(0).toUpperCase();
+      return '<div class="scrob-avatar scrob-avatar--letter" style="background:' + avatarColor(name) + '">' + letter + '</div>';
+    }
+
+    // Soft refresh of the active page (pattern: docs/gramsync/profile_levende.js softRefresh).
+    function softRefresh() {
+      var activity = Lampa.Activity.active();
+      if (activity.page) activity.page = 1;
+      Lampa.Activity.replace(activity);
+      activity.outdated = false;
+    }
+
+    // Switch active profile:
+    // 1. backup isolated keys of the current profile
+    // 2. restore target profile data or defaults
+    // 3. activate target credentials
+    // 4. re-read timeline/favorite into UI
+    // 5. soft refresh the active page
+    function switchProfile(targetId) {
+      var currentId = Lampa.Storage.get(KEYS.ACTIVE_PROFILE_ID);
+      var list = getProfiles();
+      var target = null;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id == targetId) target = list[i];
+      }
+      if (!target || target.id == currentId) return false;
+
+      // 1. Backup isolated keys of the current profile
+      if (currentId) {
+        ISOLATED_KEYS.forEach(function (key) {
+          var value = Lampa.Storage.get(key, 'none');
+          if (value != 'none') Lampa.Storage.set(backupKey(currentId, key), value);
+        });
+      }
+
+      // 2. Restore target profile data or defaults
+      ISOLATED_KEYS.forEach(function (key) {
+        var saved = Lampa.Storage.get(backupKey(target.id, key), 'none');
+        Lampa.Storage.set(key, saved != 'none' ? saved : defaultValue(key));
+      });
+
+      // 3. Activate target credentials
+      Lampa.Storage.set(KEYS.ACTIVE_PROFILE_ID, target.id);
+      Lampa.Storage.set(KEYS.ACTIVE_API_KEY, target.api_key);
+
+      // 4. Re-read data into UI
+      Lampa.Timeline.read();
+      Lampa.Favorite.read();
+
+      // 5. Soft refresh of the active page
+      softRefresh();
+      return true;
     }
 
     /**

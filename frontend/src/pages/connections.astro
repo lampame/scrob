@@ -41,6 +41,31 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
     <div class="space-y-12">
       <section>
         <form id="connections-form" class="space-y-6">
+          <!-- ======== EXTENSIONS SECTION ======== -->
+          <div class="space-y-3 mt-8">
+            <h2 class="section-headline border-b border-zinc-800 pb-2">Extensions</h2>
+            <div class="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
+              <div class="flex items-center gap-4 px-6 py-4">
+                <span class="w-9 h-9 rounded-lg bg-purple-500/15 flex items-center justify-center shrink-0">
+                  <svg width="22" height="21" viewBox="0 0 110 104" fill="none" xmlns="http://www.w3.org/2000/svg"><title>Lampa</title><path d="M81.6744 103.11C98.5682 93.7234 110 75.6967 110 55C110 24.6243 85.3757 0 55 0C24.6243 0 0 24.6243 0 55C0 75.6967 11.4318 93.7234 28.3255 103.11C14.8869 94.3724 6 79.224 6 62C6 34.938 27.938 13 55 13C82.062 13 104 34.938 104 62C104 79.224 95.1131 94.3725 81.6744 103.11Z" fill="white"/><path d="M92.9546 80.0076C95.5485 74.5501 97 68.4446 97 62C97 38.804 78.196 20 55 20C31.804 20 13 38.804 13 62C13 68.4446 14.4515 74.5501 17.0454 80.0076C16.3618 77.1161 16 74.1003 16 71C16 49.4609 33.4609 32 55 32C76.5391 32 94 49.4609 94 71C94 74.1003 93.6382 77.1161 92.9546 80.0076Z" fill="white"/><path d="M55 89C69.3594 89 81 77.3594 81 63C81 57.9297 79.5486 53.1983 77.0387 49.1987C82.579 54.7989 86 62.5 86 71C86 88.1208 72.1208 102 55 102C37.8792 102 24 88.1208 24 71C24 62.5 27.421 54.7989 32.9613 49.1987C30.4514 53.1983 29 57.9297 29 63C29 77.3594 40.6406 89 55 89Z" fill="white"/><path d="M73 63C73 72.9411 64.9411 81 55 81C45.0589 81 37 72.9411 37 63C37 53.0589 45.0589 45 55 45C64.9411 45 73 53.0589 73 63Z" fill="white"/></svg>
+                </span>
+                <div class="flex-1 min-w-0">
+                  <p class="font-medium text-zinc-200">Lampa</p>
+                  <p class="text-xs text-zinc-500">Paste this URL into Lampa → Settings → Extensions to install the Scrob plugin.</p>
+                </div>
+              </div>
+              <div class="border-t border-zinc-800 px-6 py-4 space-y-2">
+                <label for="lampa-plugin-url" class="block text-sm font-medium text-zinc-400">Plugin URL</label>
+                <div class="flex gap-2">
+                  <input type="text" readonly id="lampa-plugin-url" class="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-4 py-3 text-zinc-300 font-mono text-xs focus:outline-none cursor-default select-all" value="/plugins/scrob.js" />
+                  <button type="button" id="lampa-plugin-copy" title="Copy to clipboard" class="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-300 rounded-lg transition-colors cursor-pointer">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- ======== SYNC SECTION ======== -->
           <div class="space-y-3 mt-8">
             <h2 class="section-headline border-b border-zinc-800 pb-2">Media Players</h2>
@@ -5074,15 +5099,43 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
     if (!ok) throw new Error('execCommand copy failed');
   }
 
+  const COPY_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>';
+  const CHECK_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>';
+
   function flashCopied(btn: HTMLElement): void {
-    btn.innerHTML = CHECK_ICON;
+    if (!btn.dataset.origHtml) btn.dataset.origHtml = btn.innerHTML;
+    btn.innerHTML = CHECK_ICON_SVG;
     btn.classList.add('bg-green-900', 'border-green-700', 'text-green-400');
     btn.classList.remove('bg-zinc-800', 'hover:bg-zinc-700', 'border-zinc-700', 'text-zinc-300');
     setTimeout(() => {
-      btn.innerHTML = COPY_ICON;
+      if (btn.dataset.origHtml) {
+        btn.innerHTML = btn.dataset.origHtml;
+        delete btn.dataset.origHtml;
+      } else {
+        btn.innerHTML = COPY_ICON_SVG;
+      }
       btn.classList.remove('bg-green-900', 'border-green-700', 'text-green-400');
       btn.classList.add('bg-zinc-800', 'hover:bg-zinc-700', 'border-zinc-700', 'text-zinc-300');
     }, 2000);
+  }
+
+  function setupExtensions() {
+    const urlInput = document.getElementById('lampa-plugin-url') as HTMLInputElement | null;
+    if (urlInput) {
+      urlInput.value = `${window.location.origin}/plugins/scrob.js`;
+    }
+    const copyBtn = document.getElementById('lampa-plugin-copy');
+    if (copyBtn && urlInput && !copyBtn.dataset.bound) {
+      copyBtn.dataset.bound = '1';
+      copyBtn.addEventListener('click', async () => {
+        try {
+          await copyToClipboard(urlInput.value);
+          flashCopied(copyBtn as HTMLElement);
+        } catch {
+          showMessage('Could not copy to clipboard', 'error');
+        }
+      });
+    }
   }
 
   function setupApiKey() {
@@ -5979,6 +6032,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
   setupScrobbleConnections();
   setupSettingsForm();
   setupApiKey();
+  setupExtensions();
   setupConnectedApps();
   setupCollapsibleRows();
   checkConnections();
@@ -5992,6 +6046,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
     setupConnections();
     setupSettingsForm();
     setupApiKey();
+    setupExtensions();
     setupConnectedApps();
     setupCollapsibleRows();
     checkConnections();

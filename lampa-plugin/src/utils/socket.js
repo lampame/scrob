@@ -48,6 +48,7 @@ function connect(url) {
         ws.onopen = function () {
             reconnectAttempts = 0
             console.log('ScrobSocket', 'connected')
+            emitLifecycle('open')
         }
 
         ws.onmessage = function (event) {
@@ -56,6 +57,7 @@ function connect(url) {
 
         ws.onclose = function (event) {
             console.log('ScrobSocket', 'disconnected', event.code)
+            emitLifecycle('close')
             scheduleReconnect()
         }
 
@@ -106,6 +108,27 @@ function dispatch(type, payload) {
                 console.error('ScrobSocket', 'handler error', e)
             }
         })
+    }
+}
+
+// Lifecycle hooks: 'open' converges on stale snapshot, 'close' resumes polling.
+// Subscribed by sync.engine via onLifecycle (core socket open → update pattern).
+var lifecycle = { open: [], close: [] }
+
+function emitLifecycle(which) {
+    var list = lifecycle[which] || []
+    for (var i = 0; i < list.length; i++) {
+        try { list[i]() } catch (e) { console.error('ScrobSocket', 'lifecycle error', e) }
+    }
+}
+
+export function scrobSocketOnLifecycle(which, handler) {
+    if (lifecycle[which] && lifecycle[which].indexOf(handler) === -1) lifecycle[which].push(handler)
+}
+
+export function scrobSocketOffLifecycle(which, handler) {
+    if (lifecycle[which]) {
+        lifecycle[which] = lifecycle[which].filter(function (h) { return h !== handler })
     }
 }
 
@@ -162,12 +185,14 @@ export function scrobSocketDisconnect() {
     handlers = {}
 }
 
-// Get socket interface object for sync.engine.
-// Relay client is inbound-only (emit subscriptions); writes go via POST /socket/events.
+// Get socket interface object for sync.engine (inbound-only notify).
+// REST is the only write path; the server broadcasts REST writes to all devices.
 export function getScrobSocket() {
     return {
         on: scrobSocketOn,
         off: scrobSocketOff,
-        isConnected: scrobSocketIsConnected
+        isConnected: scrobSocketIsConnected,
+        onLifecycle: scrobSocketOnLifecycle,
+        offLifecycle: scrobSocketOffLifecycle
     }
 }

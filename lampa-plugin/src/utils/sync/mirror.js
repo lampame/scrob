@@ -1,9 +1,11 @@
-// Scrob sync — mirror storage.
+// Scrob sync — mirror storage with Tracker-model staleness.
 // Per-profile mirror: scrob_sync_mirror_{profile_id}
-// Structure: { lists: { "[Lampa] Name": { list_id, items: { "type:tmdb_id": item_id } } }, updated_at }
+// Structure: { lists: { "[Lampa] Name": { list_id, items: { "type:tmdb_id": item_id } } },
+//              version, time, updated_at }
+// version/time follow Lampa core Tracker (src/core/tracker.js): bumped on every
+// converged save; profile switch resets them so the next update fetches fresh state.
 
 import { KEYS } from '../storage'
-import { activeProfile } from '../profiles'
 
 // Get the storage key for the active profile's mirror
 function mirrorKey() {
@@ -21,6 +23,8 @@ export function initialDoneKey() {
 function emptyMirror() {
     return {
         lists: {},
+        version: 0,
+        time: 0,
         updated_at: 0
     }
 }
@@ -37,8 +41,23 @@ export function get() {
 
 // Save the mirror to storage
 export function save(mirror) {
-    mirror.updated_at = Date.now()
+    var now = Date.now()
+    mirror.time = now
+    mirror.version = (mirror.version || 0) + 1
+    mirror.updated_at = now
     Lampa.Storage.set(mirrorKey(), mirror)
+}
+
+// Current tracker stamp: { version, time } (Tracker model from Lampa core)
+export function tracker() {
+    var m = get()
+    return { version: m.version || 0, time: m.time || 0 }
+}
+
+// True when the mirror snapshot is older than the given age (ms)
+export function isStale(maxAgeMs) {
+    var m = get()
+    return (Date.now() - (m.time || 0)) > maxAgeMs
 }
 
 // Reset the mirror to empty
