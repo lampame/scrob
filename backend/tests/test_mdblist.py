@@ -709,6 +709,135 @@ class DescribeNotFoundTests(unittest.TestCase):
         self.assertEqual(_describe_not_found({}), "item no-id")
         self.assertEqual(_describe_not_found({"kind": "movie", "item": "garbage"}), "movie no-id")
 
+    def test_recovered_show_candidate_resolves_to_a_title(self):
+        # #368: the id-less episode echo carries _candidate_show_tmdb_ids
+        # (attached by core.mdblist._push) instead of MDBList's own ids.
+        entry = {"kind": "episode", "item": {"season": 6, "_candidate_show_tmdb_ids": [1396]}}
+        self.assertEqual(
+            _describe_not_found(entry, show_titles={1396: "Breaking Bad"}),
+            "episode no-id S6 (show: Breaking Bad)",
+        )
+
+    def test_recovered_show_candidate_without_a_known_title_falls_back_to_tmdb_id(self):
+        entry = {"kind": "episode", "item": {"season": 6, "_candidate_show_tmdb_ids": [1396]}}
+        self.assertEqual(
+            _describe_not_found(entry, show_titles={}),
+            "episode no-id S6 (show: tmdb:1396)",
+        )
+
+    def test_multiple_candidates_are_listed_as_possibly(self):
+        entry = {"kind": "episode", "item": {"season": 6, "_candidate_show_tmdb_ids": [100, 200]}}
+        self.assertEqual(
+            _describe_not_found(entry, show_titles={100: "Poirot", 200: "Marple"}),
+            "episode no-id S6 (possibly: Poirot, Marple)",
+        )
+
+    def test_candidates_are_ignored_once_a_real_id_is_present(self):
+        # Shouldn't happen in practice (an id-bearing entry never gets
+        # _candidate_show_tmdb_ids attached), but the "no-id" guard should
+        # still hold if it ever did.
+        entry = {"kind": "episode", "item": {
+            "ids": {"tmdb": 42}, "season": 6, "_candidate_show_tmdb_ids": [100],
+        }}
+        self.assertEqual(_describe_not_found(entry, show_titles={100: "Poirot"}), "episode tmdb:42 S6")
+
+
+class IndexEpisodeShowsTests(unittest.TestCase):
+    """#368: recovers a request batch's own (season, episode) -> show tmdb id
+    mapping, since MDBList's not_found response doesn't echo it back."""
+
+    def test_exact_season_and_episode_match(self):
+        batch = {"shows": [{"ids": {"tmdb": 100}, "seasons": [{"number": 2, "episodes": [{"number": 4}]}]}]}
+        exact, by_season = mdblist._index_episode_shows(batch)
+        self.assertEqual(exact[(2, 4)], [100])
+        self.assertEqual(by_season[2], [100])
+
+    def test_season_only_aggregates_every_show_with_that_season(self):
+        batch = {"shows": [
+            {"ids": {"tmdb": 100}, "seasons": [{"number": 6, "episodes": [{"number": 1}]}]},
+            {"ids": {"tmdb": 200}, "seasons": [{"number": 6, "episodes": [{"number": 2}]}]},
+        ]}
+        exact, by_season = mdblist._index_episode_shows(batch)
+        self.assertEqual(sorted(by_season[6]), [100, 200])
+
+    def test_show_with_no_tmdb_id_is_not_indexed(self):
+        batch = {"shows": [{"ids": {}, "seasons": [{"number": 1, "episodes": [{"number": 1}]}]}]}
+        exact, by_season = mdblist._index_episode_shows(batch)
+        self.assertEqual(exact, {})
+        self.assertEqual(by_season, {})
+
+
+class PushRecoversEpisodeShowContextTests(unittest.IsolatedAsyncioTestCase):
+    """#368: an episode MDBList reports not found comes back in its own flat
+    "episodes" bucket with just a season (sometimes not even an episode)
+    number and no id - even though the request nested it under its show's
+    tmdb id. _push must recover that from the request it just sent, since
+    the response never carries it."""
+
+    async def test_exact_season_episode_match_is_attached(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "added": {}, "not_found": {"episodes": [{"season": 6, "episode": 3}]},
+            })
+
+        payload = {
+            "movies": [], "seasons": [], "episodes": [],
+            "shows": [{"ids": {"tmdb": 555}, "seasons": [{"number": 6, "episodes": [{"number": 3}]}]}],
+        }
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            mdblist.httpx, "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            result = await mdblist.push_watched("secret-key", payload)
+
+        self.assertEqual(
+            result["not_found_items"],
+            [{"kind": "episode", "item": {"season": 6, "episode": 3, "_candidate_show_tmdb_ids": [555]}}],
+        )
+
+    async def test_season_only_echo_lists_every_show_with_that_season(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"added": {}, "not_found": {"episodes": [{"season": 6}]}})
+
+        payload = {
+            "movies": [], "seasons": [], "episodes": [],
+            "shows": [
+                {"ids": {"tmdb": 100}, "seasons": [{"number": 6, "episodes": [{"number": 1}]}]},
+                {"ids": {"tmdb": 200}, "seasons": [{"number": 6, "episodes": [{"number": 9}]}]},
+            ],
+        }
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            mdblist.httpx, "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            result = await mdblist.push_watched("secret-key", payload)
+
+        item = result["not_found_items"][0]["item"]
+        self.assertEqual(sorted(item["_candidate_show_tmdb_ids"]), [100, 200])
+
+    async def test_entry_with_its_own_id_is_left_untouched(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={
+                "added": {},
+                "not_found": {"episodes": [{"ids": {"tmdb": 999}, "season": 1, "episode": 1}]},
+            })
+
+        payload = {
+            "movies": [], "seasons": [], "episodes": [],
+            "shows": [{"ids": {"tmdb": 555}, "seasons": [{"number": 1, "episodes": [{"number": 1}]}]}],
+        }
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            mdblist.httpx, "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            result = await mdblist.push_watched("secret-key", payload)
+
+        item = result["not_found_items"][0]["item"]
+        self.assertNotIn("_candidate_show_tmdb_ids", item)
+
 
 if __name__ == "__main__":
     unittest.main()

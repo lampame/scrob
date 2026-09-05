@@ -85,10 +85,17 @@ def _entry_data(kind: str, entry: dict[str, Any]) -> dict[str, Any]:
     return nested if isinstance(nested, dict) else entry
 
 
-def _describe_not_found(entry: dict[str, Any]) -> str:
+def _describe_not_found(entry: dict[str, Any], show_titles: dict[int, str] | None = None) -> str:
     """One-line human summary of an item MDBList reported as not found, for the
     push job's WARNING log (#340). Defensive about MDBList's echo shape - it
-    carries at least the ids we sent, sometimes a title and season/episode."""
+    carries at least the ids we sent, sometimes a title and season/episode.
+
+    An episode entry with no id of its own instead carries the show tmdb
+    id(s) core.mdblist._push recovered locally (see _index_episode_shows) in
+    "_candidate_show_tmdb_ids" - show_titles resolves those to a name where
+    known, so "episode no-id S6" becomes "episode no-id S6 (show: Poirot)"
+    or, when more than one show shares that season number in this batch,
+    "(possibly: Poirot, Marple)" (#368)."""
     kind = entry.get("kind") or "item"
     item = entry.get("item") if isinstance(entry.get("item"), dict) else {}
     ids = item.get("ids") if isinstance(item.get("ids"), dict) else {}
@@ -109,8 +116,15 @@ def _describe_not_found(entry: dict[str, Any]) -> str:
         if item.get("episode") is not None:
             sxe += f"E{item['episode']}"
 
+    show_ref = ""
+    candidates = item.get("_candidate_show_tmdb_ids")
+    if ref == "no-id" and isinstance(candidates, list) and candidates:
+        names = [(show_titles or {}).get(c) or f"tmdb:{c}" for c in candidates]
+        label = "show" if len(names) == 1 else "possibly"
+        show_ref = f" ({label}: {', '.join(names)})"
+
     title = item.get("title")
-    return f"{kind} {ref}{sxe}" + (f' "{title}"' if title else "")
+    return f"{kind} {ref}{sxe}" + (f' "{title}"' if title else "") + show_ref
 
 
 def _tmdb_id(data: dict[str, Any]) -> int | None:
@@ -976,7 +990,21 @@ async def run_mdblist_push(user_id: int, job_id: int) -> None:
                 f"Total: {submitted} submitted, {not_found} not found."
             )
             if not_found_items:
-                shown = "; ".join(_describe_not_found(it) for it in not_found_items[:50])
+                # Resolve whatever show tmdb ids _index_episode_shows recovered
+                # for the id-less episode entries above to a title, so the log
+                # reads "(show: Poirot)" instead of a second tmdb id (#368).
+                candidate_ids = {
+                    tmdb_id
+                    for it in not_found_items
+                    for tmdb_id in (it.get("item") or {}).get("_candidate_show_tmdb_ids") or []
+                }
+                show_titles: dict[int, str] = {}
+                if candidate_ids:
+                    rows = await db.execute(
+                        select(Show.tmdb_id, Show.title).where(Show.tmdb_id.in_(candidate_ids))
+                    )
+                    show_titles = dict(rows.all())
+                shown = "; ".join(_describe_not_found(it, show_titles) for it in not_found_items[:50])
                 more = f" (+{not_found - len(not_found_items[:50])} more)" if not_found > 50 else ""
                 logger.warning(
                     "MDBList push job %s: %d item(s) not found on MDBList: %s%s",
