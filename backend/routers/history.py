@@ -2908,12 +2908,32 @@ async def _get_or_create_media_for_session(
             media = existing_q.scalars().first()
             if media:
                 return media
+        # Prefer TMDB's own per-episode runtime over the client's guess - the client
+        # (Lampa plugin) falls back to a flat 45-minute default when it can't yet resolve
+        # the real one (no video duration/metadata available at session-start time), and
+        # that guess would otherwise get baked into this row permanently on creation.
+        resolved_runtime = body.runtime
+        if (
+            check_tmdb_key(api_key)
+            and body.show_tmdb_id
+            and body.season_number is not None
+            and body.episode_number is not None
+        ):
+            try:
+                ep_data = await tmdb.get_episode(
+                    body.show_tmdb_id, body.season_number, body.episode_number, api_key=api_key
+                )
+                if ep_data.get("runtime"):
+                    resolved_runtime = ep_data["runtime"]
+            except Exception:
+                pass
+
         media, _created = await create_media_safely(
             db,
             body.tmdb_id,
             body.media_type,
             title=body.title or "Unknown",
-            runtime=body.runtime,
+            runtime=resolved_runtime,
             season_number=body.season_number,
             episode_number=body.episode_number,
             show_id=show.id if show else None,
