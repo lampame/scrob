@@ -280,7 +280,10 @@ const { tmdbId, mediaType, runtime, title, showTmdbId, seasonNumber, episodeNumb
   // ── Init: check for existing session ──────────────────────────────────────
   async function init(): Promise<void> {
     try {
-      const res = await fetch(`${API}/history/now-playing`, {
+      // include_hidden: this widget looks up its OWN session for the exact title the
+      // user is on right now - it must find it even if that title was since dropped,
+      // otherwise resuming/managing playback on a dropped title's own page breaks.
+      const res = await fetch(`${API}/history/now-playing?include_hidden=true`, {
         headers: { 'Authorization': `Bearer ${TOKEN()}` },
       });
       if (!res.ok) { renderIdle(); return; }

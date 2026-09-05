@@ -529,15 +529,34 @@ async def _apply_episode_order_to_sessions(sessions: list[dict], db: AsyncSessio
 
 @router.get("/now-playing")
 async def get_now_playing(
+    include_hidden: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_or_api_key),
 ):
-    """Active playback sessions for the current user."""
+    """Active playback sessions for the current user.
+
+    Dropped movies/shows are excluded by default (same rule as
+    /continue-watching) - a session left paused on something the user has
+    since dropped shouldn't keep resurfacing it on the homepage. Callers that
+    need every session regardless of drop status (e.g. the manual-scrobble
+    widget looking up its own session for the exact title it's on) can pass
+    include_hidden=true."""
+    settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
+    settings = settings_result.scalar_one_or_none()
+    dropped_movie_ids = set(settings.dropped_movies or []) if settings else set()
+    dropped_show_ids = set(settings.dropped_shows or []) if settings else set()
+
+    filters = [PlaybackSession.user_id == current_user.id]
+    if dropped_movie_ids and not include_hidden:
+        filters.append(Media.id.notin_(dropped_movie_ids))
+    if dropped_show_ids and not include_hidden:
+        filters.append(or_(Media.show_id.is_(None), Media.show_id.notin_(dropped_show_ids)))
+
     result = await db.execute(
         select(PlaybackSession, Media)
         .join(Media, Media.id == PlaybackSession.media_id)
         .outerjoin(Show, Show.id == Media.show_id)
-        .where(PlaybackSession.user_id == current_user.id)
+        .where(*filters)
         .order_by(desc(PlaybackSession.updated_at))
     )
     rows = result.all()
