@@ -2896,6 +2896,33 @@ async def _get_or_create_media_for_session(
             show = show_q.scalar_one_or_none()
             if show:
                 show_id = show.id
+            else:
+                try:
+                    data = await tmdb.get_show(body.show_tmdb_id, api_key=api_key)
+                    show = Show(
+                        tmdb_id=body.show_tmdb_id,
+                        title=data.get("name") or "Unknown",
+                        poster_path=tmdb.poster_url(data.get("poster_path")),
+                        backdrop_path=tmdb.poster_url(data.get("backdrop_path"), size="w1280"),
+                        tmdb_rating=data.get("vote_average"),
+                        status=data.get("status"),
+                        first_air_date=data.get("first_air_date"),
+                        tmdb_data={
+                            "genres": [g["name"] for g in data.get("genres", [])],
+                            "seasons": [
+                                {
+                                    "season_number": s["season_number"],
+                                    "episode_count": s["episode_count"],
+                                    "name": s["name"],
+                                } for s in data.get("seasons", [])
+                            ]
+                        }
+                    )
+                    db.add(show)
+                    await db.flush()
+                    show_id = show.id
+                except Exception as e:
+                    logger.warning("Could not auto-create Show %s from TMDB: %s", body.show_tmdb_id, e)
         if show_id is not None and body.season_number is not None and body.episode_number is not None:
             existing_q = await db.execute(
                 select(Media).where(
