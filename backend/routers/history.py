@@ -2950,7 +2950,11 @@ async def start_manual_session(
     """
     media = await _get_or_create_media_for_session(db, body, current_user.id)
 
-    if media.runtime is None and body.runtime:
+    # Always take a freshly-reported runtime over whatever's stored, not just when it's
+    # still unset - the client's own fallback guess (a flat 45/90 min default used only
+    # when it genuinely couldn't resolve the real one yet) could otherwise get persisted
+    # here once and then never corrected by a later, better-informed session start.
+    if body.runtime:
         media.runtime = body.runtime
 
     show_tmdb = body.show_tmdb_id
@@ -3234,7 +3238,9 @@ async def _upsert_session_progress(
     """Resolve/create the media for a title identity, then update (or lazily
     create) its playback session and Continue-Watching progress (design doc §3.4)."""
     media = await _get_or_create_media_for_session(db, start_body, current_user.id)
-    if media.runtime is None and start_body.runtime:
+    # See the matching comment in start_manual_session() above - always refresh from a
+    # freshly-reported runtime rather than only filling it in once.
+    if start_body.runtime:
         media.runtime = start_body.runtime
 
     show_tmdb = start_body.show_tmdb_id
