@@ -120,3 +120,134 @@ export function cardFromScrobMedia(media) {
 
 // Map of excluded keys for external checks
 export { EXCLUDED, MARK_KEYS, CANONICAL }
+
+// ─── Unified KeyResolver (single implementation for REST + socket paths) ───
+// map: mapstore mapping object { lampaKey: { list_id, list_name } }
+// mirrorLists: mirror.get().lists ({ name: { list_id } })
+// favorite: parsed favorite object (for custom keys discovered at runtime)
+
+// Resolve the Lampa key for a Scrob list name.
+// Priority: 1) mapstore reverse lookup by name, 2) canonical names, 3) custom keys.
+export function resolveKeyForListName(listName, map, favorite) {
+    if (!listName) return null
+    if (map) {
+        var mapKeys = Object.keys(map)
+        for (var i = 0; i < mapKeys.length; i++) {
+            if (map[mapKeys[i]].list_name === listName) return mapKeys[i]
+        }
+    }
+    var canonicals = ['book', 'like', 'wath', 'scheduled', 'continued', 'thrown', 'look']
+    for (var j = 0; j < canonicals.length; j++) {
+        if (CANONICAL[canonicals[j]] === listName) return canonicals[j]
+    }
+    if (favorite) {
+        var keys = syncableKeys(favorite)
+        for (var k = 0; k < keys.length; k++) {
+            if (listNameForKey(keys[k]) === listName) return keys[k]
+        }
+    }
+    return null
+}
+
+// Resolve the Scrob list name for a list_id via the mirror index.
+export function resolveNameForListId(listId, mirrorLists) {
+    if (listId == null || !mirrorLists) return null
+    var names = Object.keys(mirrorLists)
+    for (var i = 0; i < names.length; i++) {
+        if (mirrorLists[names[i]].list_id == listId) return names[i]
+    }
+    return null
+}
+
+// Resolve the Lampa key for a Scrob list_id.
+// Priority: 1) mapstore reverse lookup by id, 2) mirror name → key.
+export function resolveKeyForListId(listId, map, mirrorLists, favorite) {
+    if (listId == null) return null
+    if (map) {
+        var keys = Object.keys(map)
+        for (var i = 0; i < keys.length; i++) {
+            if (map[keys[i]].list_id == listId) return keys[i]
+        }
+    }
+    var name = resolveNameForListId(listId, mirrorLists)
+    if (name) return resolveKeyForListName(name, map, favorite)
+    return null
+}
+
+// ─── Unified applicator (single write path with core marks logic) ───
+// All functions mutate the passed favorite object; the caller performs
+// exactly one Lampa.Storage.set('favorite') after the batch.
+
+// Remove a card from all mark categories except the specified one.
+// Mirrors Favorite.toggle() exclusivity in src/core/favorite.js.
+export function removeFromOtherMarks(favorite, cardId, exceptKey) {
+    for (var i = 0; i < MARK_KEYS.length; i++) {
+        var key = MARK_KEYS[i]
+        if (key === exceptKey) continue
+        if (!Array.isArray(favorite[key])) continue
+        var idx = favorite[key].indexOf(cardId)
+        if (idx !== -1) favorite[key].splice(idx, 1)
+    }
+}
+
+// Find a card by id in the shared pool.
+export function findCardById(cards, id) {
+    if (!Array.isArray(cards)) return null
+    for (var i = 0; i < cards.length; i++) {
+        if (cards[i].id == id) return cards[i]
+    }
+    return null
+}
+
+// Build the local element set for one category: { "type:tmdb_id": cardId }
+export function localElementSet(favorite, lampaKey) {
+    var set = {}
+    var localIds = (lampaKey && Array.isArray(favorite[lampaKey])) ? favorite[lampaKey] : []
+    for (var j = 0; j < localIds.length; j++) {
+        var card = findCardById(favorite.card, localIds[j])
+        if (!card || !card.id) continue
+        var idNum = parseInt(card.id, 10)
+        if (!idNum) continue
+        set[elementKey(detectMediaType(card), idNum)] = card.id
+    }
+    return set
+}
+
+// Build the server element set from GET /lists/{id} items.
+export function scrobElementSet(scrobItems) {
+    var set = {}
+    for (var i = 0; i < scrobItems.length; i++) {
+        var item = scrobItems[i]
+        if (item.media && item.media.tmdb_id) {
+            var key = elementKey(toScrobType(item.media.type || 'movie'), item.media.tmdb_id)
+            set[key] = { itemId: item.id, media: item.media }
+        }
+    }
+    return set
+}
+
+// Apply one remote addition to the favorite object (card pool + category + marks).
+export function applyRemoteAdd(favorite, lampaKey, tmdbId, media) {
+    if (!tmdbId) return
+    if (!Array.isArray(favorite.card)) favorite.card = []
+    var card = findCardById(favorite.card, tmdbId)
+    if (!card) {
+        card = (media && cardFromScrobMedia(media)) || null
+        if (!card) {
+            card = { id: tmdbId, method: 'movie', title: String(tmdbId), poster_path: '' }
+        }
+        favorite.card.push(card)
+    }
+    if (lampaKey) {
+        if (!Array.isArray(favorite[lampaKey])) favorite[lampaKey] = []
+        if (favorite[lampaKey].indexOf(card.id) === -1) favorite[lampaKey].push(card.id)
+        if (MARK_KEYS.indexOf(lampaKey) !== -1) removeFromOtherMarks(favorite, card.id, lampaKey)
+    }
+}
+
+// Apply one remote removal to the favorite object.
+export function applyRemoteRemove(favorite, lampaKey, tmdbId) {
+    if (!tmdbId || !lampaKey || !Array.isArray(favorite[lampaKey])) return
+    var idx = favorite[lampaKey].indexOf(tmdbId)
+    if (idx !== -1) favorite[lampaKey].splice(idx, 1)
+}
