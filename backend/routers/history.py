@@ -378,6 +378,7 @@ async def get_history(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     type: str | None = Query(None),
+    q: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_or_api_key),
 ):
@@ -391,14 +392,25 @@ async def get_history(
     # then 404'd trying to open as a movie). See #358.
     type_filter = [type] if type in ("movie", "episode") else ["movie", "episode"]
 
+    # A show's title lives on Show, not on its episode Media rows (those only
+    # carry the episode's own title) - so a search for the show name has to
+    # reach through the same outer join enrich_with_state/format_event already
+    # rely on downstream, not just Media.title.
+    search_term = q.strip() if q else None
+
     base_query = (
         select(func.count())
         .select_from(WatchEvent)
         .join(Media, Media.id == WatchEvent.media_id)
+        .outerjoin(Show, Show.id == Media.show_id)
         .where(WatchEvent.user_id == current_user.id)
         .where(WatchEvent.completed == True)
         .where(Media.media_type.in_(type_filter))
     )
+    if search_term:
+        base_query = base_query.where(
+            or_(Media.title.ilike(f"%{search_term}%"), Show.title.ilike(f"%{search_term}%"))
+        )
 
     total_result = await db.execute(base_query)
     total_count = total_result.scalar_one()
@@ -407,12 +419,17 @@ async def get_history(
     query = (
         select(WatchEvent, Media)
         .join(Media, Media.id == WatchEvent.media_id)
+        .outerjoin(Show, Show.id == Media.show_id)
         .options(selectinload(WatchEvent.media).selectinload(Media.show))
         .where(WatchEvent.user_id == current_user.id)
         .where(WatchEvent.completed == True)
         .where(Media.media_type.in_(type_filter))
         .order_by(WatchEvent.watched_at.desc().nulls_last(), WatchEvent.id.desc())
     )
+    if search_term:
+        query = query.where(
+            or_(Media.title.ilike(f"%{search_term}%"), Show.title.ilike(f"%{search_term}%"))
+        )
 
     query = query.offset(offset).limit(page_size)
 
