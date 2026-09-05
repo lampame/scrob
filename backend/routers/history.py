@@ -650,10 +650,13 @@ async def get_continue_watching(
     settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
     settings = settings_result.scalar_one_or_none()
     dropped_movie_ids = set(settings.dropped_movies or []) if settings else set()
+    dropped_show_ids = set(settings.dropped_shows or []) if settings else set()
 
     filters = [PlaybackProgress.user_id == current_user.id]
     if dropped_movie_ids and not include_hidden:
         filters.append(Media.id.notin_(dropped_movie_ids))
+    if dropped_show_ids and not include_hidden:
+        filters.append(or_(Media.show_id.is_(None), Media.show_id.notin_(dropped_show_ids)))
     query = (
         select(PlaybackProgress, Media)
         .join(Media, Media.id == PlaybackProgress.media_id)
