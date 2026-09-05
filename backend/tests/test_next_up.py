@@ -1,11 +1,14 @@
+import json
 import os
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
 
-from routers.history import _compute_next_episode, _group_last_watched, _has_aired, _has_confirmed_air_date, _remaining_episode_stats
+from routers.history import _compute_next_episode, _group_last_watched, _has_aired, _has_confirmed_air_date, _next_up_needs_live_fetch, _remaining_episode_stats, _stream_next_up_refresh
 from core.rewatch import capped_season_episode_counts
 
 
@@ -206,3 +209,264 @@ class CappedSeasonCountsFromCacheTests(unittest.TestCase):
         stats = _remaining_episode_stats({1: 4}, {1: 1}, avg_runtime=42.5)
         self.assertEqual(stats["episodes_left"], 3)
         self.assertEqual(stats["remaining_runtime"], 128)
+
+class NeedsLiveFetchTests(unittest.TestCase):
+    """Regression tests for #332 (follow-up to #294/#307): the missing-episode
+    fallback used to live-fetch every fully-watched show from TMDB on every
+    cold load - minutes on a big library. _next_up_needs_live_fetch is the
+    gate that decides, from the Show row alone, whether the stored tmdb_data
+    snapshot can answer "did a new episode appear?" or TMDB must be asked."""
+
+    TODAY = date(2026, 3, 15)
+    NOW = datetime(2026, 3, 15, 12, 0, tzinfo=timezone.utc)
+
+    class _Show:
+        def __init__(self, status="Returning Series", tmdb_id=42, tmdb_data=None):
+            self.status = status
+            self.tmdb_id = tmdb_id
+            self.tmdb_data = tmdb_data
+
+    def _needs(self, show):
+        return _next_up_needs_live_fetch(show, self.TODAY, self.NOW)
+
+    def _fresh(self):
+        return (self.NOW - timedelta(hours=1)).isoformat()
+
+    def _stale(self):
+        return (self.NOW - timedelta(days=3)).isoformat()
+
+    # --- the #332 case: finished shows must not cost a TMDB call ---
+
+    def test_finished_show_with_snapshot_is_not_fetched(self):
+        show = self._Show(status="Ended", tmdb_data={"seasons": [{"season_number": 1, "episode_count": 10}]})
+        self.assertFalse(self._needs(show))
+
+    def test_canceled_show_with_snapshot_is_not_fetched(self):
+        show = self._Show(status="Canceled", tmdb_data={"seasons": []})
+        self.assertFalse(self._needs(show))
+
+    def test_finished_show_without_seasons_key_is_fetched_once_to_build_snapshot(self):
+        # Status set by some path that never stored a snapshot: fetching once
+        # writes a "seasons" key (possibly empty), after which this stops.
+        show = self._Show(status="Ended", tmdb_data={})
+        self.assertTrue(self._needs(show))
+        show_no_data = self._Show(status="Ended", tmdb_data=None)
+        self.assertTrue(self._needs(show_no_data))
+
+    def test_revived_show_is_fetched_again(self):
+        # The Futurama case (#307): the daily sweep flips status away from
+        # Ended - the gate must then treat the show as live again. The sweep
+        # also rewrites refreshed_at, but a revival mid-window must not wait
+        # out the staleness threshold if the snapshot is old.
+        show = self._Show(status="Returning Series", tmdb_data={"seasons": [], "refreshed_at": self._stale()})
+        self.assertTrue(self._needs(show))
+
+    # --- returning shows: fetch only when something new can exist ---
+
+    def test_future_next_air_date_with_fresh_snapshot_is_not_fetched(self):
+        show = self._Show(tmdb_data={
+            "seasons": [],
+            "next_episode_to_air": {"air_date": "2026-04-01"},
+            "refreshed_at": self._fresh(),
+        })
+        self.assertFalse(self._needs(show))
+
+    def test_next_air_date_today_is_fetched(self):
+        show = self._Show(tmdb_data={
+            "seasons": [],
+            "next_episode_to_air": {"air_date": "2026-03-15"},
+            "refreshed_at": self._fresh(),
+        })
+        self.assertTrue(self._needs(show))
+
+    def test_past_next_air_date_is_fetched(self):
+        show = self._Show(tmdb_data={
+            "seasons": [],
+            "next_episode_to_air": {"air_date": "2026-03-01"},
+            "refreshed_at": self._fresh(),
+        })
+        self.assertTrue(self._needs(show))
+
+    def test_no_scheduled_episode_with_fresh_snapshot_is_not_fetched(self):
+        show = self._Show(tmdb_data={"seasons": [], "refreshed_at": self._fresh()})
+        self.assertFalse(self._needs(show))
+
+    def test_stale_snapshot_is_fetched_even_with_future_air_date(self):
+        # #287's lesson: never trust a snapshot indefinitely. Even a stored
+        # future air date might have been moved up since the snapshot was
+        # written, so staleness alone forces a re-fetch.
+        show = self._Show(tmdb_data={
+            "seasons": [],
+            "next_episode_to_air": {"air_date": "2026-04-01"},
+            "refreshed_at": self._stale(),
+        })
+        self.assertTrue(self._needs(show))
+
+    def test_snapshot_without_refreshed_at_is_fetched(self):
+        # Pre-upgrade rows have no refreshed_at: they keep today's
+        # always-fetch behavior until something writes the stamp.
+        show = self._Show(tmdb_data={"seasons": []})
+        self.assertTrue(self._needs(show))
+        self.assertTrue(self._needs(self._Show(tmdb_data=None)))
+
+    def test_malformed_refreshed_at_is_fetched(self):
+        show = self._Show(tmdb_data={"seasons": [], "refreshed_at": "not-a-date"})
+        self.assertTrue(self._needs(show))
+
+    def test_naive_refreshed_at_is_treated_as_utc_not_crashed_on(self):
+        naive_fresh = (self.NOW - timedelta(hours=1)).replace(tzinfo=None).isoformat()
+        show = self._Show(tmdb_data={"seasons": [], "refreshed_at": naive_fresh})
+        self.assertFalse(self._needs(show))
+
+    # --- shows this path must never touch ---
+
+    def test_show_without_tmdb_id_is_never_fetched(self):
+        self.assertFalse(self._needs(self._Show(tmdb_id=None, tmdb_data=None)))
+        self.assertFalse(self._needs(None))
+
+    def test_tvdb_sourced_snapshot_is_never_fetched(self):
+        # A TVDB-sourced snapshot's season layout is TVDB-shaped (#335);
+        # fetching would later overwrite it with TMDB-shaped data. Applies no
+        # matter how stale it is or what status it carries.
+        show = self._Show(tmdb_data={"seasons": [], "source": "tvdb", "refreshed_at": self._stale()})
+        self.assertFalse(self._needs(show))
+
+
+class ApplyShowMetadataSnapshotTests(unittest.TestCase):
+    """The Next Up gate above only works if apply_show_metadata actually
+    writes the fields it reads - these pin that contract (#332)."""
+
+    class _Show:
+        def __init__(self):
+            self.title = "Old"
+            self.status = None
+            self.tmdb_data = None
+
+    def test_snapshot_carries_gating_fields(self):
+        from routers.shows import apply_show_metadata
+
+        show = self._Show()
+        next_ep = {"air_date": "2026-04-01", "season_number": 2, "episode_number": 1}
+        apply_show_metadata(show, {"name": "New", "status": "Returning Series",
+                                   "next_episode_to_air": next_ep, "seasons": []})
+        self.assertEqual(show.tmdb_data["next_episode_to_air"], next_ep)
+        refreshed = datetime.fromisoformat(show.tmdb_data["refreshed_at"])
+        self.assertIsNotNone(refreshed.tzinfo)
+        self.assertLess((datetime.now(timezone.utc) - refreshed).total_seconds(), 60)
+
+    def test_snapshot_always_has_seasons_key(self):
+        # The finals branch of _next_up_needs_live_fetch uses "seasons" being
+        # absent as "never snapshotted, fetch once" - so a rebuild for a show
+        # TMDB reports no seasons for must still write the key, or that show
+        # would be re-fetched on every load forever.
+        from routers.shows import apply_show_metadata
+
+        show = self._Show()
+        apply_show_metadata(show, {"name": "New", "status": "Ended"})
+        self.assertIn("seasons", show.tmdb_data)
+        self.assertIn("next_episode_to_air", show.tmdb_data)
+
+
+class _FakeScalarResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _FakeSession:
+    """Minimal async session stand-in for _stream_next_up_refresh: one execute()
+    returning the show rows, plus commit() call counting."""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.commits = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, *a, **k):
+        return _FakeScalarResult(self._rows)
+
+    async def commit(self):
+        self.commits += 1
+
+
+def _show(tmdb_id=1, tmdb_data=None):
+    return SimpleNamespace(id=tmdb_id, tmdb_id=tmdb_id, status="Returning Series", tmdb_data=tmdb_data)
+
+
+async def _collect(user_id, api_key):
+    return [json.loads(line) async for line in _stream_next_up_refresh(user_id, api_key)]
+
+
+class StreamNextUpRefreshTests(unittest.IsolatedAsyncioTestCase):
+    """The "Refresh from TMDB" button streams NDJSON progress while re-checking
+    TMDB for every show the user watches, then rewrites each stored snapshot."""
+
+    def _patches(self, rows, get_show):
+        session = _FakeSession(rows)
+        apply_meta = AsyncMock()  # patched as a plain callable below
+        apply_calls = []
+        return session, apply_calls, (
+            patch("routers.history.check_tmdb_key", lambda k: bool(k)),
+            patch("routers.history.AsyncSessionLocal", lambda: session),
+            patch("routers.history.tmdb.get_show", get_show),
+            patch("routers.shows.apply_show_metadata", lambda show, data: apply_calls.append(show.tmdb_id)),
+        )
+
+    async def test_no_tmdb_key_emits_single_terminal_line(self):
+        session, _, patches = self._patches([], AsyncMock())
+        with patches[0], patches[1], patches[2], patches[3]:
+            msgs = await _collect(1, None)
+        self.assertEqual(msgs, [{"total": 0, "complete": True, "error": "no_tmdb_key"}])
+
+    async def test_no_watched_shows_completes_immediately(self):
+        session, _, patches = self._patches([], AsyncMock())
+        with patches[0], patches[1], patches[2], patches[3]:
+            msgs = await _collect(1, "key")
+        self.assertEqual(msgs, [{"total": 0}, {"done": 0, "total": 0, "complete": True}])
+
+    async def test_progress_lines_and_snapshot_writes(self):
+        rows = [_show(1, {}), _show(2, {}), _show(3, {})]
+        get_show = AsyncMock(side_effect=lambda tmdb_id, **k: {"id": tmdb_id, "name": f"S{tmdb_id}"})
+        session, apply_calls, patches = self._patches(rows, get_show)
+        with patches[0], patches[1], patches[2], patches[3]:
+            msgs = await _collect(1, "key")
+
+        self.assertEqual(msgs[0], {"total": 3})
+        self.assertEqual([m["done"] for m in msgs[1:4]], [1, 2, 3])
+        self.assertEqual(msgs[-1], {"done": 3, "total": 3, "complete": True})
+        self.assertEqual(sorted(apply_calls), [1, 2, 3])
+        self.assertGreaterEqual(session.commits, 1)  # final commit
+
+    async def test_tvdb_sourced_show_is_skipped(self):
+        rows = [_show(1, {"source": "tvdb"}), _show(2, {})]
+        get_show = AsyncMock(side_effect=lambda tmdb_id, **k: {"id": tmdb_id})
+        session, apply_calls, patches = self._patches(rows, get_show)
+        with patches[0], patches[1], patches[2], patches[3]:
+            msgs = await _collect(1, "key")
+        self.assertEqual(msgs[0], {"total": 1})
+        self.assertEqual(apply_calls, [2])
+
+    async def test_one_show_failing_still_completes_progress(self):
+        rows = [_show(1, {}), _show(2, {})]
+
+        async def flaky(tmdb_id, **k):
+            if tmdb_id == 1:
+                raise RuntimeError("TMDB 500")
+            return {"id": tmdb_id}
+
+        session, apply_calls, patches = self._patches(rows, AsyncMock(side_effect=flaky))
+        with patches[0], patches[1], patches[2], patches[3]:
+            msgs = await _collect(1, "key")
+        self.assertEqual(msgs[0], {"total": 2})
+        self.assertEqual(msgs[-1], {"done": 2, "total": 2, "complete": True})
+        self.assertEqual(apply_calls, [2])  # only the one that succeeded

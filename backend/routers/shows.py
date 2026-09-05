@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pydantic import BaseModel
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -1684,9 +1684,13 @@ async def get_episode_detail(
 
 def apply_show_metadata(show: ShowModel, data: dict) -> None:
     """Writes TMDB show-detail fields onto a local Show row. Shared by the
-    manual 'Refresh Metadata' action below and the daily Ended/Canceled
-    status refresher (main.py's _show_status_refresher), so both keep
-    exactly the same field mapping."""
+    manual 'Refresh Metadata' action below, the daily metadata sweep
+    (main.py's _show_metadata_refresher), and Next Up's on-demand self-heal
+    (routers/history.py), so all keep exactly the same field mapping.
+
+    Never call this with TMDB data for a show whose tmdb_data snapshot is
+    TVDB-sourced (tmdb_data.source == "tvdb") - its season layout is
+    TVDB-shaped (#335) and would be clobbered."""
     show.title = data.get("name") or show.title
     show.original_title = data.get("original_name")
     show.overview = data.get("overview")
@@ -1704,6 +1708,13 @@ def apply_show_metadata(show: ShowModel, data: dict) -> None:
         # Kept so capped_season_episode_counts() can exclude unaired episodes
         # from cache-only callers like Next Up, which have no tmdb_extra (#296).
         "last_episode_to_air": data.get("last_episode_to_air"),
+        # Kept so Next Up's missing-episode fallback can tell from the DB alone
+        # whether a new episode can have aired since this snapshot was written
+        # (routers/history.py's _next_up_needs_live_fetch, #332).
+        "next_episode_to_air": data.get("next_episode_to_air"),
+        # When this snapshot was written - the daily metadata sweep and Next Up
+        # use it to bound how stale the snapshot may get before re-fetching.
+        "refreshed_at": datetime.now(timezone.utc).isoformat(),
         "seasons": [
             {
                 "season_number": s["season_number"],
@@ -2156,9 +2167,23 @@ async def get_tvdb_show(
         else []
     )
 
-    # Networks (name only; TVDB doesn't provide logos)
-    networks = [{"id": None, "name": n.get("name"), "logo_path": None, "origin_country": None}
-                for n in (raw.get("networks") or []) if n.get("name")]
+    # Prefer TMDB's networks - they carry the id + logo the /network/{id} link
+    # needs, and a TVDB-ordered show still has a TMDB counterpart here whenever
+    # tmdb_id_cross is set. TVDB's own network list (name only, often empty) is
+    # just the fallback for a show with no TMDB presence at all.
+    if tmdb_show.get("networks"):
+        networks = [
+            {
+                "id": n["id"],
+                "name": n["name"],
+                "logo_path": tmdb.poster_url(n.get("logo_path"), size="w500") if n.get("logo_path") else None,
+                "origin_country": n.get("origin_country"),
+            }
+            for n in tmdb_show["networks"]
+        ]
+    else:
+        networks = [{"id": None, "name": n.get("name"), "logo_path": None, "origin_country": None}
+                    for n in (raw.get("networks") or []) if n.get("name")]
 
     rewatch_info = None
     if show:

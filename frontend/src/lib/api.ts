@@ -288,7 +288,7 @@ export interface ListDetail extends UserList {
 
 // Main types
 
-export type MediaType = "movie" | "series" | "episode" | "person" | "collection";
+export type MediaType = "movie" | "series" | "episode" | "person" | "collection" | "network" | "studio";
 
 export interface UserProfile {
   id: number;
@@ -656,7 +656,14 @@ export interface MediaItem {
   // for the show and their estimated total runtime in minutes.
   episodes_left?: number | null;
   remaining_runtime?: number | null;
+  // Next Up only (#237) - the show's most recent watch (or, mid-rewatch, that
+  // rewatch's own progress/start time), for interleaving this feed with
+  // /continue-watching's own watched_at into one activity-sorted list.
+  last_watched_at?: string | null;
   known_for_department?: string | null;
+  // network / studio search results only
+  logo_path?: string | null;
+  origin_country?: string | null;
   in_library?: boolean;
   playable?: boolean;
   // Card action state
@@ -769,6 +776,14 @@ export interface CollectionDetail {
   genres: string[];
   cast: { tmdb_id: number; name: string; profile_path: string | null; appearances: number }[];
   parts: MediaItem[];
+}
+
+export interface StudioHeader {
+  id: number;
+  name: string;
+  logo_path: string | null;
+  origin_country: string | null;
+  homepage: string | null;
 }
 
 export interface TvdbEpisode {
@@ -893,7 +908,9 @@ export interface TvdbShow {
   episode_order: "tvdb";
   genres: string[];
   network: string | null;
-  networks: { id: null; name: string; logo_path: null; origin_country: null }[];
+  // TMDB networks (id + logo) when the show has a TMDB counterpart; the
+  // name-only entries ({ id: null, logo_path: null }) are the TVDB fallback.
+  networks: { id: number | null; name: string; logo_path: string | null; origin_country: string | null }[];
   seasons: TvdbSeasonMeta[];
   seasons_meta: TvdbSeasonMeta[];
   cast: { tmdb_id: null; person_id: number | null; name: string; character: string; profile_path: string | null }[];
@@ -1233,7 +1250,13 @@ export const api = {
     getCollection: (collectionId: number, token?: string) =>
       get<CollectionDetail>(`/media/collection/${collectionId}`, undefined, token),
 
-    tmdbList: (params: { type: string; category?: string; page?: number; genre?: string[]; year?: number[]; min_rating?: number; status?: string; collection?: string[]; watch?: string[]; arr?: string[]; original_language?: string; in_list?: string[] }, token?: string) =>
+    getNetwork: (networkId: number, token?: string) =>
+      get<StudioHeader>(`/media/network/${networkId}`, undefined, token),
+
+    getCompany: (companyId: number, token?: string) =>
+      get<StudioHeader>(`/media/company/${companyId}`, undefined, token),
+
+    tmdbList: (params: { type: string; category?: string; page?: number; genre?: string[]; year?: number[]; min_rating?: number; status?: string; collection?: string[]; watch?: string[]; arr?: string[]; original_language?: string; in_list?: string[]; network?: number; company?: number }, token?: string) =>
       get<{ results: MediaItem[]; page: number; total_pages: number; total_results: number }>("/media/tmdb/list", params, token),
 
     search: (q: string, type?: string, page: number = 1, year?: number, token?: string, inLibrary?: boolean) =>
@@ -1340,7 +1363,7 @@ export const api = {
   },
 
   history: {
-    list: (params?: { page?: number; page_size?: number; type?: string }, token?: string) =>
+    list: (params?: { page?: number; page_size?: number; type?: string; q?: string }, token?: string) =>
       get<{ page: number; page_size: number; total_pages: number; total_results: number; results: WatchEvent[] }>("/history", params, token),
 
     markAsWatched: (body: { tmdb_id: number; media_type: string; watched_at?: string | null; completed?: boolean }, token: string) =>

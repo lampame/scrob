@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import httpx
 import xmltodict
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ def get_guids(item: Dict) -> List[Dict]:
     Modern Plex returns a 'Guid' array: [{"id": "tmdb://123"}, ...].
     Legacy items may have an empty/missing 'Guid' but a single lowercase 'guid'
     string like 'com.plexapp.agents.thetvdb://73762/1/1'.
+    HAMA items have a guid string like 'com.plexapp.agents.hama://tvdb-73762/1/1'.
     """
     guids = item.get("Guid") or []
     if not guids:
@@ -34,42 +36,39 @@ def get_guids(item: Dict) -> List[Dict]:
     return guids
 
 
-def extract_tmdb_id(guids: List[Dict]) -> Optional[int]:
-    if not guids:
-        return None
-    for guid in guids:
-        id_str = guid.get("id", "")
-        for prefix in ("tmdb://", "com.plexapp.agents.themoviedb://"):
-            if id_str.startswith(prefix):
-                try:
-                    return int(id_str[len(prefix):].split("/")[0])
-                except ValueError:
-                    break
+# Plex exposes a source id in a Guid two ways:
+#   * the plain scheme - "tmdb://123", or the legacy agent form
+#     "com.plexapp.agents.themoviedb://123/1/1"
+#   * the HAMA / Absolute Series Scanner agent, which packs the real source
+#     behind its own scheme: "com.plexapp.agents.hama://tvdb-73762/1/1"
+#     (and "tvdb2-", "tvdb3-" ... for TheTVDB's alternate episode orders).
+# Anchoring each alternative on the "://" boundary keeps a stray "tmdb-123"
+# elsewhere in the string from being read as an id, and \d+ stops at the
+# season/episode path and any "?lang=" suffix on its own.
+_TMDB_GUID_RE = re.compile(r"(?:tmdb|themoviedb)://(\d+)|://tmdb-(\d+)")
+_TVDB_GUID_RE = re.compile(r"tvdb://(\d+)|://tvdb[2-9]?-(\d+)")
+_IMDB_GUID_RE = re.compile(r"imdb://(tt\d+)|://imdb-(tt\d+)")
+
+
+def _first_guid_match(guids: List[Dict], pattern: "re.Pattern[str]") -> Optional[str]:
+    for guid in guids or []:
+        match = pattern.search(guid.get("id", "") or "")
+        if match:
+            return next((g for g in match.groups() if g), None)
     return None
+
+
+def extract_tmdb_id(guids: List[Dict]) -> Optional[int]:
+    raw = _first_guid_match(guids, _TMDB_GUID_RE)
+    return int(raw) if raw is not None else None
 
 
 def extract_tvdb_id(guids: List[Dict]) -> Optional[str]:
-    if not guids:
-        return None
-    for guid in guids:
-        id_str = guid.get("id", "")
-        for prefix in ("tvdb://", "com.plexapp.agents.thetvdb://"):
-            if id_str.startswith(prefix):
-                val = id_str[len(prefix):].split("/")[0].strip()
-                return val if val else None
-    return None
+    return _first_guid_match(guids, _TVDB_GUID_RE)
 
 
 def extract_imdb_id(guids: List[Dict]) -> Optional[str]:
-    if not guids:
-        return None
-    for guid in guids:
-        id_str = guid.get("id", "")
-        for prefix in ("imdb://", "com.plexapp.agents.imdb://"):
-            if id_str.startswith(prefix):
-                val = id_str[len(prefix):].split("/")[0].strip()
-                return val if val else None
-    return None
+    return _first_guid_match(guids, _IMDB_GUID_RE)
 
 def extract_quality(media_list: List[Dict]) -> Dict:
     if not media_list:

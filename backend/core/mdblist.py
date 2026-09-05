@@ -162,14 +162,53 @@ def _count_leaf_items(payload: dict[str, list[dict[str, Any]]]) -> int:
     return count
 
 
+# How many of MDBList's echoed-back "not found" items to keep for logging /
+# the job stats. A healthy push has a handful; capping keeps a pathological
+# run from bloating the log line and the SyncJob.stats JSON.
+NOT_FOUND_SAMPLE_CAP = 200
+
+
+def _index_episode_shows(
+    batch: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[tuple[int, int], list[int]], dict[int, list[int]]]:
+    """Maps this outgoing batch's own (season, episode) positions - and,
+    separately, bare season numbers - back to the show tmdb id(s) they were
+    nested under in the request.
+
+    _payload_item() always nests an episode under its parent show's ids, so
+    the request never loses that context - but MDBList's "not_found"
+    response echoes a rejected episode back in its own flat "episodes"
+    bucket, with just the season (sometimes not even the episode) number and
+    no id of any kind (#368). Since the response can't be made to carry more
+    than MDBList chooses to send back, recovering the show is only possible
+    from what this side already sent, not from the reply.
+    """
+    exact: dict[tuple[int, int], list[int]] = {}
+    by_season: dict[int, list[int]] = {}
+    for show in batch.get("shows", []) or []:
+        tmdb_id = (show.get("ids") or {}).get("tmdb")
+        if tmdb_id is None:
+            continue
+        for season in show.get("seasons", []) or []:
+            season_number = season.get("number")
+            if season_number is None:
+                continue
+            by_season.setdefault(season_number, []).append(tmdb_id)
+            for episode in season.get("episodes") or []:
+                episode_number = episode.get("number")
+                if episode_number is not None:
+                    exact.setdefault((season_number, episode_number), []).append(tmdb_id)
+    return exact, by_season
+
+
 async def _push(
     path: str,
     api_key: str,
     payload: dict[str, list[dict[str, Any]]],
     *,
     on_batch: Callable[[int], Awaitable[None]] | None = None,
-) -> dict[str, int]:
-    stats = {"submitted": 0, "batches": 0, "not_found": 0}
+) -> dict[str, Any]:
+    stats: dict[str, Any] = {"submitted": 0, "batches": 0, "not_found": 0, "not_found_items": []}
     for batch in _batched_payloads(payload):
         stats["batches"] += 1
         result = await _request("POST", path, api_key, payload=batch)
@@ -177,9 +216,38 @@ async def _push(
         stats["submitted"] += batch_count
         not_found = result.get("not_found")
         if isinstance(not_found, dict):
-            stats["not_found"] += sum(
-                len(values) for values in not_found.values() if isinstance(values, list)
-            )
+            exact_index: dict[tuple[int, int], list[int]] | None = None
+            season_index: dict[int, list[int]] | None = None
+            for kind, values in not_found.items():
+                if not isinstance(values, list):
+                    continue
+                stats["not_found"] += len(values)
+                room = NOT_FOUND_SAMPLE_CAP - len(stats["not_found_items"])
+                if room <= 0:
+                    continue
+                for value in values[:room]:
+                    item = value
+                    # Only a bare episode entry needs recovering - a movie or
+                    # show-level rejection already comes back with its own
+                    # tmdb/imdb id, and a season/episode nested under "shows"
+                    # keeps its parent's ids too (see the existing tests).
+                    if kind == "episodes" and isinstance(value, dict) and not value.get("ids"):
+                        if exact_index is None:
+                            exact_index, season_index = _index_episode_shows(batch)
+                        season_number = value.get("season")
+                        episode_number = value.get("episode")
+                        candidates = None
+                        if season_number is not None and episode_number is not None:
+                            candidates = exact_index.get((season_number, episode_number))
+                        if not candidates and season_number is not None:
+                            # No episode number in the echo either - every show
+                            # in this batch with that season number is a
+                            # possible match, not a confirmed one.
+                            candidates = season_index.get(season_number)
+                        if candidates:
+                            item = {**value, "_candidate_show_tmdb_ids": sorted(set(candidates))}
+                    # singular kind label ("movies" -> "movie"), item body as-is
+                    stats["not_found_items"].append({"kind": str(kind).rstrip("s") or kind, "item": item})
         if on_batch is not None:
             await on_batch(batch_count)
     return stats
@@ -190,11 +258,11 @@ async def push_watched(
     payload: dict[str, list[dict[str, Any]]],
     *,
     on_batch: Callable[[int], Awaitable[None]] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     return await _push("/sync/watched", api_key, payload, on_batch=on_batch)
 
 
-async def remove_watched(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+async def remove_watched(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     return await _push("/sync/watched/remove", api_key, payload)
 
 
@@ -203,11 +271,11 @@ async def push_collection(
     payload: dict[str, list[dict[str, Any]]],
     *,
     on_batch: Callable[[int], Awaitable[None]] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     return await _push("/sync/collection", api_key, payload, on_batch=on_batch)
 
 
-async def remove_collection(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+async def remove_collection(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     return await _push("/sync/collection/remove", api_key, payload)
 
 
@@ -252,11 +320,11 @@ async def push_ratings(
     payload: dict[str, list[dict[str, Any]]],
     *,
     on_batch: Callable[[int], Awaitable[None]] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     return await _push("/sync/ratings", api_key, payload, on_batch=on_batch)
 
 
-async def remove_ratings(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+async def remove_ratings(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     return await _push("/sync/ratings/remove", api_key, payload)
 
 
@@ -290,9 +358,9 @@ async def push_watchlist(
     payload: dict[str, list[dict[str, Any]]],
     *,
     on_batch: Callable[[int], Awaitable[None]] | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     return await _push("/watchlist/items/add", api_key, payload, on_batch=on_batch)
 
 
-async def remove_watchlist(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, int]:
+async def remove_watchlist(api_key: str, payload: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     return await _push("/watchlist/items/remove", api_key, payload)

@@ -336,6 +336,12 @@ async def search_people(q: str, page: int = 1, api_key: str = None) -> dict:
     return await _get(f"{TMDB_BASE}/search/person", headers=get_headers(api_key), params={"query": q, "include_adult": "false", "page": page})
 
 
+async def search_company(q: str, page: int = 1, api_key: str = None) -> dict:
+    """Search production companies / studios by name. TMDB has no equivalent
+    network-search endpoint (see core/networks.py for how networks are found)."""
+    return await _get(f"{TMDB_BASE}/search/company", headers=get_headers(api_key), params={"query": q, "page": page})
+
+
 def poster_url(path: str, size: str = "w500") -> str | None:
     if not path:
         return None
@@ -386,6 +392,7 @@ async def discover_movies(
     watch_provider_id: int | None = None,
     watch_region: str = "US",
     with_original_language: str | None = None,
+    with_companies: int | None = None,
     api_key: str = None,
     language: str | None = None,
 ) -> dict:
@@ -410,6 +417,8 @@ async def discover_movies(
         params["watch_region"] = watch_region
     if with_original_language:
         params["with_original_language"] = with_original_language
+    if with_companies is not None:
+        params["with_companies"] = with_companies
     if language:
         params["language"] = language
     return await _get(f"{TMDB_BASE}/discover/movie", headers=get_headers(api_key), params=params)
@@ -428,6 +437,8 @@ async def discover_shows(
     watch_provider_id: int | None = None,
     watch_region: str = "US",
     with_original_language: str | None = None,
+    with_networks: int | None = None,
+    with_companies: int | None = None,
     api_key: str = None,
     language: str | None = None,
 ) -> dict:
@@ -454,6 +465,10 @@ async def discover_shows(
         params["watch_region"] = watch_region
     if with_original_language:
         params["with_original_language"] = with_original_language
+    if with_networks is not None:
+        params["with_networks"] = with_networks
+    if with_companies is not None:
+        params["with_companies"] = with_companies
     if language:
         params["language"] = language
     return await _get(f"{TMDB_BASE}/discover/tv", headers=get_headers(api_key), params=params)
@@ -461,6 +476,16 @@ async def discover_shows(
 
 async def get_collection(collection_id: int, api_key: str = None) -> dict:
     return await _get(f"{TMDB_BASE}/collection/{collection_id}", headers=get_headers(api_key))
+
+
+async def get_network(network_id: int, api_key: str = None) -> dict:
+    """TV network details (name, logo_path, origin_country, homepage)."""
+    return await _get(f"{TMDB_BASE}/network/{network_id}", headers=get_headers(api_key))
+
+
+async def get_company(company_id: int, api_key: str = None) -> dict:
+    """Production company details (name, logo_path, origin_country, homepage)."""
+    return await _get(f"{TMDB_BASE}/company/{company_id}", headers=get_headers(api_key))
 
 
 async def get_movie_videos(tmdb_id: int, api_key: str = None) -> dict:

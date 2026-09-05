@@ -6,6 +6,8 @@ from core.jellyfin import (
     get_shows,
     get_episodes,
     get_item,
+    get_items_batch,
+    get_items_watched_state,
     extract_quality,
     find_movie_by_tmdb_id,
     find_episode_by_ids,

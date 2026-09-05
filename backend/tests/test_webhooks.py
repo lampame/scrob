@@ -16,6 +16,7 @@ from routers.webhooks import (
     _backfill_plex_runtime,
     _commit_playback_session_update,
     _consume_recently_pushed_watched,
+    _ensure_collection_entry,
     _episode_for_progress,
     _is_duplicate_webhook_delivery,
     _maybe_bingebase_scrobble,
@@ -23,9 +24,11 @@ from routers.webhooks import (
     _resolve_plex_progress,
     _resolve_tvdb_episode_to_tmdb_position,
     _translate_plex_tvdb_episode_position,
+    _write_completed_events_and_filter_echoes,
     _write_watch_event,
     find_or_create_media_jellyfin,
     find_or_create_media_jellyfin_multi,
+    find_or_create_media_kodi,
     mark_pushed_watched,
     parse_jellyfin_payload,
     parse_kodi_payload,
@@ -48,8 +51,10 @@ class _FakeDB:
     def __init__(self, queued_scalars):
         self._queued = list(queued_scalars)
         self.added = []
+        self.executed_statements = []
 
     async def execute(self, stmt):
+        self.executed_statements.append(stmt)
         value = self._queued.pop(0) if self._queued else None
         return _ScalarResult(value)
 
@@ -81,15 +86,18 @@ class WriteWatchEventDedupTests(IsolatedAsyncioTestCase):
 
     async def test_first_completed_event_is_recorded(self):
         db = _FakeDB(queued_scalars=[None])  # no recent WatchEvent found
-        await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
+        result = await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
         self.assertEqual(len(db.added), 1)
+        self.assertTrue(result)
 
     async def test_second_completed_event_for_same_media_within_window_is_skipped(self):
         # Simulates media.scrobble having already written a WatchEvent moments
-        # ago, then media.stop firing for the same viewing.
+        # ago, then media.stop firing for the same viewing. Not an echo, so
+        # callers scrobbling this onward should still treat it as real (#369).
         db = _FakeDB(queued_scalars=[123])  # a recent WatchEvent id is found
-        await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
+        result = await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
         self.assertEqual(len(db.added), 0)
+        self.assertTrue(result)
 
     async def test_echo_of_a_just_pushed_mark_watched_is_skipped(self):
         # Regression for #247/#251: pushing "mark watched" to Jellyfin/Emby can
@@ -99,8 +107,11 @@ class WriteWatchEventDedupTests(IsolatedAsyncioTestCase):
         # stamped at push time - even though no recent duplicate is queued here.
         mark_pushed_watched(user_id=1, media_id=2)
         db = _FakeDB(queued_scalars=[None])
-        await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
+        result = await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
         self.assertEqual(len(db.added), 0)
+        # False here is the signal callers use to also skip scrobbling this
+        # row onward to Trakt/MDBList/Simkl/Bingebase (#369).
+        self.assertFalse(result)
 
     async def test_echo_suppression_is_scoped_to_the_pushed_user_and_media(self):
         mark_pushed_watched(user_id=1, media_id=2)
@@ -117,6 +128,121 @@ class WriteWatchEventDedupTests(IsolatedAsyncioTestCase):
         await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
         await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
         self.assertEqual(len(db.added), 1)
+
+    async def test_unknown_dated_dedup_branch_is_bound_by_created_at(self):
+        # Regression for #355: the null-watched_at branch of this guard used
+        # to have no time bound at all ("NULL >= cutoff" is never true in SQL,
+        # so it matched unconditionally instead) - once a title had any
+        # unknown-dated watch event, every later real rewatch reported by
+        # Jellyfin/Plex/Emby was silently treated as a duplicate of it
+        # forever. watched_at can't carry that bound when it's NULL, so the
+        # branch must check created_at (when the row was actually inserted)
+        # instead - assert it's actually in the query, not just watched_at.
+        db = _FakeDB(queued_scalars=[None])
+        await _write_watch_event(db, user_id=1, media_id=2, progress_percent=1.0, progress_seconds=120, completed=True)
+        compiled = str(db.executed_statements[0])
+        self.assertIn("watch_events.created_at", compiled)
+        self.assertIn("watch_events.watched_at IS NULL", compiled)
+
+
+class WriteCompletedEventsAndFilterEchoesTests(IsolatedAsyncioTestCase):
+    """#369: a Jellyfin/Emby "mark played" webhook for a multi-episode file
+    carries several media rows in one call - only the ones that turn out to
+    be push-watched echoes should be dropped before scrobbling onward, not
+    the whole batch and not none of it."""
+
+    def setUp(self):
+        webhooks._recently_pushed_watched.clear()
+
+    async def test_filters_out_only_the_echoed_media(self):
+        # media_id=2 was just pushed (an echo is expected back for it);
+        # media_id=3 is a genuine, unrelated completion in the same payload.
+        mark_pushed_watched(user_id=1, media_id=2)
+        db = _FakeDB(queued_scalars=[None])  # only media_id=3 reaches a real query
+        media_list = [SimpleNamespace(id=2), SimpleNamespace(id=3)]
+
+        result = await _write_completed_events_and_filter_echoes(db, 1, media_list, progress_seconds=120)
+
+        self.assertEqual([m.id for m in result], [3])
+        self.assertEqual(len(db.added), 1)
+
+    async def test_nothing_echoed_keeps_the_whole_list(self):
+        db = _FakeDB(queued_scalars=[None, None])
+        media_list = [SimpleNamespace(id=2), SimpleNamespace(id=3)]
+
+        result = await _write_completed_events_and_filter_echoes(db, 1, media_list, progress_seconds=120)
+
+        self.assertEqual([m.id for m in result], [2, 3])
+        self.assertEqual(len(db.added), 2)
+
+
+class _CollectionIdResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one(self):
+        return self._value
+
+
+class _EnsureCollectionFakeDB:
+    """Routes _ensure_collection_entry's queries by SQL text and captures the
+    collection_files insert so tests can inspect its bound connection_id."""
+
+    def __init__(self, *, connection_exists: bool):
+        self._connection_exists = connection_exists
+        self.collection_file_insert = None
+
+    async def execute(self, stmt):
+        sql = str(stmt)
+        if "media_server_connections" in sql:
+            return _ScalarResult(1 if self._connection_exists else None)
+        if sql.startswith("SELECT") and "FROM collections" in sql:
+            return _CollectionIdResult(7)
+        if "collection_files" in sql:
+            self.collection_file_insert = stmt
+        return _ScalarResult(None)
+
+    async def flush(self):
+        pass
+
+
+class EnsureCollectionEntryConnectionGuardTests(IsolatedAsyncioTestCase):
+    """#339: collection_files.connection_id is FK'd to media_server_connections.
+    A scrobble webhook passes a ScrobbleConnection id (different table/sequence)
+    - _ensure_collection_entry must store NULL, not let the INSERT FK-crash and
+    roll back the whole webhook (losing the watch event + stuck Now Playing)."""
+
+    def _bound_connection_id(self, stmt):
+        from sqlalchemy.dialects import postgresql
+        return stmt.compile(dialect=postgresql.dialect()).params.get("connection_id")
+
+    async def test_unknown_connection_id_is_stored_as_null(self):
+        from models.base import CollectionSource
+        db = _EnsureCollectionFakeDB(connection_exists=False)
+        await _ensure_collection_entry(
+            db, user_id=1, media_id=2, source=CollectionSource.plex,
+            source_id="521136", quality=None, connection_id=999,
+        )
+        self.assertIsNotNone(db.collection_file_insert)
+        self.assertIsNone(self._bound_connection_id(db.collection_file_insert))
+
+    async def test_real_connection_id_is_kept(self):
+        db = _EnsureCollectionFakeDB(connection_exists=True)
+        from models.base import CollectionSource
+        await _ensure_collection_entry(
+            db, user_id=1, media_id=2, source=CollectionSource.plex,
+            source_id="521136", quality=None, connection_id=5,
+        )
+        self.assertEqual(self._bound_connection_id(db.collection_file_insert), 5)
+
+    async def test_none_connection_id_skips_the_lookup(self):
+        db = _EnsureCollectionFakeDB(connection_exists=False)
+        from models.base import CollectionSource
+        await _ensure_collection_entry(
+            db, user_id=1, media_id=2, source=CollectionSource.plex,
+            source_id="521136", quality=None, connection_id=None,
+        )
+        self.assertIsNone(self._bound_connection_id(db.collection_file_insert))
 
 
 class ConsumeRecentlyPushedWatchedTests(unittest.TestCase):
@@ -1320,6 +1446,100 @@ class ParseKodiPayloadTests(unittest.TestCase):
         self.assertTrue(data["ended"])
         self.assertEqual(data["progress_percent"], 1.0)
         self.assertEqual(data["session_id"], "7")
+
+
+class FindOrCreateMediaKodiShowIdTests(IsolatedAsyncioTestCase):
+    """Kodi puts the *show* TMDB id in an episode's uniqueid whenever its
+    scraper has no episode-level id, and add-ons forward it as-is. Shows and
+    episodes are separate TMDB id spaces that reuse the same numbers, so
+    matching that id against Media.tmdb_id can land on a completely unrelated
+    episode - show 214546 (Sleepers) collides with episode 214546 (Law &
+    Order: SVU S04E10). Worse, that match was tried before the show +
+    season/episode lookup, so a payload carrying a perfectly good showtitle
+    and S/E still scrobbled the wrong episode."""
+
+    def _episode_data(self, **overrides):
+        data = {
+            "media_type": "episode",
+            "title": "Episode 6",
+            "series_name": "Sleepers",
+            "season_number": 3,
+            "episode_number": 6,
+            "tmdb_id": "214546",
+        }
+        data.update(overrides)
+        return data
+
+    async def test_colliding_tmdb_id_falls_through_to_season_episode(self):
+        wrong = SimpleNamespace(id=37092, media_type=MediaType.episode, show_id=2,
+                                season_number=4, episode_number=10)
+        right = SimpleNamespace(id=50001, media_type=MediaType.episode, show_id=1,
+                                season_number=3, episode_number=6)
+        show = SimpleNamespace(id=1, tmdb_id=214546)
+        db = _QueuedResultDB([SimpleNamespace(tmdb_id=214546), wrong, right])
+
+        with patch("routers.webhooks._find_or_create_show", AsyncMock(return_value=show)):
+            result = await find_or_create_media_kodi(self._episode_data(), db)
+
+        self.assertIs(result, right)
+
+    async def test_matching_tmdb_id_is_still_accepted(self):
+        episode = SimpleNamespace(id=50001, media_type=MediaType.episode, show_id=1,
+                                  season_number=3, episode_number=6)
+        show = SimpleNamespace(id=1, tmdb_id=999)
+        db = _QueuedResultDB([SimpleNamespace(tmdb_id=999), episode])
+
+        with patch("routers.webhooks._find_or_create_show", AsyncMock(return_value=show)):
+            result = await find_or_create_media_kodi(self._episode_data(), db)
+
+        self.assertIs(result, episode)
+
+    async def test_show_id_resolves_series_when_payload_has_no_showtitle(self):
+        # No showtitle/tvdb/imdb: the only hint is the uniqueid, which is the
+        # show's id - use it to resolve the series instead of as an episode id.
+        episode = SimpleNamespace(id=50001, media_type=MediaType.episode, show_id=1,
+                                  season_number=3, episode_number=6)
+        show = SimpleNamespace(id=1, tmdb_id=214546)
+        db = _QueuedResultDB([show, None, episode])
+
+        with patch("routers.webhooks._find_or_create_show", AsyncMock()) as find_show:
+            result = await find_or_create_media_kodi(self._episode_data(series_name=None), db)
+
+        self.assertIs(result, episode)
+        # The local Show row is already in hand from the candidate-id lookup
+        # above - calling _find_or_create_show would just repeat that exact
+        # query for nothing.
+        find_show.assert_not_awaited()
+
+    async def test_unverified_show_id_is_not_stored_on_a_new_episode(self):
+        show = SimpleNamespace(id=1, tmdb_id=214546)
+        created = SimpleNamespace(id=60001, media_type=MediaType.episode, show_id=1,
+                                  season_number=3, episode_number=6)
+        db = _QueuedResultDB([SimpleNamespace(tmdb_id=214546), None, None])
+
+        with patch("routers.webhooks._find_or_create_show", AsyncMock(return_value=show)),              patch("routers.webhooks._resolve_tvdb_fallback", AsyncMock(return_value=(None, None, None))),              patch("routers.webhooks.enrich_media_safely", AsyncMock(return_value=created)),              patch("routers.webhooks.create_media_safely",
+                   AsyncMock(return_value=(created, True))) as create_mock:
+            await find_or_create_media_kodi(self._episode_data(), db)
+
+        self.assertIsNone(create_mock.await_args.args[1])
+
+    async def test_unresolved_show_dedups_by_title_season_episode_before_creating(self):
+        # No showtitle/tvdb/imdb and the uniqueid doesn't match any local
+        # show - series_tmdb_id/show never resolve, so the row this same
+        # episode created on an earlier webhook call has show_id=None and
+        # tmdb_id=None (unverified ids are never stored). Without a
+        # season/episode dedup lookup here, every later webhook for this
+        # episode (pause/resume/stop, a repeat play) would mint a fresh
+        # duplicate instead of finding it.
+        existing = SimpleNamespace(id=70001, media_type=MediaType.episode, show_id=None,
+                                    season_number=3, episode_number=6)
+        db = _QueuedResultDB([None, None, existing])
+
+        with patch("routers.webhooks.create_media_safely", AsyncMock()) as create_mock:
+            result = await find_or_create_media_kodi(self._episode_data(series_name=None), db)
+
+        self.assertIs(result, existing)
+        create_mock.assert_not_awaited()
 
 
 if __name__ == "__main__":

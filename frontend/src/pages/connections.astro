@@ -1749,7 +1749,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
             <input type="text" id="remap-search-input" placeholder="Show title…" class="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-zinc-100 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all" />
             <button type="button" id="remap-search-btn" class="px-4 py-2.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-100 text-sm font-medium rounded-lg transition-colors cursor-pointer shrink-0">Search</button>
           </div>
-          <div id="remap-search-results" class="mt-2 space-y-1 max-h-48 overflow-y-auto"></div>
+          <div id="remap-search-results" class="mt-2 space-y-1 max-h-48 overflow-y-auto scrollbar-hidden"></div>
         </div>
         <!-- TVDB title search (match mode) -->
         <div id="remap-tvdb-section" class="hidden">
@@ -1758,7 +1758,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
             <input type="text" id="remap-tvdb-input" placeholder="Show title…" class="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2.5 text-zinc-100 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all" />
             <button type="button" id="remap-tvdb-search-btn" class="px-4 py-2.5 bg-zinc-700 hover:bg-zinc-600 text-zinc-100 text-sm font-medium rounded-lg transition-colors cursor-pointer shrink-0">Search</button>
           </div>
-          <div id="remap-tvdb-results" class="mt-2 space-y-1 max-h-48 overflow-y-auto"></div>
+          <div id="remap-tvdb-results" class="mt-2 space-y-1 max-h-48 overflow-y-auto scrollbar-hidden"></div>
         </div>
         <!-- Selected show + season input -->
         <div id="remap-selected-area" class="hidden">
@@ -5549,7 +5549,11 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
     let srcSeason = 0;
     let targetTmdbId = 0;
     let targetTvdbId = 0;
-    let targetSeasonNumber = 0;
+    // null = nothing picked yet, distinct from a legitimately-selected Season 0
+    // (TVDB stores specials/OVAs there for many anime - see #363). 0 is falsy
+    // in JS, so a plain `!targetSeasonNumber` check would reject it even once
+    // it's selected.
+    let targetSeasonNumber: number | null = null;
     let modalMode: 'remap' | 'match' | 'match-movie' = 'remap';
     let matchSeriesName = '';
     let matchMovieTitle = '';
@@ -5568,7 +5572,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
       (document.getElementById('remap-error') as HTMLElement).classList.add('hidden');
       targetTmdbId = 0;
       targetTvdbId = 0;
-      targetSeasonNumber = 0;
+      targetSeasonNumber = null;
       modalMode = 'remap';
       matchSeriesName = '';
       matchMovieTitle = '';
@@ -5620,7 +5624,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
       (document.getElementById('remap-save') as HTMLButtonElement).disabled = true;
       targetTmdbId = 0;
       targetTvdbId = 0;
-      targetSeasonNumber = 0;
+      targetSeasonNumber = null;
     });
 
     const searchInput = document.getElementById('remap-search-input') as HTMLInputElement;
@@ -5652,7 +5656,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
           targetTmdbId = tmdbId;
           targetTvdbId = 0;
         }
-        targetSeasonNumber = 0;
+        targetSeasonNumber = null;
         (document.getElementById('remap-selected-poster') as HTMLImageElement).src = btn.dataset.poster ?? '';
         (document.getElementById('remap-selected-title') as HTMLElement).textContent = btn.dataset.title ?? '';
         (document.getElementById('remap-selected-year') as HTMLElement).textContent = btn.dataset.year ?? '';
@@ -5684,7 +5688,9 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
             headers: { 'Authorization': `Bearer ${token}` },
           });
           const showData = showRes.ok ? await showRes.json() : null;
-          const seasons: any[] = (showData?.seasons_meta ?? []).filter((s: any) => s.season_number > 0);
+          // >= 0, not > 0 - TVDB stores specials/OVAs in Season 0 for a lot of
+          // anime, and that's a legitimate remap target (#363).
+          const seasons: any[] = (showData?.seasons_meta ?? []).filter((s: any) => s.season_number >= 0);
           seasonsLoading.classList.add('hidden');
           if (!seasons.length) {
             seasonsList.innerHTML = '<p class="text-xs text-zinc-500 py-1">No seasons found.</p>';
@@ -5739,13 +5745,24 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
         }
         resultsEl.innerHTML = results.map((r: any) => {
           const year = escapeHtml(String(r.release_date ?? r.first_air_date ?? '').slice(0, 4));
+          // Same rationale as the TVDB results below (#364) - an exact-title
+          // remake/reboot is otherwise indistinguishable, especially when
+          // TMDB hasn't got a release/air date on record yet. TMDB has no
+          // network/status on a search result the way TVDB does, but the id
+          // is always there, and original_title catches e.g. a dub sharing
+          // its English title with an unrelated show.
+          const subtitle = [
+            year || null,
+            `TMDB ${r.tmdb_id}`,
+            r.original_title && r.original_title !== r.title ? escapeHtml(r.original_title) : null,
+          ].filter(Boolean).join(' · ');
           return `
           <button type="button" class="remap-result w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-zinc-800 transition-colors cursor-pointer text-left"
             data-tmdb="${r.tmdb_id}" data-title="${escapeHtml(r.title ?? '')}" data-year="${year}" data-poster="${escapeHtml(r.poster_path ?? '')}">
             <img src="${escapeHtml(r.poster_path ?? '')}" alt="" class="w-8 h-11 object-cover rounded bg-zinc-700 shrink-0" onerror="this.style.display='none'" />
             <div class="flex-1 min-w-0">
               <p class="text-sm text-zinc-100 truncate">${escapeHtml(r.title ?? '')}</p>
-              <p class="text-xs text-zinc-500">${year}</p>
+              <p class="text-xs text-zinc-500">${subtitle}</p>
             </div>
           </button>`;
         }).join('');
@@ -5781,15 +5798,27 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
           resultsEl.innerHTML = '<p class="text-xs text-zinc-500 py-2">No results found on TVDB.</p>';
           return;
         }
-        resultsEl.innerHTML = results.slice(0, 8).map((r: any) => `
+        resultsEl.innerHTML = results.slice(0, 8).map((r: any) => {
+          // A blank/missing year plus an identical title (remakes/reboots
+          // sharing a name, e.g. Ranma 1/2) makes two results indistinguishable
+          // - the TVDB id is always shown so there's an unambiguous fallback
+          // to pick the right one by (#364).
+          const subtitle = [
+            r.year ? escapeHtml(String(r.year)) : null,
+            `TVDB ${r.tvdb_id}`,
+            r.network ? escapeHtml(r.network) : null,
+            r.status ? escapeHtml(r.status) : null,
+          ].filter(Boolean).join(' · ');
+          return `
           <button type="button" class="remap-result w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-zinc-800 transition-colors cursor-pointer text-left"
             data-tvdb="${r.tvdb_id}" data-title="${escapeHtml(r.title ?? '')}" data-year="${escapeHtml(String(r.year ?? ''))}" data-poster="${escapeHtml(r.image_url ?? '')}">
             <img src="${escapeHtml(r.image_url ?? '')}" alt="" class="w-8 h-11 object-cover rounded bg-zinc-700 shrink-0" onerror="this.style.display='none'" />
             <div class="flex-1 min-w-0">
               <p class="text-sm text-zinc-100 truncate">${escapeHtml(r.title ?? '')}</p>
-              <p class="text-xs text-zinc-500">${escapeHtml(String(r.year ?? ''))}${r.network ? ` · ${escapeHtml(r.network)}` : ''}</p>
+              <p class="text-xs text-zinc-500">${subtitle}</p>
             </div>
-          </button>`).join('');
+          </button>`;
+        }).join('');
         resultsEl.querySelectorAll('.remap-result').forEach(btn => wireResultClick(btn as HTMLElement));
       } catch (e: any) {
         resultsEl.innerHTML = `<p class="text-xs text-red-400 py-2">Search failed: ${escapeHtml(e.message ?? '')}</p>`;
@@ -5853,7 +5882,7 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
       }
 
       // Remap mode
-      if ((!targetTmdbId && !targetTvdbId) || !targetSeasonNumber) return;
+      if ((!targetTmdbId && !targetTvdbId) || targetSeasonNumber === null) return;
       saveBtn.textContent = 'Saving…';
       try {
         const remapBody: any = {

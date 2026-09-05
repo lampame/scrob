@@ -1,0 +1,62 @@
+---
+// Shared layout for the /network/{id} and /studio/{id} browse pages: a header
+// with the network/studio logo, then the standard MediaCard grid + Pagination.
+// The host page fetches the data and supplies the filter toolbar via <slot
+// name="toolbar" /> (genre lists differ between TV networks and film studios).
+import MediaCard from "./MediaCard.astro";
+import Pagination from "./Pagination.astro";
+import type { MediaItem, StudioHeader } from "../lib/api";
+
+interface Props {
+  header: StudioHeader | null;
+  kindLabel: string; // "Network" | "Studio"
+  fallbackName: string; // shown when the header lookup failed
+  data: { results: MediaItem[]; page: number; total_pages: number };
+  baseUrl: string; // used by Pagination, already carries the active filters
+  hasTmdbKey: boolean;
+}
+
+const { header, kindLabel, fallbackName, data, baseUrl, hasTmdbKey } = Astro.props;
+const name = header?.name || fallbackName;
+---
+
+<div class="flex flex-col sm:flex-row sm:items-center gap-5 mb-8">
+  {header?.logo_path ? (
+    <div class="shrink-0 logo-swatch backdrop-blur-sm border border-gray-200/60 rounded-2xl px-5 py-4 flex items-center justify-center">
+      <img src={header.logo_path} alt={name} class="h-10 max-w-[160px] object-contain" />
+    </div>
+  ) : (
+    <div class="shrink-0 w-16 h-16 rounded-2xl bg-zinc-800 flex items-center justify-center text-2xl">🏢</div>
+  )}
+  <div class="min-w-0">
+    <p class="text-xs font-bold uppercase tracking-widest text-zinc-500">{kindLabel}</p>
+    <h1 class="page-title truncate">{name}</h1>
+    {header?.origin_country && (
+      <p class="text-sm text-zinc-400 mt-1">{header.origin_country}</p>
+    )}
+  </div>
+</div>
+
+<div class="mb-8">
+  <slot name="toolbar" />
+</div>
+
+{!hasTmdbKey ? (
+  <div class="p-12 bg-zinc-900/50 border border-zinc-800 rounded-2xl text-center">
+    <div class="text-4xl mb-4">🎬</div>
+    <h2 class="text-xl font-bold text-zinc-100 mb-2">TMDB Read Access Token Required</h2>
+    <p class="text-zinc-400 mb-6 max-w-md mx-auto">To browse a {kindLabel.toLowerCase()}'s catalogue from The Movie Database, add your TMDB Read Access Token in settings.</p>
+    <a href="/settings" class="inline-flex px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-600/20 active:scale-95">Go to Settings</a>
+  </div>
+) : data.results.length === 0 ? (
+  <div class="p-12 bg-zinc-900/50 border border-zinc-800 rounded-2xl text-center text-zinc-400">
+    Nothing here — no titles match.
+  </div>
+) : (
+  <>
+    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-6">
+      {data.results.map((item) => <MediaCard item={item} />)}
+    </div>
+    <Pagination currentPage={data.page} totalPages={data.total_pages} baseUrl={baseUrl} />
+  </>
+)}

@@ -35,6 +35,10 @@ const blurExplicit = Astro.cookies.get("blur_explicit")?.value !== "false";
 const use24h = Astro.cookies.get("time_format_24h")?.value === "true";
 
 const pathname = Astro.url.pathname;
+// Pre-fills the nav search box with the query already being viewed, so
+// landing on /search (or a live-search edit that replaces the URL, see
+// search.astro) doesn't leave the box looking empty.
+const navSearchValue = pathname === "/search" ? (Astro.url.searchParams.get("q") ?? "") : "";
 const loginNextUrl = `/login?next=${encodeURIComponent(Astro.url.pathname + Astro.url.search)}`;
 const activeMovies = pathname.startsWith('/movies') || pathname.startsWith('/collection/movies') || pathname.startsWith('/trending/movies') || pathname.startsWith('/media/movie');
 const activeShows  = pathname.startsWith('/shows') || pathname.startsWith('/collection/shows') || pathname.startsWith('/show') || pathname.startsWith('/trending/shows');
@@ -159,10 +163,15 @@ const bottomNavItem = (active: boolean) =>
                 id="desktop-search-input"
                 type="text"
                 name="q"
+                value={navSearchValue}
                 placeholder="Search movies & shows..."
                 class="bg-zinc-900 border border-zinc-800 rounded-full px-4 py-2 w-64 text-sm focus:outline-none focus:ring-1 focus:ring-zinc-700 focus:border-zinc-700 transition-all placeholder:text-zinc-400"
               />
-              <kbd class="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-zinc-400 font-sans pointer-events-none border border-zinc-800 rounded px-1.5 py-0.5 bg-zinc-950">/</kbd>
+              <kbd id="desktop-search-hint" class="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-zinc-400 font-sans pointer-events-none border border-zinc-800 rounded px-1.5 py-0.5 bg-zinc-950">/</kbd>
+              <svg id="desktop-search-spinner" class="hidden absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin text-zinc-400 pointer-events-none" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
             </form>
           )}
         </div>
@@ -273,13 +282,20 @@ const bottomNavItem = (active: boolean) =>
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
           </button>
           <form action="/search" method="GET" class="flex-1 flex items-center gap-2">
-            <input
-              id="mobile-search-input"
-              type="text"
-              name="q"
-              placeholder="Search movies & shows..."
-              class="flex-1 bg-zinc-900 border border-zinc-800 rounded-full px-4 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition-all placeholder:text-zinc-500"
-            />
+            <div class="relative flex-1">
+              <input
+                id="mobile-search-input"
+                type="text"
+                name="q"
+                value={navSearchValue}
+                placeholder="Search movies & shows..."
+                class="w-full bg-zinc-900 border border-zinc-800 rounded-full px-4 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition-all placeholder:text-zinc-500"
+              />
+              <svg id="mobile-search-spinner" class="hidden absolute right-3.5 top-1/2 -translate-y-1/2 w-4 h-4 animate-spin text-zinc-400 pointer-events-none" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            </div>
             <button type="submit" class="self-stretch px-4 bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold rounded-full transition-colors shrink-0">Go</button>
           </form>
         </div>
@@ -555,6 +571,22 @@ const bottomNavItem = (active: boolean) =>
     document.addEventListener('click', () => {
       userMenu?.classList.add('hidden');
       userChevron?.style.removeProperty('transform');
+    });
+
+    // ── Search inputs: land the caret at the end, not the start ────────────────
+    // Both boxes can already carry a value (the current query, prefilled on
+    // /search) when focused - by click, the "/" shortcut, or opening the
+    // mobile search bar - and a browser's default caret placement on focus is
+    // the start, not the end. setSelectionRange alone is unreliable here (a
+    // click's own native caret placement can win the race against it); a
+    // value reassignment always moves the caret to the end and, firing from
+    // this same focus handler, applies after that native placement.
+    document.querySelectorAll<HTMLInputElement>('#desktop-search-input, #mobile-search-input').forEach((input) => {
+      input.addEventListener('focus', () => {
+        const value = input.value;
+        input.value = '';
+        input.value = value;
+      });
     });
 
     // ── Mobile search expand ───────────────────────────────────────────────────

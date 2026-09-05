@@ -6,6 +6,7 @@ import EpisodeOrderSelector from "../../../components/EpisodeOrderSelector.astro
 import TvdbAttribution from "../../../components/TvdbAttribution.astro";
 import { api, type TvdbShow } from "../../../lib/api";
 import { formatSeasonTitle } from "../../../lib/media-format";
+import { countAiredRegularSeasons } from "../../../lib/seasonCount";
 export const prerender = false;
 
 const { id } = Astro.params;
@@ -29,6 +30,9 @@ const seasons = (show?.seasons_meta ?? []).filter(
   // Season 0 (Specials) is shown too - matches the TMDB show page (#335).
   (season) => (season.season_number ?? -1) >= 0 && (season.episode_count ?? 0) > 0
 );
+// "N Seasons" stat (#360) - unlike `seasons` above (the grid), Specials and
+// anything not aired yet don't count here.
+const seasonCount = countAiredRegularSeasons(show?.seasons_meta ?? []);
 const year = show?.first_air_date?.slice(0, 4) ?? null;
 const langNames = new Intl.DisplayNames(["en"], { type: "language" });
 const originalLanguage = show?.original_language
@@ -105,7 +109,7 @@ const originalLanguage = show?.original_language
             <div class="flex flex-wrap items-center gap-3 mb-10">
               <div class="flex flex-wrap items-center gap-4 text-zinc-300 text-sm bg-zinc-900/40 p-3 rounded-xl border border-zinc-800/50 backdrop-blur-sm">
                 {year && <span class="font-bold">{year}</span>}
-                <span class="font-medium text-zinc-400">{seasons.length} Season{seasons.length !== 1 ? "s" : ""}</span>
+                <span class="font-medium text-zinc-400">{seasonCount} Season{seasonCount !== 1 ? "s" : ""}</span>
                 {show.age_rating && (
                   <span class="px-2 py-0.5 border border-zinc-600 rounded text-[10px] font-black text-zinc-400 tracking-widest">
                     {show.age_rating}
@@ -130,11 +134,27 @@ const originalLanguage = show?.original_language
                   </span>
                 )}
               </div>
-              {show.network && (
-                <div class="bg-zinc-900/40 p-3 rounded-xl border border-zinc-800/50 backdrop-blur-sm flex items-center">
-                  <span class="text-zinc-400 text-xs font-semibold">{show.network}</span>
-                </div>
-              )}
+              {(() => {
+                const withLogo = (show.networks ?? []).filter(n => n.logo_path).slice(0, 3);
+                if (withLogo.length) {
+                  return (
+                    <div class="flex flex-wrap items-center gap-2">
+                      {withLogo.map(n => {
+                        const inner = <div class="logo-swatch backdrop-blur-sm p-3 rounded-xl border border-gray-200/60 flex items-center"><img src={n.logo_path!} alt={n.name} title={n.name} class="h-5 max-w-[80px] object-contain" loading="lazy" /></div>;
+                        return n.id != null
+                          ? <a href={`/network/${n.id}`} title={`More from ${n.name}`} class="transition hover:brightness-110">{inner}</a>
+                          : inner;
+                      })}
+                    </div>
+                  );
+                }
+                const name = show.networks?.[0]?.name || show.network;
+                return name ? (
+                  <div class="bg-zinc-900/40 p-3 rounded-xl border border-zinc-800/50 backdrop-blur-sm flex items-center">
+                    <span class="text-zinc-400 text-xs font-semibold">{name}</span>
+                  </div>
+                ) : null;
+              })()}
             </div>
 
             {user && (
