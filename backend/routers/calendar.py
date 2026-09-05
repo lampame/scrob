@@ -99,8 +99,23 @@ async def _candidate_shows(db: AsyncSession, user_id: int) -> list[Show]:
 
     return [
         s for s in shows
-        if s.tmdb_id and (s.status or "") not in ("Ended", "Canceled") and s.id not in dropped_show_ids
+        if s.tmdb_id and s.id not in dropped_show_ids and not _is_definitely_over(s)
     ]
+
+
+def _is_definitely_over(show: Show) -> bool:
+    """Самого лише кешованого статусу "Ended"/"Canceled" недостатньо, щоб
+    виключити серіал з календаря: поле status у TMDB відстає від реального
+    графіка для серіалів зі split-season/перервою — next_episode_to_air уже
+    заповнене, а status ще "Ended". Вважаємо серіал завершеним, лише коли ОБИДВА
+    сигнали збігаються: кешований статус фінальний І снепшот метаданих
+    (оновлюється щодня в _show_metadata_refresher) не показує відомого
+    майбутнього епізоду. Якщо снепшота взагалі нема (серіал ще не оновлювався) —
+    повертаємось до перевірки лише за статусом, а не помилково виключаємо."""
+    if (show.status or "") not in ("Ended", "Canceled"):
+        return False
+    next_air = ((show.tmdb_data or {}).get("next_episode_to_air") or {}).get("air_date")
+    return not next_air
 
 
 async def compute_calendar(db: AsyncSession, user_id: int) -> dict:
