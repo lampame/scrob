@@ -81,8 +81,12 @@ function completeLogin(token, me, username, password) {
     Lampa.Storage.set(KEYS.ACCESS_TOKEN, token)
     Lampa.Storage.set(KEYS.ME, me)
     Lampa.Storage.set(KEYS.OWN_API_KEY, me.api_key || '')
-    Lampa.Storage.set(KEYS.ACTIVE_PROFILE_ID, me.id)
+    // API key before profile id — same ordering fix as switchProfile()
+    // (utils/profiles.js): Storage.set() fires its 'change' listener
+    // synchronously, and the sync engine restarts on ACTIVE_PROFILE_ID
+    // changing, so the key must already be correct by then.
     Lampa.Storage.set(KEYS.ACTIVE_API_KEY, me.api_key || '')
+    Lampa.Storage.set(KEYS.ACTIVE_PROFILE_ID, me.id)
     // Store credentials for socket re-authentication
     if (username) Lampa.Storage.set(KEYS.USERNAME, username)
     if (password) Lampa.Storage.set(KEYS.PASSWORD, password)

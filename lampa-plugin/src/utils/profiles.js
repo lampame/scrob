@@ -85,9 +85,16 @@ export function switchProfile(targetId) {
         Lampa.Storage.set(key, saved != 'none' ? saved : defaultValue(key))
     })
 
-    // 3. Activate target credentials
-    Lampa.Storage.set(KEYS.ACTIVE_PROFILE_ID, target.id)
+    // 3. Activate target credentials — API key BEFORE profile id. Lampa.Storage.set()
+    // dispatches its 'change' event synchronously (no microtask/setTimeout), and the
+    // sync engine's setupProfileListener() reacts to ACTIVE_PROFILE_ID changing by
+    // immediately restarting sync (utils/sync/engine.js). If the profile id were set
+    // first, that restart - and the initial sync it kicks off - would fire while
+    // ACTIVE_API_KEY still held the OUTGOING profile's key, one line away from being
+    // updated: the very first request under the "new" profile would run under the
+    // old one's identity.
     Lampa.Storage.set(KEYS.ACTIVE_API_KEY, target.api_key)
+    Lampa.Storage.set(KEYS.ACTIVE_PROFILE_ID, target.id)
 
     // 4. Re-read data into UI
     Lampa.Timeline.read()
