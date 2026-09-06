@@ -764,10 +764,14 @@ async def add_list_item(
         payload={
             "list_id": list_id,
             "list_name": lst.name if lst else None,
+            "item_id": item.id,
             "media_id": media.id if media else None,
             "media_tmdb_id": media.tmdb_id if media else None,
             "media_type": media.media_type if media else None,
             "media_title": media.title if media else None,
+            "poster_path": media.poster_path if media else None,
+            "backdrop_path": media.backdrop_path if media else None,
+            "release_date": media.release_date if media else None,
         },
     )
 
@@ -823,6 +827,7 @@ async def remove_list_item(
     lst = list_result.scalar_one_or_none()
     media = item.media
     season_number = item.season_number
+    removed_item_id = item.id
 
     await db.delete(item)
     await db.commit()
@@ -835,10 +840,14 @@ async def remove_list_item(
         payload={
             "list_id": list_id,
             "list_name": lst.name if lst else None,
+            "item_id": removed_item_id,
             "media_id": media.id if media else None,
             "media_tmdb_id": media.tmdb_id if media else None,
             "media_type": media.media_type if media else None,
             "media_title": media.title if media else None,
+            "poster_path": media.poster_path if media else None,
+            "backdrop_path": media.backdrop_path if media else None,
+            "release_date": media.release_date if media else None,
         },
     )
 

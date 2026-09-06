@@ -10,6 +10,7 @@ Real-time event streaming for Scrob instances via WebSocket. Connect external sc
 - [Message Format](#message-format)
 - [Channels](#channels)
 - [Event Types](#event-types)
+- [Sending Events (POST /socket/events)](#sending-events-post-socketevents)
 - [Error Handling](#error-handling)
 - [Examples](#examples)
 
@@ -17,7 +18,7 @@ Real-time event streaming for Scrob instances via WebSocket. Connect external sc
 
 ## Overview
 
-The WebSocket API provides real-time synchronization of events between Scrob instances and external clients. It is **not** a replacement for the REST API — REST remains the source of truth; the socket is a notification layer for real-time updates.
+The WebSocket API provides real-time synchronization of events between Scrob instances and external clients. It is **not** a replacement for the REST API — REST remains the source of truth; the socket carries apply-able deltas for real-time updates (see [ADR-001](architecture/ADR-001-scrob-socket-delta.md)). Bootstrap, wizard, reconnect, and periodic reconcile stay REST-only.
 
 **Use cases:**
 - Scripts / automation (history updates, progress sync)
@@ -48,7 +49,7 @@ wss://itty.ws/c/{namespace}:{channel}?joinKey={join_key}&sendKey={send_key}
 ### Internal Mode (self-hosted)
 
 ```
-ws://{host}:{port}/c/{namespace}:{channel}
+ws://{host}:{port}/c/{namespace}:{channel}?apiKey={api_key}
 ```
 
 | Parameter | Required | Description |
@@ -57,27 +58,33 @@ ws://{host}:{port}/c/{namespace}:{channel}
 | `port` | yes | `SOCKET_INTERNAL_PORT` (default `7332`) |
 | `namespace` | yes | Fixed prefix: `gwb-scrob` |
 | `channel` | yes | `user-{username}` or `global` |
+| `apiKey` | yes | User's API key (query param, see below) |
 
 ---
 
 ## Authentication
 
-### External mode (API key)
+### Both modes (API key)
 
 Pass the user's API key as a query parameter:
 
 ```
 wss://itty.ws/c/gwb-scrob:user-{username}?apiKey={api_key}
+ws://{host}:7332/c/gwb-scrob:user-{username}?apiKey={api_key}
 ```
 
-The server validates the key, resolves the `user_id`, and rejects mismatched credentials with close code `4001`.
+The server validates the key, resolves the `user_id`, and rejects missing/invalid credentials with close code `4001` (`"missing apiKey"` / `"invalid apiKey"`).
 
-### Internal mode (joinKey / sendKey)
+In internal mode the server subscribes the connection to `user-{username}` and fans out matching events over that channel. In external mode the `itty.ws` relay delivers them.
+
+### External mode only (joinKey / sendKey)
 
 Keys are obtained when creating a namespace on [ittysockets.com](https://ittysockets.com) and configured in the Scrob admin panel (**Settings → WebSocket**).
 
 - `joinKey` — required to receive messages from the channel
 - `sendKey` — required to send messages to the channel
+
+> Never mix `joinKey`/`sendKey` with `apiKey` on one channel — separate auth domains.
 
 ---
 
@@ -88,7 +95,8 @@ All messages are JSON objects:
 ```json
 {
   "type": "event_type",
-  "payload": { ... },
+  "op_id": "550e8400-e29b-41d4-a716-446655440000",
+  "payload": { "op_id": "550e8400-e29b-41d4-a716-446655440000" },
   "timestamp": "2026-08-30T12:00:00Z"
 }
 ```
@@ -98,6 +106,9 @@ All messages are JSON objects:
 | `type` | yes | Event type (see [Event Types](#event-types)) |
 | `payload` | yes | Event data |
 | `timestamp` | no | ISO-8601 timestamp |
+| `op_id` | no | Client operation id (string, 1–64 chars), top-level **and** inside `payload`; echoed back unchanged so the sender can filter its own echoes |
+
+Send `{"type":"ping"}` to check liveness — the server replies `{"type":"pong"}`.
 
 > **Note:** `user_id` is **not** included in the payload — it is derived from the API key at connection time.
 
@@ -185,13 +196,48 @@ All messages are JSON objects:
   "payload": {
     "list_id": 10,
     "list_name": "Watchlist",
+    "item_id": 99,
     "media_id": 456,
     "media_tmdb_id": 12345,
     "media_type": "movie",
-    "media_title": "Inception"
+    "media_title": "Inception",
+    "poster_path": "https://image.tmdb.org/t/p/w500/xyz.jpg",
+    "backdrop_path": "https://image.tmdb.org/t/p/w1280/abc.jpg",
+    "release_date": "2010-07-16"
   }
 }
 ```
+
+```json
+{
+  "type": "list.item_removed",
+  "payload": {
+    "list_id": 10,
+    "list_name": "Watchlist",
+    "item_id": 99,
+    "media_id": 456,
+    "media_tmdb_id": 12345,
+    "media_type": "movie",
+    "media_title": "Inception",
+    "poster_path": "https://image.tmdb.org/t/p/w500/xyz.jpg",
+    "backdrop_path": "https://image.tmdb.org/t/p/w1280/abc.jpg",
+    "release_date": "2010-07-16"
+  }
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `list_id` | int | Target list |
+| `list_name` | string \| null | Display name |
+| `item_id` | int | `ListItem.id` — use for delete-without-GET |
+| `media_id` | int \| null | Internal id |
+| `media_tmdb_id` | int \| null | TMDB id |
+| `media_type` | `movie` / `series` / `person` \| null | |
+| `media_title` | string \| null | |
+| `poster_path` | string \| null | Full URL — present on both REST-write and socket-ingest broadcasts |
+| `backdrop_path` | string \| null | Full URL — present on both REST-write and socket-ingest broadcasts |
+| `release_date` | string \| null | `YYYY-MM-DD` — present on both paths |
 
 ### Collection
 
@@ -264,6 +310,32 @@ All messages are JSON objects:
   }
 }
 ```
+
+---
+
+## Sending Events (POST /socket/events)
+
+`POST /socket/events` with API-key auth, body `{type, payload}`. Supported types: `watch_event.*`, `playback_session.*`, `list.item_added` / `list.item_removed`, `collection.*`, `rating.*`.
+
+List payload variants:
+
+```json
+{ "list_id": 10, "media_id": 456 }
+{ "list_id": 10, "tmdb_id": 12345, "media_type": "movie" }
+{ "list_id": 10, "tmdb_id": 12345, "media_type": "series", "season_number": 2 }
+{ "list_id": 10, "item_id": 99 }
+```
+
+- `media_id` wins when present; otherwise `tmdb_id` + `media_type` are resolved (TMDB lookup + create, mirroring `POST /lists/{id}/items`).
+- `{list_id, item_id}` is valid for `list.item_removed` (delete without resolving media).
+- After ingest the server fans the event out on `user-{username}`.
+- `op_id` (optional, string 1–64 chars): pass as top-level request field or inside `payload` (top-level wins). Forwarded to the broadcast (top-level + payload) and echoed in the HTTP response. Non-string / empty / >64-char values are ignored.
+
+| Status | When |
+|---|---|
+| `400` | Missing `list_id`; neither `media_id`/`item_id` nor `tmdb_id`+`media_type`; unknown `media_type`; `season_number` on non-series; unknown event type |
+| `404` | List not found; item not found in list; media/TMDB-season unresolvable |
+| `409` | `item_added` duplicate (`list_id` + `media_id` + season) |
 
 ---
 
