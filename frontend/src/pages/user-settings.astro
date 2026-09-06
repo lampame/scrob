@@ -794,6 +794,13 @@ const COUNTRIES = [
         if (!res.ok) return;
         languages = await res.json() as { iso_639_1: string; english_name: string; name: string }[];
         renderList('');
+        // The initial updateDisplay() call below runs before this fetch
+        // resolves, so languages is still empty and the lookup finds
+        // nothing - the search box shows blank even for an already-saved
+        // preference (the hidden input's value is still correct; only the
+        // visible text was never filled in). Now that names are loaded,
+        // fill it in for real.
+        updateDisplay();
       } catch (_) {}
     }
 
