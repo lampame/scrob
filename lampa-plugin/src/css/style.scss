@@ -28,3 +28,45 @@
     height: 2.6em;
     font-size: 1em;
 }
+
+/* QR device-pairing modal */
+.scrob-qr-wrap {
+    text-align: center;
+    padding: 1.5em 1em;
+}
+
+.scrob-qr-code {
+    display: flex;
+    justify-content: center;
+    margin: 0 auto 1em;
+}
+
+.scrob-qr-code svg {
+    width: 14em;
+    height: 14em;
+    background: #fff;
+    padding: 0.6em;
+    border-radius: 0.3em;
+}
+
+.scrob-qr-user-code {
+    font-size: 1.8em;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    margin-bottom: 0.6em;
+}
+
+.scrob-qr-hint {
+    font-size: 0.9em;
+    color: #bbbbbb;
+    max-width: 26em;
+    margin: 0 auto;
+}
+
+.scrob-qr-manual {
+    font-size: 0.85em;
+    color: #888888;
+    max-width: 26em;
+    margin: 0.6em auto 0;
+    word-break: break-all;
+}

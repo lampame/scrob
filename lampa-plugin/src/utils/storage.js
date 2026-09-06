@@ -12,7 +12,13 @@ export var KEYS = {
     ACTIVE_PROFILE_ID: 'scrob_active_profile_id',
     ACTIVE_API_KEY: 'scrob_active_api_key',
     SYNC_ENABLED: 'scrob_sync_enabled',
-    SYNC_INTERVAL: 'scrob_sync_interval'
+    SYNC_INTERVAL: 'scrob_sync_interval',
+    // QR-пейринг (OAuth 2.0 Device Authorization Grant, /auth/device/*) — Bearer,
+    // не api_key: за дизайном сервера device-скоупований токен не має доступу
+    // до /auth/me, тож так постійний api_key отримати неможливо в принципі.
+    DEVICE_ACCESS_TOKEN: 'scrob_device_access_token',
+    DEVICE_REFRESH_TOKEN: 'scrob_device_refresh_token',
+    DEVICE_EXPIRES_AT: 'scrob_device_expires_at'
 }
 
 // Keys isolated per profile: backed up on switch, restored for the target.
@@ -76,8 +82,16 @@ export function activeProfile() {
     return getMe()
 }
 
+// Three independent, standalone ways to be "signed in" — any one is enough:
+// a manually-entered API key, a QR-paired device token, or a real username/
+// password login (the only one that also unlocks admin profile-switching,
+// since it's the only path that ever calls /auth/me).
 export function hasSession() {
-    return !!(Lampa.Storage.get(KEYS.ACCESS_TOKEN) && getMe().id)
+    return !!(
+        Lampa.Storage.get(KEYS.OWN_API_KEY) ||
+        Lampa.Storage.get(KEYS.DEVICE_ACCESS_TOKEN) ||
+        (Lampa.Storage.get(KEYS.ACCESS_TOKEN) && getMe().id)
+    )
 }
 
 // Clear session keys on logout. Credentials (server/username/password) are kept for re-login.
@@ -88,7 +102,10 @@ export function clearSession() {
         KEYS.ME,
         KEYS.PROFILES,
         KEYS.ACTIVE_PROFILE_ID,
-        KEYS.ACTIVE_API_KEY
+        KEYS.ACTIVE_API_KEY,
+        KEYS.DEVICE_ACCESS_TOKEN,
+        KEYS.DEVICE_REFRESH_TOKEN,
+        KEYS.DEVICE_EXPIRES_AT
     ].forEach(function (key) {
         Lampa.Storage.set(key, '')
     })
