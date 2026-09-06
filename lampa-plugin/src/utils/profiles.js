@@ -28,7 +28,9 @@ export function avatarColor(name) {
 // Image URL needs ?api_key= because <img> cannot send headers.
 export function avatarHtml(user) {
     var server = serverUrl()
-    var ownKey = Lampa.Storage.get(KEYS.OWN_API_KEY) || ''
+    // Active profile's own key when one is set (see the matching note on
+    // apiKeyHeaders() in utils/api.js), otherwise the signed-in user's own.
+    var ownKey = Lampa.Storage.get(KEYS.ACTIVE_API_KEY) || Lampa.Storage.get(KEYS.OWN_API_KEY) || ''
 
     if (user && user.avatar_url && server) {
         var sep = user.avatar_url.indexOf('?') >= 0 ? '&' : '?'

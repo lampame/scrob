@@ -6,9 +6,15 @@ function base() {
     return serverUrl() + '/api/proxy'
 }
 
-// X-Api-Key header from the user's settings key; empty object when not set
+// X-Api-Key header for the currently active identity: the switched-to
+// profile's own key when an admin has picked one (switchProfile()/
+// completeLogin() write ACTIVE_API_KEY), otherwise the signed-in user's own
+// key. Without this, every request kept using OWN_API_KEY regardless of
+// which profile was selected - ACTIVE_API_KEY was written on every switch
+// but never read anywhere, so admin profile-switching never actually
+// changed whose account requests were made under.
 function apiKeyHeaders() {
-    var key = Lampa.Storage.get(KEYS.OWN_API_KEY) || ''
+    var key = Lampa.Storage.get(KEYS.ACTIVE_API_KEY) || Lampa.Storage.get(KEYS.OWN_API_KEY) || ''
     return key ? { 'X-Api-Key': key } : {}
 }
 

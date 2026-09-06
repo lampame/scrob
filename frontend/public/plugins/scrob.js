@@ -413,9 +413,15 @@
       return serverUrl() + '/api/proxy';
     }
 
-    // X-Api-Key header from the user's settings key; empty object when not set
+    // X-Api-Key header for the currently active identity: the switched-to
+    // profile's own key when an admin has picked one (switchProfile()/
+    // completeLogin() write ACTIVE_API_KEY), otherwise the signed-in user's own
+    // key. Without this, every request kept using OWN_API_KEY regardless of
+    // which profile was selected - ACTIVE_API_KEY was written on every switch
+    // but never read anywhere, so admin profile-switching never actually
+    // changed whose account requests were made under.
     function apiKeyHeaders() {
-      var key = Lampa.Storage.get(KEYS.OWN_API_KEY) || '';
+      var key = Lampa.Storage.get(KEYS.ACTIVE_API_KEY) || Lampa.Storage.get(KEYS.OWN_API_KEY) || '';
       return key ? {
         'X-Api-Key': key
       } : {};
@@ -2583,7 +2589,9 @@
     // Image URL needs ?api_key= because <img> cannot send headers.
     function avatarHtml(user) {
       var server = serverUrl();
-      var ownKey = Lampa.Storage.get(KEYS.OWN_API_KEY) || '';
+      // Active profile's own key when one is set (see the matching note on
+      // apiKeyHeaders() in utils/api.js), otherwise the signed-in user's own.
+      var ownKey = Lampa.Storage.get(KEYS.ACTIVE_API_KEY) || Lampa.Storage.get(KEYS.OWN_API_KEY) || '';
       if (user && user.avatar_url && server) {
         var sep = user.avatar_url.indexOf('?') >= 0 ? '&' : '?';
         return '<img class="scrob-avatar" src="' + server + '/api/proxy' + user.avatar_url + sep + 'api_key=' + encodeURIComponent(ownKey) + '">';
