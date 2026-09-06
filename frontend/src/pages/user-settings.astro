@@ -876,7 +876,9 @@ const COUNTRIES = [
     function selectLanguage(value: string, display: string) {
       selectedValue = value;
       hiddenInput.value = value;
-      searchInput.value = value ? display : '';
+      // Same "what does unset mean here" label as updateDisplay() - picking
+      // the default row explicitly is still "unset", not blank.
+      searchInput.value = value ? display : opts.defaultLabel;
       closeList();
       hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
     }
