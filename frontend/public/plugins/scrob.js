@@ -2757,6 +2757,10 @@
         return;
       }
       var activeId = Lampa.Storage.get(KEYS.ACTIVE_PROFILE_ID);
+      // Select's onSelect never restores the controller on its own (only "Back" does,
+      // and only if onBack is given) — capture where we came from and restore it
+      // explicitly in both paths, or the remote/mouse is left hanging after this menu.
+      var returnController = Lampa.Controller.enabled().name;
       var items = profiles.map(function (u) {
         return {
           title: u.username,
@@ -2772,6 +2776,10 @@
         items: items,
         onSelect: function onSelect(a) {
           if (switchProfile(a.id)) renderHeaderButton();
+          Lampa.Controller.toggle(returnController);
+        },
+        onBack: function onBack() {
+          Lampa.Controller.toggle(returnController);
         }
       });
     }
@@ -2884,6 +2892,11 @@
         return;
       }
 
+      // Captured once, threaded through the whole list→category→create/confirm chain —
+      // Select's own controller is always named 'select', so re-querying
+      // Controller.enabled() at a deeper step would just report 'select' back.
+      var returnController = Lampa.Controller.enabled().name;
+
       // Fetch all lists from server
       getLists(function (serverLists) {
         // Filter: exclude [Lampa] lists and already-mapped lists
@@ -2914,14 +2927,17 @@
           title: Lampa.Lang.translate('scrob_map_select_list'),
           items: listItems,
           onSelect: function onSelect(selectedList) {
-            showCategorySelect(selectedList);
+            showCategorySelect(selectedList, returnController);
+          },
+          onBack: function onBack() {
+            Lampa.Controller.toggle(returnController);
           }
         });
       }, function () {
         Lampa.Noty.show(Lampa.Lang.translate('scrob_sync_lists_error'));
       });
     }
-    function showCategorySelect(selectedList) {
+    function showCategorySelect(selectedList, returnController) {
       // Build category list: standard keys + custom keys from favorite
       var favorite = Lampa.Storage.get('favorite', '{}');
       if (typeof favorite === 'string') {
@@ -2981,10 +2997,13 @@
         items: catItems,
         onSelect: function onSelect(selectedCat) {
           if (selectedCat._create_own) {
-            showCreateOwnInput(selectedList);
+            showCreateOwnInput(selectedList, returnController);
           } else {
-            showConfirmMapping(selectedList, selectedCat);
+            showConfirmMapping(selectedList, selectedCat, returnController);
           }
+        },
+        onBack: function onBack() {
+          Lampa.Controller.toggle(returnController);
         }
       });
     }
@@ -2993,7 +3012,7 @@
     var RESERVED_KEYS = ['card', 'history', 'viewed', 'persons', 'like', 'wath', 'book', 'look', 'scheduled', 'continued', 'thrown'];
 
     // Input flow for creating a custom category
-    function showCreateOwnInput(selectedList) {
+    function showCreateOwnInput(selectedList, returnController) {
       Lampa.Input.edit({
         title: Lampa.Lang.translate('scrob_map_own_name'),
         value: selectedList.list_name || '',
@@ -3005,21 +3024,21 @@
         var key = sanitizeCategoryKey(name);
         if (!key) {
           Lampa.Noty.show(Lampa.Lang.translate('scrob_map_own_exists'));
-          showCreateOwnInput(selectedList);
+          showCreateOwnInput(selectedList, returnController);
           return;
         }
 
         // Check reserved keys
         if (RESERVED_KEYS.indexOf(key) !== -1) {
           Lampa.Noty.show(Lampa.Lang.translate('scrob_map_own_exists'));
-          showCreateOwnInput(selectedList);
+          showCreateOwnInput(selectedList, returnController);
           return;
         }
 
         // Check custom registry
         if (getByKey(key)) {
           Lampa.Noty.show(Lampa.Lang.translate('scrob_map_own_exists'));
-          showCreateOwnInput(selectedList);
+          showCreateOwnInput(selectedList, returnController);
           return;
         }
 
@@ -3034,7 +3053,7 @@
         }
         if (favorite[key] && Array.isArray(favorite[key])) {
           Lampa.Noty.show(Lampa.Lang.translate('scrob_map_own_exists'));
-          showCreateOwnInput(selectedList);
+          showCreateOwnInput(selectedList, returnController);
           return;
         }
 
@@ -3051,9 +3070,13 @@
           refreshCustomMenu();
           refreshSettings();
         });
+
+        // Input.edit завжди сам повертає фокус на 'settings_component' — перекриваємо
+        // це власним поверненням до реального контексту виклику.
+        Lampa.Controller.toggle(returnController);
       });
     }
-    function showConfirmMapping(selectedList, selectedCat) {
+    function showConfirmMapping(selectedList, selectedCat, returnController) {
       var html = $('<div>' + '<div style="padding:1em; line-height:1.6">' + '"' + selectedList.list_name + '" ' + Lampa.Lang.translate('scrob_map_confirm') + ' "' + catLabel(selectedCat.id) + '"<br>' + '<span style="opacity:0.6">' + Lampa.Lang.translate('scrob_map_once') + '</span>' + (selectedCat._isMark ? '<br><span style="color:#e8a838">' + Lampa.Lang.translate('scrob_map_marks_warn') + '</span>' : '') + '</div></div>');
       Lampa.Modal.open({
         title: Lampa.Lang.translate('scrob_map_title'),
@@ -3063,17 +3086,23 @@
           name: Lampa.Lang.translate('scrob_map_cancel'),
           onSelect: function onSelect() {
             Lampa.Modal.close();
+            Lampa.Controller.toggle(returnController);
           }
         }, {
           name: Lampa.Lang.translate('scrob_map_apply'),
           onSelect: function onSelect() {
             Lampa.Modal.close();
+            Lampa.Controller.toggle(returnController);
             applyMapping(selectedCat.id, selectedList.id, selectedList.list_name, function () {
               // Success: refresh settings to update active mappings button
               refreshSettings();
             });
           }
-        }]
+        }],
+        onBack: function onBack() {
+          Lampa.Modal.close();
+          Lampa.Controller.toggle(returnController);
+        }
       });
     }
 
@@ -3086,6 +3115,11 @@
         Lampa.Noty.show(Lampa.Lang.translate('scrob_map_none'));
         return;
       }
+
+      // Select's own controller is always named 'select' (native singleton), so it
+      // can't be used as a "return to" target for a NESTED select — capture the
+      // real caller context once here and thread it through to showMappingActions.
+      var returnController = Lampa.Controller.enabled().name;
       var items = keys.map(function (key) {
         return {
           title: catLabel(key) + ' → ' + map[key].list_name,
@@ -3098,11 +3132,14 @@
         title: Lampa.Lang.translate('scrob_map_active'),
         items: items,
         onSelect: function onSelect(selected) {
-          showMappingActions(selected);
+          showMappingActions(selected, returnController);
+        },
+        onBack: function onBack() {
+          Lampa.Controller.toggle(returnController);
         }
       });
     }
-    function showMappingActions(mappingEntry) {
+    function showMappingActions(mappingEntry, returnController) {
       Lampa.Select.show({
         title: mappingEntry.title,
         items: [{
@@ -3120,6 +3157,10 @@
             });
           }
           // 'cancel' — just close, Select auto-closes
+          Lampa.Controller.toggle(returnController);
+        },
+        onBack: function onBack() {
+          Lampa.Controller.toggle(returnController);
         }
       });
     }
