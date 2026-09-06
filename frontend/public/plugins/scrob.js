@@ -1,6 +1,6 @@
 /**
  * Scrob — Lampa plugin for self-hosted media tracking
- * Build: 2026-09-05
+ * Build: 2026-09-06
  * Source: https://github.com/ellite/scrob
  */
 (function () {
@@ -317,6 +317,145 @@
           ru: 'Удалено из категории',
           en: 'Removed from category',
           be: 'Выдалена з катэгорыі'
+        },
+        // ─── First-run wizard (Phase C) ────────────────
+        scrob_wizard_title: {
+          uk: 'Майстер синхронізації',
+          ru: 'Мастер синхронизации',
+          en: 'Sync wizard',
+          be: 'Майстар сінхранізацыі'
+        },
+        scrob_wizard_welcome: {
+          uk: 'Scrob об’єднає закладки Lampa зі списками сервера. За замовчуванням — об’єднання: нічого не видаляється. Історія, переглянуте та картки не синхронізуються.',
+          ru: 'Scrob объединит закладки Lampa со списками сервера. По умолчанию — объединение: ничего не удаляется. История, просмотренное и карточки не синхронизируются.',
+          en: 'Scrob will merge your Lampa bookmarks with server lists. Default is union: nothing is deleted. History, viewed and cards are not synced.',
+          be: 'Scrob аб’яднае закладкі Lampa са спісамі сервера. Па змаўчанні — аб’яднанне: нічога не выдаляецца. Гісторыя, прагледжанае і карткі не сінхранізуюцца.'
+        },
+        scrob_wizard_start: {
+          uk: 'Почати',
+          ru: 'Начать',
+          en: 'Start',
+          be: 'Пачаць'
+        },
+        scrob_wizard_loading: {
+          uk: 'Збираю списки…',
+          ru: 'Собираю списки…',
+          en: 'Collecting lists…',
+          be: 'Збіраю спісы…'
+        },
+        scrob_wizard_empty: {
+          uk: 'Немає що об’єднувати',
+          ru: 'Нечего объединять',
+          en: 'Nothing to merge',
+          be: 'Няма чаго аб’ядноўваць'
+        },
+        scrob_wizard_mode: {
+          uk: 'Як об’єднати списки?',
+          ru: 'Как объединить списки?',
+          en: 'How to merge lists?',
+          be: 'Як аб’яднаць спісы?'
+        },
+        scrob_wizard_merge: {
+          uk: 'Об’єднати',
+          ru: 'Объединить',
+          en: 'Merge',
+          be: 'Аб’яднаць'
+        },
+        scrob_wizard_push: {
+          uk: 'Тільки відправити',
+          ru: 'Только отправить',
+          en: 'Push only',
+          be: 'Толькі адправіць'
+        },
+        scrob_wizard_pull: {
+          uk: 'Тільки забрати',
+          ru: 'Только забрать',
+          en: 'Pull only',
+          be: 'Толькі забраць'
+        },
+        scrob_wizard_later: {
+          uk: 'Налаштувати потім',
+          ru: 'Настроить позже',
+          en: 'Set up later',
+          be: 'Наладзіць пазней'
+        },
+        scrob_wizard_keep_lampa: {
+          uk: 'Залишити Лампу',
+          ru: 'Оставить Lampa',
+          en: 'Keep Lampa',
+          be: 'Пакінуць Lampa'
+        },
+        scrob_wizard_keep_scrob: {
+          uk: 'Залишити Scrob',
+          ru: 'Оставить Scrob',
+          en: 'Keep Scrob',
+          be: 'Пакінуць Scrob'
+        },
+        scrob_wizard_custom_title: {
+          uk: 'Знайдено власні категорії',
+          ru: 'Найдены свои категории',
+          en: 'Custom categories found',
+          be: 'Знойдзены ўласныя катэгорыі'
+        },
+        scrob_wizard_custom_import: {
+          uk: 'Імпортувати як ключі',
+          ru: 'Импортировать как ключи',
+          en: 'Import as keys',
+          be: 'Імпартаваць як ключы'
+        },
+        scrob_wizard_custom_skip: {
+          uk: 'Пропустити',
+          ru: 'Пропустить',
+          en: 'Skip',
+          be: 'Прапусціць'
+        },
+        scrob_wizard_confirm: {
+          uk: 'Підтвердження',
+          ru: 'Подтверждение',
+          en: 'Confirm',
+          be: 'Пацверджанне'
+        },
+        scrob_wizard_apply: {
+          uk: 'Застосувати',
+          ru: 'Применить',
+          en: 'Apply',
+          be: 'Ужыць'
+        },
+        scrob_wizard_done: {
+          uk: 'Готово, відкат доступний 7 днів',
+          ru: 'Готово, откат доступен 7 дней',
+          en: 'Done, rollback available for 7 days',
+          be: 'Гатова, адкат даступны 7 дзён'
+        },
+        scrob_wizard_rerun: {
+          uk: 'Перезапустити майстер',
+          ru: 'Перезапустить мастер',
+          en: 'Re-run wizard',
+          be: 'Перазапусціць майстар'
+        },
+        scrob_wizard_rollback: {
+          uk: 'Відкотити майстер',
+          ru: 'Откатить мастер',
+          en: 'Roll back wizard',
+          be: 'Адкаціць майстар'
+        },
+        scrob_wizard_rolledback: {
+          uk: 'Закладки відновлено з бекапа',
+          ru: 'Закладки восстановлены из бэкапа',
+          en: 'Bookmarks restored from backup',
+          be: 'Закладкі адноўлены з бэкапа'
+        },
+        scrob_wizard_no_backup: {
+          uk: 'Бекапа немає',
+          ru: 'Бэкапа нет',
+          en: 'No backup found',
+          be: 'Бэкапа няма'
+        },
+        scrob_wizard_person_warn: {
+          uk: 'Увага: картки персон бідні',
+          ru: 'Внимание: карточки персон бедные',
+          en: 'Note: person cards are sparse',
+          be: 'Увага: карткі персон бедныя'
         }
       });
     }
@@ -622,6 +761,10 @@
     var handlers = {};
     var reconnectAttempts = 0;
     var reconnectTimer = null;
+    var pendingAcks = {}; // op_id -> { resolve, timer } for WS write acks (Phase B)
+    var lateEcho = {}; // op_id -> expiry timer: ack timed out, late echo still consumable
+    var ACK_TIMEOUT_MS = 5000;
+    var LATE_ECHO_MS = 30000;
 
     // Build WebSocket URL based on connection mode.
     // Pattern: wss://itty.ws/c/{namespace}:{channel}?joinKey={join_key}&sendKey={send_key}
@@ -692,11 +835,20 @@
       }, delay);
     }
 
-    // Parse incoming JSON and dispatch to registered handlers.
+    // Parse incoming JSON, resolve write acks, then dispatch to registered handlers.
     function handleMessage(data) {
       try {
         var msg = JSON.parse(data);
         if (msg && msg.type) {
+          var opId = msg.op_id || msg.payload && msg.payload.op_id;
+          // Guarantee the Phase A own-op filter sees top-level op_id even when the
+          // server echo omits it inside payload.
+          if (msg.op_id && msg.payload && _typeof(msg.payload) === 'object' && msg.payload.op_id == null) {
+            msg.payload.op_id = msg.op_id;
+          }
+          // Ack resolves before dispatch() routing; the echo still routes so the
+          // own-op filter (engine.applyDelta) consumes it — resolve here, filter there.
+          if (opId) resolveAck(opId, msg.payload || msg);
           dispatch(msg.type, msg.payload);
         }
       } catch (e) {
@@ -715,6 +867,90 @@
           }
         });
       }
+    }
+
+    // op_id for WS writes: Lampa.Utils.uid(16) when available, else Math.random hex.
+    function genOpId() {
+      try {
+        if (typeof Lampa !== 'undefined' && Lampa.Utils && typeof Lampa.Utils.uid === 'function') {
+          return Lampa.Utils.uid(16);
+        }
+      } catch (e) {}
+      var hex = '';
+      for (var i = 0; i < 16; i++) hex += '0123456789abcdef'.charAt(Math.floor(Math.random() * 16));
+      return hex;
+    }
+
+    // Ack = any inbound message carrying a matching op_id (server echo after commit).
+    function resolveAck(opId, payload) {
+      if (!opId) return;
+      if (pendingAcks[opId]) {
+        var entry = pendingAcks[opId];
+        delete pendingAcks[opId];
+        if (entry.timer) clearTimeout(entry.timer);
+        entry.resolve(payload);
+        return;
+      }
+      // Late echo after ack-timeout: the ack already rejected, just drop the marker.
+      // The echo still routes to handlers where the own-op filter consumes it.
+      if (lateEcho[opId]) {
+        clearTimeout(lateEcho[opId]);
+        delete lateEcho[opId];
+      }
+    }
+
+    // WS write with ack: resolves when the server echo with the same op_id arrives,
+    // rejects 'offline' / 'ack-timeout' / send error. Returns { promise, opId } so the
+    // caller can registerOwnOp(opId) BEFORE send (the echo filter needs it upfront);
+    // send() below wraps this for callers that only need the promise.
+    function sendWithId(type, payload) {
+      var opId = genOpId();
+      var promise = new Promise(function (resolve, reject) {
+        if (!scrobSocketIsConnected()) {
+          reject('offline');
+          return;
+        }
+        var body = null;
+        try {
+          body = JSON.stringify({
+            type: type,
+            op_id: opId,
+            payload: Object.assign({}, payload, {
+              op_id: opId
+            }),
+            timestamp: new Date().toISOString()
+          });
+        } catch (e) {
+          reject(e);
+          return;
+        }
+        pendingAcks[opId] = {
+          resolve: resolve,
+          timer: setTimeout(function () {
+            if (pendingAcks[opId]) {
+              delete pendingAcks[opId];
+              lateEcho[opId] = setTimeout(function () {
+                delete lateEcho[opId];
+              }, LATE_ECHO_MS);
+              reject('ack-timeout');
+            }
+          }, ACK_TIMEOUT_MS)
+        };
+        try {
+          ws.send(body);
+        } catch (e) {
+          clearTimeout(pendingAcks[opId].timer);
+          delete pendingAcks[opId];
+          reject(e);
+        }
+      });
+      return {
+        promise: promise,
+        opId: opId
+      };
+    }
+    function send(type, payload) {
+      return sendWithId(type, payload).promise;
     }
 
     // Lifecycle hooks: 'open' converges on stale snapshot, 'close' resumes polling.
@@ -794,15 +1030,17 @@
       handlers = {};
     }
 
-    // Get socket interface object for sync.engine (inbound-only notify).
-    // REST is the only write path; the server broadcasts REST writes to all devices.
+    // Get socket interface object for sync.engine (inbound notify + Phase B WS writes
+    // with REST fallback in engine.writeOne).
     function getScrobSocket() {
       return {
         on: scrobSocketOn,
         off: scrobSocketOff,
         isConnected: scrobSocketIsConnected,
         onLifecycle: scrobSocketOnLifecycle,
-        offLifecycle: scrobSocketOffLifecycle
+        offLifecycle: scrobSocketOffLifecycle,
+        send: send,
+        sendWithId: sendWithId
       };
     }
 
@@ -812,15 +1050,24 @@
     // 'bookmarks' only triggers Account.Bookmarks.update()).
 
     // Registered update callback from the engine (set via bindUpdate)
+    // Delta callback set via bindDelta (engine.applyDelta) — bound, not imported,
+    // to avoid an engine <-> handler circular dependency.
     var updateFn = null;
+    var deltaFn = null;
 
     // Named handlers: stable references so off() actually unregisters (unlike
     // anonymous closures, which silently leak and double-fire after restarts).
+    // item_added/item_removed converge via applyDelta with zero GETs;
+    // only unknown lists or broken payloads fall back to a full update().
+    function tryDelta(payload, isRemoved) {
+      if (typeof deltaFn === 'function') return deltaFn(payload, isRemoved);
+      return false;
+    }
     function onItemAdded(payload) {
-      requestUpdate('list.item_added');
+      if (!tryDelta(payload, false)) requestUpdate('list.item_added');
     }
     function onItemRemoved(payload) {
-      requestUpdate('list.item_removed');
+      if (!tryDelta(payload, true)) requestUpdate('list.item_removed');
     }
     function onListCreated(payload) {
       requestUpdate('list.created');
@@ -841,6 +1088,11 @@
     // Bind the engine update() entry point. Called once from engine.start().
     function bindUpdate(fn) {
       updateFn = fn;
+    }
+
+    // Bind the engine applyDelta() entry point. Called once from engine.start().
+    function bindDelta(fn) {
+      deltaFn = fn;
     }
 
     // Single notification path: ask the engine to refetch and converge.
@@ -1136,6 +1388,11 @@
       if (idx !== -1) favorite[lampaKey].splice(idx, 1);
     }
 
+    // Check if a favorite key is a mutually exclusive mark (Phase C wizard).
+    function isMarkKey(key) {
+      return MARK_KEYS.indexOf(key) !== -1;
+    }
+
     // Scrob sync — mirror storage with Tracker-model staleness.
     // Per-profile mirror: scrob_sync_mirror_{profile_id}
     // Structure: { lists: { "[Lampa] Name": { list_id, items: { "type:tmdb_id": item_id } } },
@@ -1388,9 +1645,9 @@
     // Scrob sync engine — single-convergence orchestrator for list synchronization.
     // Model: Lampa core Account.Bookmarks (src/core/account/bookmarks.js).
     // - Outbound: Favorite.listener add/remove + state:changed (custom keys) into one
-    //   serial push_queue with 500ms debounce. REST is the only write path.
-    // - Socket: inbound-only notify/invalidate hub (handler.js) → update(). Writes never
-    //   branch on isSocketActive(): the server already broadcasts REST writes to all devices.
+    //   serial push_queue with 500ms debounce. Socket-first WS send with ack, REST fallback.
+    // - Socket: notify/invalidate hub (handler.js) → update()/applyDelta; outbound WS writes
+    //   branch on isSocketActive(), REST stays the fallback.
     // - Inbound/polling: one update() entry — fetch all lists, converge each pair
     //   via applyRemoteDiff with the unified KeyResolver/applicator (mapping.js).
     // - Mirror: Tracker-model {version,time} stamp; 409 resolves the real item_id,
@@ -1467,7 +1724,7 @@
     // ─── Favorite helpers ─────────────────────────────────────
 
     // Read favorite from storage, normalize from string if needed.
-    function readFavorite() {
+    function readFavorite$1() {
       var favorite = Lampa.Storage.get('favorite', '{}');
       if (typeof favorite === 'string') {
         try {
@@ -1485,6 +1742,69 @@
       received = true;
       Lampa.Storage.set('favorite', favorite);
       received = false;
+    }
+
+    // ─── Own-op echo filter (Phase B: writeOne registers before send, applyDelta consumes) ───
+    // Plain object as a set: works on old WebKit without an ES6 Set polyfill.
+    var ownOps = {};
+    function registerOwnOp(opId) {
+      if (typeof opId === 'string' && opId) ownOps[opId] = true;
+    }
+    function unregisterOwnOp(opId) {
+      if (typeof opId === 'string' && opId) delete ownOps[opId];
+    }
+    function isOwnOp(opId) {
+      if (typeof opId !== 'string' || !opId) return false;
+      return !!ownOps[opId];
+    }
+
+    // Build a Scrob media object from a socket payload for cardFromScrobMedia().
+    function mediaFromPayload(msg) {
+      return {
+        tmdb_id: parseInt(msg.media_tmdb_id, 10),
+        type: toScrobType(msg.media_type || 'movie'),
+        title: msg.media_title || '',
+        poster_path: msg.poster_path || '',
+        backdrop_path: msg.backdrop_path || '',
+        release_date: msg.release_date || ''
+      };
+    }
+
+    // ─── Inbound delta (Phase A): one socket event, no GETs ────
+    // Returns true when applied (or safely ignored), false when the caller
+    // must fall back to requestUpdate() (unknown list / bad payload).
+    // isRemoved: false for item_added, true for item_removed ('removed'/'remove' also accepted).
+    function applyDelta(rawPayload, isRemoved) {
+      if (received) return true;
+      var removed = isRemoved === 'removed' || isRemoved === 'remove' ? true : !!isRemoved;
+      var msg = rawPayload && rawPayload.payload && rawPayload.list_id == null ? rawPayload.payload : rawPayload;
+      if (!msg) return false;
+      if (typeof msg.op_id === 'string' && msg.op_id && isOwnOp(msg.op_id)) {
+        unregisterOwnOp(msg.op_id);
+        return true;
+      }
+      if (msg.list_id == null) return false;
+      var favorite = readFavorite$1();
+      var map = getMap();
+      var m = get();
+      var lampaKey = resolveKeyForListId(msg.list_id, map, m.lists, favorite);
+      if (!lampaKey) return false;
+      var mediaType = toScrobType(msg.media_type || 'movie');
+      var tmdbId = parseInt(msg.media_tmdb_id, 10);
+      if (!tmdbId) return false;
+      var key = elementKey(mediaType, tmdbId);
+      var listName = resolveNameForListId(msg.list_id, m.lists) || map[lampaKey] && map[lampaKey].list_name || msg.list_name || listNameForKey(lampaKey);
+      if (!listName) return false;
+      if (!removed) {
+        applyRemoteAdd(favorite, lampaKey, tmdbId, mediaFromPayload(msg));
+        setItemId(listName, key, msg.item_id || null);
+      } else {
+        applyRemoteRemove(favorite, lampaKey, tmdbId);
+        removeItemId(listName, key);
+      }
+      writeFavorite(favorite);
+      save(get());
+      return true;
     }
 
     // ─── Outbound: Favorite.listener + state:changed → serial queue ───
@@ -1511,7 +1831,7 @@
       if (!e || e.target !== 'favorite' || e.reason !== 'update') return;
       if (!e.type || !e.card || !e.card.id) return;
       if (e.method !== 'add' && e.method !== 'added' && e.method !== 'remove') return;
-      var fav = readFavorite();
+      var fav = readFavorite$1();
       if (!Array.isArray(fav[e.type])) return;
       var method = e.method === 'remove' ? 'remove' : 'add';
       for (var i = 0; i < pushQueue.length; i++) {
@@ -1560,7 +1880,9 @@
       return null;
     }
 
-    // Single REST write. Socket is notify-only: no socketIngest branch here.
+    // Single write: socket-first with ack (Phase B), unchanged REST fallback.
+    // Serial queue order is preserved — the WS attempt lives inside writeOne,
+    // never as a parallel channel.
     function writeOne(op, done) {
       var target = resolveListId(op.lampaKey);
       if (!target) {
@@ -1576,6 +1898,76 @@
       }
       var mediaType = detectMediaType(op.card);
       var key = elementKey(mediaType, cardId);
+
+      // WS needs sendWithId: op_id must be registered before send so the server
+      // echo is consumed by the own-op filter (applyDelta); plain send() cannot.
+      if (isSocketActive() && activeSocket && typeof activeSocket.sendWithId === 'function') {
+        var sockType = null;
+        var sockPayload = null;
+        if (op.method === 'add') {
+          sockType = 'list.item_added';
+          sockPayload = {
+            list_id: target.listId,
+            tmdb_id: cardId,
+            media_type: mediaType
+          };
+        } else {
+          var knownId = getItemId(target.listName, key);
+          if (knownId) {
+            sockType = 'list.item_removed';
+            sockPayload = {
+              list_id: target.listId,
+              item_id: knownId
+            };
+          }
+          // Unknown item_id → REST path below resolves it via fetchItemId as today.
+        }
+        if (sockPayload) {
+          trySocketWrite(sockType, sockPayload, op, target, cardId, mediaType, key, done);
+          return;
+        }
+      }
+      writeOneRest(op, target, cardId, mediaType, key, done);
+    }
+
+    // One WS attempt; on ack mirrors the REST success branch, on any reject falls
+    // back to the unchanged REST path (409/fetchItemId/retry intact).
+    function trySocketWrite(sockType, sockPayload, op, target, cardId, mediaType, key, done) {
+      var result = null;
+      try {
+        result = activeSocket.sendWithId(sockType, sockPayload);
+      } catch (e) {
+        result = null;
+      }
+      if (!result || !result.promise || typeof result.opId !== 'string') {
+        writeOneRest(op, target, cardId, mediaType, key, done);
+        return;
+      }
+      registerOwnOp(result.opId);
+      result.promise.then(function (ack) {
+        unregisterOwnOp(result.opId);
+        if (op.method === 'add') {
+          setItemId(target.listName, key, ack && (ack.item_id || ack.id) || null);
+        } else {
+          removeItemId(target.listName, key);
+        }
+        done();
+      }, function (err) {
+        if (err === 'ack-timeout') {
+          // Server may still broadcast the echo — keep the mark until it arrives.
+          setTimeout(function () {
+            unregisterOwnOp(result.opId);
+          }, 30000);
+        } else {
+          // Offline / send error: nothing was committed, drop the mark.
+          unregisterOwnOp(result.opId);
+        }
+        writeOneRest(op, target, cardId, mediaType, key, done);
+      });
+    }
+
+    // Existing REST write, verbatim since Phase B (socket-first falls back here).
+    function writeOneRest(op, target, cardId, mediaType, key, done) {
       if (op.method === 'add') {
         addListItem(target.listId, cardId, mediaType, function (response) {
           setItemId(target.listName, key, response && response.id ? response.id : null);
@@ -1691,7 +2083,7 @@
         }
 
         // Read current favorite to get all syncable keys
-        var favorite = readFavorite();
+        var favorite = readFavorite$1();
         var keys = syncableKeys(favorite);
         var resolved = {};
         var pending = 0;
@@ -1835,7 +2227,7 @@
       }, DEBOUNCE_MS);
     }
     function convergeAll(serverLists, done) {
-      var favorite = readFavorite();
+      var favorite = readFavorite$1();
       var map = getMap();
       var m = get();
 
@@ -2258,6 +2650,7 @@
     function bindSocketHandlers() {
       if (!activeSocket || handlersBound) return;
       bindUpdate(invalidate);
+      bindDelta(applyDelta);
       registerHandlers(activeSocket);
       if (activeSocket.onLifecycle) {
         activeSocket.onLifecycle('open', onSocketOpen);
@@ -2277,6 +2670,7 @@
       }
       handlersBound = false;
       bindUpdate(null);
+      bindDelta(null);
     }
 
     // ─── Mapping merge (section 14.3) ─────────────────────────
@@ -2285,7 +2679,7 @@
     function mergePair(lampaKey, listId, listName, callback) {
       console.log('ScrobSync', 'merge pair', listName);
       getListItems(listId, function (scrobItems) {
-        var favorite = readFavorite();
+        var favorite = readFavorite$1();
         var scrobSet = scrobElementSet(scrobItems);
         var localSet = localElementSet(favorite, lampaKey);
 
@@ -2643,6 +3037,493 @@
       return true;
     }
 
+    // Snapshot TTL: rollback button lives 7 days (spec 5.1, step 0).
+    var BACKUP_TTL = 7 * 24 * 3600 * 1000;
+    var PUSH_PAUSE = 150;
+    function currentPid() {
+      return Lampa.Storage.get(KEYS.ACTIVE_PROFILE_ID) || 'default';
+    }
+    function doneKey(p) {
+      return 'scrob_wizard_done_' + p;
+    }
+    function tsKey(p) {
+      return backupKey(p, 'favorite') + '_ts';
+    }
+    function t(key) {
+      return Lampa.Lang.translate(key);
+    }
+    function parseFavorite(raw) {
+      if (typeof raw === 'string') {
+        try {
+          return JSON.parse(raw);
+        } catch (e) {
+          return {};
+        }
+      }
+      return raw || {};
+    }
+    function readFavorite() {
+      var fav = parseFavorite(Lampa.Storage.get('favorite', '{}'));
+      if (!fav.card) fav.card = [];
+      return fav;
+    }
+    function escapeHtml(s) {
+      return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    function needsWizard(p) {
+      p = p || currentPid();
+      return !Lampa.Storage.get(doneKey(p));
+    }
+    function hasWizardBackup(p) {
+      p = p || currentPid();
+      var raw = Lampa.Storage.get(backupKey(p, 'favorite'), 'none');
+      if (raw === 'none' || !raw) return false;
+      var ts = parseInt(Lampa.Storage.get(tsKey(p), '0'), 10) || 0;
+      return Date.now() - ts < BACKUP_TTL;
+    }
+    function restoreWizardBackup(p) {
+      p = p || currentPid();
+      if (!hasWizardBackup(p)) return false;
+      Lampa.Storage.set('favorite', Lampa.Storage.get(backupKey(p, 'favorite')));
+      try {
+        if (Lampa.Favorite && Lampa.Favorite.read) Lampa.Favorite.read();
+      } catch (e) {}
+      try {
+        if (Lampa.Timeline && Lampa.Timeline.read) Lampa.Timeline.read();
+      } catch (e) {}
+      return true;
+    }
+    function markDone() {
+      Lampa.Storage.set(doneKey(currentPid()), true);
+    }
+    function maybeStartSync() {
+      if (Lampa.Storage.get(KEYS.SYNC_ENABLED)) start();
+    }
+
+    // ─── Inventory (step 2) ───────────────────────────────────
+    // One row per non-empty pair: { lampaKey, listName, listId, local, remote, both, localSet, remoteSet }.
+    function previewAll(onDone) {
+      var favorite = readFavorite();
+      var map = getMap();
+      getLists(function (serverLists) {
+        var byId = {},
+          byName = {};
+        for (var s = 0; s < serverLists.length; s++) {
+          byId[serverLists[s].id] = serverLists[s];
+          if (serverLists[s].name) byName[serverLists[s].name] = serverLists[s];
+        }
+        var keys = syncableKeys(favorite);
+        var rows = [];
+        var i = 0;
+        function next() {
+          if (i >= keys.length) {
+            onDone(rows);
+            return;
+          }
+          var key = keys[i++];
+          var name = null,
+            list = null;
+          var m = map[key];
+          if (m && m.list_id != null) {
+            list = byId[m.list_id] || (m.list_name ? byName[m.list_name] : null) || null;
+            name = list && list.name || m.list_name || listNameForKey(key);
+          } else {
+            name = listNameForKey(key);
+            if (name && byName[name]) list = byName[name];
+          }
+          if (!name) {
+            next();
+            return;
+          }
+          var localSet = localElementSet(favorite, key);
+          var localCount = Object.keys(localSet).length;
+          function pushRow(remoteSet, listId) {
+            var rkeys = Object.keys(remoteSet);
+            var both = 0;
+            for (var k = 0; k < rkeys.length; k++) if (localSet[rkeys[k]]) both++;
+            if (localCount === 0 && rkeys.length === 0) {
+              next();
+              return;
+            }
+            rows.push({
+              lampaKey: key,
+              listName: name,
+              listId: listId,
+              local: localCount,
+              remote: rkeys.length,
+              both: both,
+              localSet: localSet,
+              remoteSet: remoteSet
+            });
+            next();
+          }
+          if (!list) {
+            pushRow({}, null);
+            return;
+          }
+          getListItems(list.id, function (items) {
+            pushRow(scrobElementSet(Array.isArray(items) ? items : []), list.id);
+          }, function () {
+            pushRow({}, list.id);
+          });
+        }
+        next();
+      }, function () {
+        onDone([]);
+      });
+    }
+
+    // ─── Flow (steps 0–7) ─────────────────────────────────────
+
+    function runWizard() {
+      if (!hasSession()) return;
+      var conflicts = detectConflicts();
+      for (var c = 0; c < conflicts.length; c++) {
+        if (conflicts[c].type === 'cub_sync') {
+          Lampa.Noty.show(t('scrob_sync_blocked_cub'));
+          return;
+        }
+      }
+      // Step 0 — snapshot before anything writes.
+      var p = currentPid();
+      Lampa.Storage.set(backupKey(p, 'favorite'), Lampa.Storage.get('favorite', '{}'));
+      Lampa.Storage.set(tsKey(p), Date.now());
+      // Step 1 — welcome: union default, nothing deleted without confirm.
+      Lampa.Modal.open({
+        title: t('scrob_wizard_title'),
+        html: $('<div><div style="padding:1em;line-height:1.6">' + escapeHtml(t('scrob_wizard_welcome')) + '</div></div>'),
+        size: 'medium',
+        buttons: [{
+          name: t('scrob_map_cancel'),
+          onSelect: function onSelect() {
+            Lampa.Modal.close();
+          }
+        }, {
+          name: t('scrob_wizard_start'),
+          onSelect: function onSelect() {
+            Lampa.Modal.close();
+            inventoryStep();
+          }
+        }]
+      });
+    }
+    function inventoryStep() {
+      Lampa.Noty.show(t('scrob_wizard_loading'));
+      previewAll(function (rows) {
+        if (!rows.length) {
+          Lampa.Noty.show(t('scrob_wizard_empty'));
+          markDone();
+          maybeStartSync();
+          return;
+        }
+        globalModeStep(rows);
+      });
+    }
+
+    // Step 3 — global mode; non-merge modes skip per-pair questions.
+    function globalModeStep(rows) {
+      var modes = ['merge', 'push', 'pull', 'later'];
+      var labels = {
+        merge: t('scrob_wizard_merge'),
+        push: t('scrob_wizard_push'),
+        pull: t('scrob_wizard_pull'),
+        later: t('scrob_wizard_later')
+      };
+      Lampa.Select.show({
+        title: t('scrob_wizard_mode'),
+        items: modes.map(function (m) {
+          return {
+            title: labels[m],
+            _mode: m,
+            selected: m === 'merge'
+          };
+        }),
+        onSelect: function onSelect(a) {
+          if (a._mode === 'merge') {
+            var conflicts = rows.filter(function (r) {
+              return r.local > 0 && r.remote > 0 && r.both < r.local + r.remote;
+            });
+            pairSteps(conflicts, rows, a._mode, {}, 0);
+          } else {
+            customStep(rows, {
+              global: a._mode,
+              per: {}
+            });
+          }
+        }
+      });
+    }
+
+    // Step 4 — per conflicting pair; marks offer keep-only (union breaks toggle()).
+    function pairSteps(list, rows, global, per, idx) {
+      if (idx >= list.length) {
+        customStep(rows, {
+          global: global,
+          per: per
+        });
+        return;
+      }
+      var row = list[idx];
+      var mark = isMarkKey(row.lampaKey);
+      var items = [];
+      if (!mark) items.push({
+        title: t('scrob_wizard_merge'),
+        _mode: 'merge',
+        selected: true
+      });
+      items.push({
+        title: t('scrob_wizard_keep_lampa') + (mark ? ' — ' + t('scrob_map_marks_warn') : ''),
+        _mode: 'push',
+        selected: mark
+      });
+      items.push({
+        title: t('scrob_wizard_keep_scrob'),
+        _mode: 'pull'
+      });
+      Lampa.Select.show({
+        title: row.listName + ': ' + row.local + ' + ' + row.remote + ' → ?',
+        items: items,
+        onSelect: function onSelect(a) {
+          per[row.lampaKey] = a._mode;
+          pairSteps(list, rows, global, per, idx + 1);
+        }
+      });
+    }
+
+    // Step 5 — levende custom_favorite: import as favorite keys or skip.
+    function findCustom() {
+      var raw = Lampa.Storage.get('custom_favorite', 'none');
+      var cf = parseFavorite(raw === 'none' ? null : raw);
+      if (!cf || _typeof(cf) !== 'object') return null;
+      var types = cf.customTypes || cf.custom_types || null;
+      if (!types || _typeof(types) !== 'object') return null;
+      var names = [];
+      for (var k in types) {
+        if (k === 'card' || k === 'cards' || k === 'migrationVersion' || k === 'migration_version') continue;
+        names.push(k);
+      }
+      if (!names.length) return null;
+      return {
+        data: cf,
+        types: types,
+        names: names
+      };
+    }
+    function customStep(rows, plan) {
+      var found = findCustom();
+      if (!found) {
+        confirmStep(rows, plan, 'skip');
+        return;
+      }
+      Lampa.Select.show({
+        title: t('scrob_wizard_custom_title') + ' (' + found.names.length + ')',
+        items: [{
+          title: t('scrob_wizard_custom_import'),
+          _mode: 'import',
+          selected: true
+        }, {
+          title: t('scrob_wizard_custom_skip'),
+          _mode: 'skip'
+        }],
+        onSelect: function onSelect(a) {
+          confirmStep(rows, plan, a._mode);
+        }
+      });
+    }
+
+    // Step 6 — confirm: `N + M → P` lines.
+    function strategyOf(plan, key) {
+      return plan.per[key] || plan.global;
+    }
+    function resultCount(row, strategy) {
+      if (strategy === 'merge') return row.local + row.remote - row.both;
+      if (strategy === 'push') return row.local;
+      if (strategy === 'pull') return row.remote;
+      return row.local;
+    }
+    function confirmStep(rows, plan, customMode) {
+      plan.customMode = customMode;
+      plan.rows = rows;
+      var html = '';
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        var s = strategyOf(plan, r.lampaKey);
+        var line = escapeHtml(r.listName) + ': ' + r.local + ' + ' + r.remote + ' → ' + resultCount(r, s);
+        if (s === 'later') line += ' (' + escapeHtml(t('scrob_wizard_later')) + ')';
+        if (r.lampaKey === 'person') line += '<br><span style="opacity:0.6">' + escapeHtml(t('scrob_wizard_person_warn')) + '</span>';
+        html += '<div style="padding:0.2em 0">' + line + '</div>';
+      }
+      Lampa.Modal.open({
+        title: t('scrob_wizard_confirm'),
+        html: $('<div><div style="padding:1em;line-height:1.6">' + html + '</div></div>'),
+        size: 'medium',
+        buttons: [{
+          name: t('scrob_map_cancel'),
+          onSelect: function onSelect() {
+            Lampa.Modal.close();
+          }
+        }, {
+          name: t('scrob_wizard_apply'),
+          onSelect: function onSelect() {
+            Lampa.Modal.close();
+            Lampa.Noty.show(t('scrob_wizard_loading'));
+            applyAll(plan);
+          }
+        }]
+      });
+    }
+
+    // ─── Apply (step 7) ───────────────────────────────────────
+    // One favorite mutation object across all rows, a single Storage.set at the end.
+    function applyAll(plan, onDone) {
+      var favorite = readFavorite();
+      var rows = plan.rows || [];
+      var i = 0;
+      function next() {
+        if (i >= rows.length) {
+          applyCustom(favorite, plan.customMode);
+          Lampa.Storage.set('favorite', favorite);
+          try {
+            if (Lampa.Favorite && Lampa.Favorite.read) Lampa.Favorite.read();
+          } catch (e) {}
+          markDone();
+          Lampa.Noty.show(t('scrob_wizard_done'));
+          maybeStartSync();
+          return;
+        }
+        var row = rows[i++];
+        var strategy = strategyOf(plan, row.lampaKey);
+        if (strategy === 'later') {
+          next();
+          return;
+        }
+        applyRow(row, strategy, favorite, next);
+      }
+      next();
+    }
+    function applyRow(row, strategy, favorite, done) {
+      function withList(cb) {
+        if (row.listId) {
+          cb(row.listId);
+          return;
+        }
+        createList(row.listName, function (created) {
+          row.listId = created.id;
+          setMapping(row.lampaKey, created.id, row.listName);
+          setList(row.listName, created.id);
+          cb(created.id);
+        }, done);
+      }
+      withList(function (listId) {
+        var pushKeys = [];
+        if (strategy === 'merge' || strategy === 'push') {
+          for (var k in row.localSet) if (!row.remoteSet[k]) pushKeys.push(k);
+        }
+        pushSerial(listId, row, pushKeys, 0, {}, function (pushedIds) {
+          if (strategy === 'pull') favorite[row.lampaKey] = [];
+          if (strategy === 'merge' || strategy === 'pull') {
+            for (var k2 in row.remoteSet) {
+              if (strategy === 'merge' && row.localSet[k2]) continue;
+              var parsed = parseElementKey(k2);
+              applyRemoteAdd(favorite, row.lampaKey, parseInt(parsed.tmdbId, 10), row.remoteSet[k2].media);
+            }
+          }
+          setMapping(row.lampaKey, listId, row.listName);
+          setList(row.listName, listId);
+          var union = {};
+          for (var a in row.localSet) union[a] = true;
+          for (var b in row.remoteSet) union[b] = true;
+          for (var u in union) {
+            setItemId(row.listName, u, row.remoteSet[u] ? row.remoteSet[u].itemId : pushedIds[u] || null);
+          }
+          done();
+        });
+      });
+    }
+
+    // Serial push with 150ms pause (engine pushRestItems pattern); best-effort —
+    // failures converge later via steady-state sync, the plan never stalls on one row.
+    function pushSerial(listId, row, keys, idx, pushedIds, cb) {
+      if (idx >= keys.length) {
+        cb(pushedIds);
+        return;
+      }
+      var parts = parseElementKey(keys[idx]);
+      var tmdbId = parseInt(parts.tmdbId, 10);
+      if (!tmdbId) {
+        pushSerial(listId, row, keys, idx + 1, pushedIds, cb);
+        return;
+      }
+      function step() {
+        pushSerial(listId, row, keys, idx + 1, pushedIds, cb);
+      }
+      addListItem(listId, tmdbId, parts.mediaType, function (resp) {
+        pushedIds[keys[idx]] = resp && resp.id || null;
+        setTimeout(step, PUSH_PAUSE);
+      }, function () {
+        pushedIds[keys[idx]] = null;
+        setTimeout(step, PUSH_PAUSE);
+      });
+    }
+    function sanitizeKey(name) {
+      return String(name || '').trim().toLowerCase().replace(/[^\wа-яіїєґё]+/gi, '_').replace(/_{2,}/g, '_').replace(/^_+|_+$/g, '').slice(0, 32);
+    }
+
+    // Custom import: minimal copy of levende mergeCard/mergeCategory (union, no deletes).
+    function applyCustom(favorite, mode) {
+      if (mode !== 'import') return;
+      var found = findCustom();
+      if (!found) return;
+      var pool = [];
+      if (Array.isArray(found.types.card)) pool = found.types.card;else if (Array.isArray(found.data.card)) pool = found.data.card;
+      for (var n = 0; n < found.names.length; n++) {
+        var name = found.names[n];
+        var val = found.types[name];
+        var uid = typeof val === 'string' ? val : val && (val.uid || val.id) || name;
+        var ids = found.data[uid];
+        if (!Array.isArray(ids) || !ids.length) continue;
+        var key = sanitizeKey(name);
+        if (!key || key === 'card' || key === 'history' || key === 'viewed') continue;
+        if (!Array.isArray(favorite[key])) favorite[key] = [];
+        if (!Array.isArray(favorite.card)) favorite.card = [];
+        for (var i = 0; i < ids.length; i++) {
+          if (favorite[key].indexOf(ids[i]) === -1) favorite[key].push(ids[i]);
+          var has = false;
+          for (var c = 0; c < favorite.card.length; c++) {
+            if (favorite.card[c].id == ids[i]) {
+              has = true;
+              break;
+            }
+          }
+          if (!has) {
+            var src = null;
+            for (var p = 0; p < pool.length; p++) {
+              if (pool[p].id == ids[i]) {
+                src = pool[p];
+                break;
+              }
+            }
+            if (src) {
+              favorite.card.push(Object.assign({}, src));
+              continue;
+            }
+            var num = parseInt(ids[i], 10);
+            favorite.card.push(num && cardFromScrobMedia({
+              tmdb_id: num,
+              type: 'movie',
+              title: String(ids[i])
+            }) || {
+              id: ids[i],
+              method: 'movie',
+              title: String(ids[i]),
+              poster_path: ''
+            });
+          }
+        }
+        add(key, name);
+      }
+    }
+
     /**
      * Scrob custom category viewer component.
      * Pattern: kinobaza/myperson/component.js — Lampa.Maker.make('Category')
@@ -2801,8 +3682,10 @@
         refreshSettings();
         Lampa.Noty.show(Lampa.Lang.translate('scrob_auth_success'));
 
-        // Start sync if enabled (lifecycle wiring)
-        if (Lampa.Storage.get(KEYS.SYNC_ENABLED)) start();
+        // First-run wizard before steady-state sync (Phase C): it converges
+        // via api.* directly and calls sync.start() itself when done.
+        var pid = Lampa.Storage.get(KEYS.ACTIVE_PROFILE_ID) || 'default';
+        if (needsWizard(pid)) runWizard();else if (Lampa.Storage.get(KEYS.SYNC_ENABLED)) start();
       };
       if (me.is_admin) {
         // Admin gets all server users as profiles; on failure fall back to own profile only
@@ -3702,6 +4585,42 @@
         onChange: showActiveMappings
       });
 
+      // Re-run first-run wizard (Phase C)
+      Lampa.SettingsApi.addParam({
+        component: 'scrob_sync_page',
+        param: {
+          name: 'scrob_wizard_rerun_btn',
+          type: 'button'
+        },
+        field: {
+          name: Lampa.Lang.translate('scrob_wizard_rerun')
+        },
+        onChange: function onChange() {
+          runWizard();
+        }
+      });
+
+      // Roll back wizard favorite snapshot (visible only when backup exists)
+      Lampa.SettingsApi.addParam({
+        component: 'scrob_sync_page',
+        param: {
+          name: 'scrob_wizard_rollback_btn',
+          type: 'button'
+        },
+        field: {
+          name: Lampa.Lang.translate('scrob_wizard_rollback')
+        },
+        onChange: function onChange() {
+          if (restoreWizardBackup()) {
+            refreshCustomMenu();
+            refreshSettings();
+            Lampa.Noty.show(Lampa.Lang.translate('scrob_wizard_rolledback'));
+          } else {
+            Lampa.Noty.show(Lampa.Lang.translate('scrob_wizard_no_backup'));
+          }
+        }
+      });
+
       // Status line (static, updated on render)
       Lampa.SettingsApi.addParam({
         component: 'scrob_sync_page',
@@ -3783,6 +4702,12 @@
             body2.find('[data-name="scrob_map_active_btn"]').addClass('hide');
           } else {
             body2.find('[data-name="scrob_map_active_btn"]').removeClass('hide');
+          }
+          // Rollback button lives only while the 7-day snapshot exists
+          if (hasWizardBackup()) {
+            body2.find('[data-name="scrob_wizard_rollback_btn"]').removeClass('hide');
+          } else {
+            body2.find('[data-name="scrob_wizard_rollback_btn"]').addClass('hide');
           }
         }
       };

@@ -7,6 +7,10 @@ var socketConfig = null
 var handlers = {}
 var reconnectAttempts = 0
 var reconnectTimer = null
+var pendingAcks = {} // op_id -> { resolve, timer } for WS write acks (Phase B)
+var lateEcho = {}    // op_id -> expiry timer: ack timed out, late echo still consumable
+var ACK_TIMEOUT_MS = 5000
+var LATE_ECHO_MS = 30000
 
 // Build WebSocket URL based on connection mode.
 // Pattern: wss://itty.ws/c/{namespace}:{channel}?joinKey={join_key}&sendKey={send_key}
@@ -86,11 +90,20 @@ function scheduleReconnect() {
     }, delay)
 }
 
-// Parse incoming JSON and dispatch to registered handlers.
+// Parse incoming JSON, resolve write acks, then dispatch to registered handlers.
 function handleMessage(data) {
     try {
         var msg = JSON.parse(data)
         if (msg && msg.type) {
+            var opId = msg.op_id || (msg.payload && msg.payload.op_id)
+            // Guarantee the Phase A own-op filter sees top-level op_id even when the
+            // server echo omits it inside payload.
+            if (msg.op_id && msg.payload && typeof msg.payload === 'object' && msg.payload.op_id == null) {
+                msg.payload.op_id = msg.op_id
+            }
+            // Ack resolves before dispatch() routing; the echo still routes so the
+            // own-op filter (engine.applyDelta) consumes it — resolve here, filter there.
+            if (opId) resolveAck(opId, msg.payload || msg)
             dispatch(msg.type, msg.payload)
         }
     } catch (e) {
@@ -109,6 +122,78 @@ function dispatch(type, payload) {
             }
         })
     }
+}
+
+// op_id for WS writes: Lampa.Utils.uid(16) when available, else Math.random hex.
+function genOpId() {
+    try {
+        if (typeof Lampa !== 'undefined' && Lampa.Utils && typeof Lampa.Utils.uid === 'function') {
+            return Lampa.Utils.uid(16)
+        }
+    } catch (e) {}
+    var hex = ''
+    for (var i = 0; i < 16; i++) hex += '0123456789abcdef'.charAt(Math.floor(Math.random() * 16))
+    return hex
+}
+
+// Ack = any inbound message carrying a matching op_id (server echo after commit).
+function resolveAck(opId, payload) {
+    if (!opId) return
+    if (pendingAcks[opId]) {
+        var entry = pendingAcks[opId]
+        delete pendingAcks[opId]
+        if (entry.timer) clearTimeout(entry.timer)
+        entry.resolve(payload)
+        return
+    }
+    // Late echo after ack-timeout: the ack already rejected, just drop the marker.
+    // The echo still routes to handlers where the own-op filter consumes it.
+    if (lateEcho[opId]) {
+        clearTimeout(lateEcho[opId])
+        delete lateEcho[opId]
+    }
+}
+
+// WS write with ack: resolves when the server echo with the same op_id arrives,
+// rejects 'offline' / 'ack-timeout' / send error. Returns { promise, opId } so the
+// caller can registerOwnOp(opId) BEFORE send (the echo filter needs it upfront);
+// send() below wraps this for callers that only need the promise.
+export function sendWithId(type, payload) {
+    var opId = genOpId()
+    var promise = new Promise(function (resolve, reject) {
+        if (!scrobSocketIsConnected()) { reject('offline'); return }
+        var body = null
+        try {
+            body = JSON.stringify({
+                type: type,
+                op_id: opId,
+                payload: Object.assign({}, payload, { op_id: opId }),
+                timestamp: new Date().toISOString()
+            })
+        } catch (e) { reject(e); return }
+        pendingAcks[opId] = {
+            resolve: resolve,
+            timer: setTimeout(function () {
+                if (pendingAcks[opId]) {
+                    delete pendingAcks[opId]
+                    lateEcho[opId] = setTimeout(function () { delete lateEcho[opId] }, LATE_ECHO_MS)
+                    reject('ack-timeout')
+                }
+            }, ACK_TIMEOUT_MS)
+        }
+        try {
+            ws.send(body)
+        } catch (e) {
+            clearTimeout(pendingAcks[opId].timer)
+            delete pendingAcks[opId]
+            reject(e)
+        }
+    })
+    return { promise: promise, opId: opId }
+}
+
+export function send(type, payload) {
+    return sendWithId(type, payload).promise
 }
 
 // Lifecycle hooks: 'open' converges on stale snapshot, 'close' resumes polling.
@@ -185,14 +270,16 @@ export function scrobSocketDisconnect() {
     handlers = {}
 }
 
-// Get socket interface object for sync.engine (inbound-only notify).
-// REST is the only write path; the server broadcasts REST writes to all devices.
+// Get socket interface object for sync.engine (inbound notify + Phase B WS writes
+// with REST fallback in engine.writeOne).
 export function getScrobSocket() {
     return {
         on: scrobSocketOn,
         off: scrobSocketOff,
         isConnected: scrobSocketIsConnected,
         onLifecycle: scrobSocketOnLifecycle,
-        offLifecycle: scrobSocketOffLifecycle
+        offLifecycle: scrobSocketOffLifecycle,
+        send: send,
+        sendWithId: sendWithId
     }
 }

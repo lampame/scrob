@@ -251,3 +251,6 @@ export function applyRemoteRemove(favorite, lampaKey, tmdbId) {
     var idx = favorite[lampaKey].indexOf(tmdbId)
     if (idx !== -1) favorite[lampaKey].splice(idx, 1)
 }
+
+// Check if a favorite key is a mutually exclusive mark (Phase C wizard).
+export function isMarkKey(key) { return MARK_KEYS.indexOf(key) !== -1 }

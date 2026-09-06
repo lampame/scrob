@@ -4,12 +4,21 @@
 // 'bookmarks' only triggers Account.Bookmarks.update()).
 
 // Registered update callback from the engine (set via bindUpdate)
+// Delta callback set via bindDelta (engine.applyDelta) — bound, not imported,
+// to avoid an engine <-> handler circular dependency.
 var updateFn = null
+var deltaFn = null
 
 // Named handlers: stable references so off() actually unregisters (unlike
 // anonymous closures, which silently leak and double-fire after restarts).
-function onItemAdded(payload) { requestUpdate('list.item_added') }
-function onItemRemoved(payload) { requestUpdate('list.item_removed') }
+// item_added/item_removed converge via applyDelta with zero GETs;
+// only unknown lists or broken payloads fall back to a full update().
+function tryDelta(payload, isRemoved) {
+    if (typeof deltaFn === 'function') return deltaFn(payload, isRemoved)
+    return false
+}
+function onItemAdded(payload) { if (!tryDelta(payload, false)) requestUpdate('list.item_added') }
+function onItemRemoved(payload) { if (!tryDelta(payload, true)) requestUpdate('list.item_removed') }
 function onListCreated(payload) { requestUpdate('list.created') }
 function onListUpdated(payload) { requestUpdate('list.updated') }
 function onListDeleted(payload) { requestUpdate('list.deleted') }
@@ -19,6 +28,11 @@ function onPlaybackCompleted(payload) { requestUpdate('playback_session.complete
 // Bind the engine update() entry point. Called once from engine.start().
 export function bindUpdate(fn) {
     updateFn = fn
+}
+
+// Bind the engine applyDelta() entry point. Called once from engine.start().
+export function bindDelta(fn) {
+    deltaFn = fn
 }
 
 // Single notification path: ask the engine to refetch and converge.

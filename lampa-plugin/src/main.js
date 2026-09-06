@@ -7,6 +7,7 @@ import * as sync from './utils/sync'
 import { KEYS, hasSession, getMe, getProfiles, activeProfile, clearSession, serverUrl } from './utils/storage'
 import { avatarHtml, switchProfile } from './utils/profiles'
 import * as custom from './utils/sync/custom'
+import * as wizard from './utils/sync/wizard'
 import CategoryComponent from './component/category'
 
 // Settings section icon (gradient ids prefixed scrob- to avoid conflicts)
@@ -94,8 +95,11 @@ function completeLogin(token, me, username, password) {
         refreshSettings()
         Lampa.Noty.show(Lampa.Lang.translate('scrob_auth_success'))
 
-        // Start sync if enabled (lifecycle wiring)
-        if (Lampa.Storage.get(KEYS.SYNC_ENABLED)) sync.start()
+        // First-run wizard before steady-state sync (Phase C): it converges
+        // via api.* directly and calls sync.start() itself when done.
+        var pid = Lampa.Storage.get(KEYS.ACTIVE_PROFILE_ID) || 'default'
+        if (wizard.needsWizard(pid)) wizard.runWizard()
+        else if (Lampa.Storage.get(KEYS.SYNC_ENABLED)) sync.start()
     }
 
     if (me.is_admin) {
@@ -984,6 +988,30 @@ function initSettings() {
         onChange: showActiveMappings
     })
 
+    // Re-run first-run wizard (Phase C)
+    Lampa.SettingsApi.addParam({
+        component: 'scrob_sync_page',
+        param: { name: 'scrob_wizard_rerun_btn', type: 'button' },
+        field: { name: Lampa.Lang.translate('scrob_wizard_rerun') },
+        onChange: function () { wizard.runWizard() }
+    })
+
+    // Roll back wizard favorite snapshot (visible only when backup exists)
+    Lampa.SettingsApi.addParam({
+        component: 'scrob_sync_page',
+        param: { name: 'scrob_wizard_rollback_btn', type: 'button' },
+        field: { name: Lampa.Lang.translate('scrob_wizard_rollback') },
+        onChange: function () {
+            if (wizard.restoreWizardBackup()) {
+                refreshCustomMenu()
+                refreshSettings()
+                Lampa.Noty.show(Lampa.Lang.translate('scrob_wizard_rolledback'))
+            } else {
+                Lampa.Noty.show(Lampa.Lang.translate('scrob_wizard_no_backup'))
+            }
+        }
+    })
+
     // Status line (static, updated on render)
     Lampa.SettingsApi.addParam({
         component: 'scrob_sync_page',
@@ -1067,6 +1095,12 @@ function initSettings() {
                 body2.find('[data-name="scrob_map_active_btn"]').addClass('hide')
             } else {
                 body2.find('[data-name="scrob_map_active_btn"]').removeClass('hide')
+            }
+            // Rollback button lives only while the 7-day snapshot exists
+            if (wizard.hasWizardBackup()) {
+                body2.find('[data-name="scrob_wizard_rollback_btn"]').removeClass('hide')
+            } else {
+                body2.find('[data-name="scrob_wizard_rollback_btn"]').addClass('hide')
             }
         }
     }

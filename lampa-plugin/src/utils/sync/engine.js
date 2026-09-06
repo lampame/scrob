@@ -1,23 +1,23 @@
 // Scrob sync engine — single-convergence orchestrator for list synchronization.
 // Model: Lampa core Account.Bookmarks (src/core/account/bookmarks.js).
 // - Outbound: Favorite.listener add/remove + state:changed (custom keys) into one
-//   serial push_queue with 500ms debounce. REST is the only write path.
-// - Socket: inbound-only notify/invalidate hub (handler.js) → update(). Writes never
-//   branch on isSocketActive(): the server already broadcasts REST writes to all devices.
+//   serial push_queue with 500ms debounce. Socket-first WS send with ack, REST fallback.
+// - Socket: notify/invalidate hub (handler.js) → update()/applyDelta; outbound WS writes
+//   branch on isSocketActive(), REST stays the fallback.
 // - Inbound/polling: one update() entry — fetch all lists, converge each pair
 //   via applyRemoteDiff with the unified KeyResolver/applicator (mapping.js).
 // - Mirror: Tracker-model {version,time} stamp; 409 resolves the real item_id,
 //   deletes always use a resolved item_id. received flag guards echo.
 
 import * as api from '../api'
-import { registerHandlers, unregisterHandlers, bindUpdate } from './handler'
+import { registerHandlers, unregisterHandlers, bindUpdate, bindDelta } from './handler'
 import { KEYS, hasSession } from '../storage'
 import {
-    listNameForKey, syncableKeys, detectMediaType,
+    listNameForKey, syncableKeys, detectMediaType, toScrobType,
     elementKey, parseElementKey,
-    resolveKeyForListId,
+    resolveKeyForListId, resolveNameForListId,
     localElementSet, scrobElementSet,
-    applyRemoteAdd, applyRemoteRemove
+    applyRemoteAdd, applyRemoteRemove, cardFromScrobMedia
 } from './mapping'
 import * as mirror from './mirror'
 import * as mapstore from './mapstore'
@@ -110,6 +110,75 @@ function writeFavorite(favorite) {
     received = false
 }
 
+// ─── Own-op echo filter (Phase B: writeOne registers before send, applyDelta consumes) ───
+// Plain object as a set: works on old WebKit without an ES6 Set polyfill.
+var ownOps = {}
+
+export function registerOwnOp(opId) {
+    if (typeof opId === 'string' && opId) ownOps[opId] = true
+}
+
+export function unregisterOwnOp(opId) {
+    if (typeof opId === 'string' && opId) delete ownOps[opId]
+}
+
+export function isOwnOp(opId) {
+    if (typeof opId !== 'string' || !opId) return false
+    return !!ownOps[opId]
+}
+
+// Build a Scrob media object from a socket payload for cardFromScrobMedia().
+function mediaFromPayload(msg) {
+    return {
+        tmdb_id: parseInt(msg.media_tmdb_id, 10),
+        type: toScrobType(msg.media_type || 'movie'),
+        title: msg.media_title || '',
+        poster_path: msg.poster_path || '',
+        backdrop_path: msg.backdrop_path || '',
+        release_date: msg.release_date || ''
+    }
+}
+
+// ─── Inbound delta (Phase A): one socket event, no GETs ────
+// Returns true when applied (or safely ignored), false when the caller
+// must fall back to requestUpdate() (unknown list / bad payload).
+// isRemoved: false for item_added, true for item_removed ('removed'/'remove' also accepted).
+export function applyDelta(rawPayload, isRemoved) {
+    if (received) return true
+    var removed = (isRemoved === 'removed' || isRemoved === 'remove') ? true : !!isRemoved
+    var msg = (rawPayload && rawPayload.payload && rawPayload.list_id == null) ? rawPayload.payload : rawPayload
+    if (!msg) return false
+    if (typeof msg.op_id === 'string' && msg.op_id && isOwnOp(msg.op_id)) {
+        unregisterOwnOp(msg.op_id)
+        return true
+    }
+    if (msg.list_id == null) return false
+    var favorite = readFavorite()
+    var map = mapstore.getMap()
+    var m = mirror.get()
+    var lampaKey = resolveKeyForListId(msg.list_id, map, m.lists, favorite)
+    if (!lampaKey) return false
+    var mediaType = toScrobType(msg.media_type || 'movie')
+    var tmdbId = parseInt(msg.media_tmdb_id, 10)
+    if (!tmdbId) return false
+    var key = elementKey(mediaType, tmdbId)
+    var listName = resolveNameForListId(msg.list_id, m.lists)
+        || (map[lampaKey] && map[lampaKey].list_name)
+        || msg.list_name
+        || listNameForKey(lampaKey)
+    if (!listName) return false
+    if (!removed) {
+        applyRemoteAdd(favorite, lampaKey, tmdbId, mediaFromPayload(msg))
+        mirror.setItemId(listName, key, msg.item_id || null)
+    } else {
+        applyRemoteRemove(favorite, lampaKey, tmdbId)
+        mirror.removeItemId(listName, key)
+    }
+    writeFavorite(favorite)
+    mirror.save(mirror.get())
+    return true
+}
+
 // ─── Outbound: Favorite.listener + state:changed → serial queue ───
 // Core pattern: Favorite.listener.follow('add,added'/'remove') in bookmarks.js init().
 
@@ -177,7 +246,9 @@ function resolveListId(lampaKey) {
     return null
 }
 
-// Single REST write. Socket is notify-only: no socketIngest branch here.
+// Single write: socket-first with ack (Phase B), unchanged REST fallback.
+// Serial queue order is preserved — the WS attempt lives inside writeOne,
+// never as a parallel channel.
 function writeOne(op, done) {
     var target = resolveListId(op.lampaKey)
     if (!target) {
@@ -191,6 +262,64 @@ function writeOne(op, done) {
     var mediaType = detectMediaType(op.card)
     var key = elementKey(mediaType, cardId)
 
+    // WS needs sendWithId: op_id must be registered before send so the server
+    // echo is consumed by the own-op filter (applyDelta); plain send() cannot.
+    if (isSocketActive() && activeSocket && typeof activeSocket.sendWithId === 'function') {
+        var sockType = null
+        var sockPayload = null
+        if (op.method === 'add') {
+            sockType = 'list.item_added'
+            sockPayload = { list_id: target.listId, tmdb_id: cardId, media_type: mediaType }
+        } else {
+            var knownId = mirror.getItemId(target.listName, key)
+            if (knownId) {
+                sockType = 'list.item_removed'
+                sockPayload = { list_id: target.listId, item_id: knownId }
+            }
+            // Unknown item_id → REST path below resolves it via fetchItemId as today.
+        }
+        if (sockPayload) {
+            trySocketWrite(sockType, sockPayload, op, target, cardId, mediaType, key, done)
+            return
+        }
+    }
+    writeOneRest(op, target, cardId, mediaType, key, done)
+}
+
+// One WS attempt; on ack mirrors the REST success branch, on any reject falls
+// back to the unchanged REST path (409/fetchItemId/retry intact).
+function trySocketWrite(sockType, sockPayload, op, target, cardId, mediaType, key, done) {
+    var result = null
+    try {
+        result = activeSocket.sendWithId(sockType, sockPayload)
+    } catch (e) { result = null }
+    if (!result || !result.promise || typeof result.opId !== 'string') {
+        writeOneRest(op, target, cardId, mediaType, key, done)
+        return
+    }
+    registerOwnOp(result.opId)
+    result.promise.then(function (ack) {
+        unregisterOwnOp(result.opId)
+        if (op.method === 'add') {
+            mirror.setItemId(target.listName, key, (ack && (ack.item_id || ack.id)) || null)
+        } else {
+            mirror.removeItemId(target.listName, key)
+        }
+        done()
+    }, function (err) {
+        if (err === 'ack-timeout') {
+            // Server may still broadcast the echo — keep the mark until it arrives.
+            setTimeout(function () { unregisterOwnOp(result.opId) }, 30000)
+        } else {
+            // Offline / send error: nothing was committed, drop the mark.
+            unregisterOwnOp(result.opId)
+        }
+        writeOneRest(op, target, cardId, mediaType, key, done)
+    })
+}
+
+// Existing REST write, verbatim since Phase B (socket-first falls back here).
+function writeOneRest(op, target, cardId, mediaType, key, done) {
     if (op.method === 'add') {
         api.addListItem(target.listId, cardId, mediaType, function (response) {
             mirror.setItemId(target.listName, key, response && response.id ? response.id : null)
@@ -808,6 +937,7 @@ function onSocketClose() {
 function bindSocketHandlers() {
     if (!activeSocket || handlersBound) return
     bindUpdate(invalidate)
+    bindDelta(applyDelta)
     registerHandlers(activeSocket)
     if (activeSocket.onLifecycle) {
         activeSocket.onLifecycle('open', onSocketOpen)
@@ -828,6 +958,7 @@ function unbindSocketHandlers() {
     }
     handlersBound = false
     bindUpdate(null)
+    bindDelta(null)
 }
 
 // ─── Mapping merge (section 14.3) ─────────────────────────

@@ -312,6 +312,146 @@ export default function addLang() {
             ru: 'Удалено из категории',
             en: 'Removed from category',
             be: 'Выдалена з катэгорыі'
+        },
+
+        // ─── First-run wizard (Phase C) ────────────────
+        scrob_wizard_title: {
+            uk: 'Майстер синхронізації',
+            ru: 'Мастер синхронизации',
+            en: 'Sync wizard',
+            be: 'Майстар сінхранізацыі'
+        },
+        scrob_wizard_welcome: {
+            uk: 'Scrob об’єднає закладки Lampa зі списками сервера. За замовчуванням — об’єднання: нічого не видаляється. Історія, переглянуте та картки не синхронізуються.',
+            ru: 'Scrob объединит закладки Lampa со списками сервера. По умолчанию — объединение: ничего не удаляется. История, просмотренное и карточки не синхронизируются.',
+            en: 'Scrob will merge your Lampa bookmarks with server lists. Default is union: nothing is deleted. History, viewed and cards are not synced.',
+            be: 'Scrob аб’яднае закладкі Lampa са спісамі сервера. Па змаўчанні — аб’яднанне: нічога не выдаляецца. Гісторыя, прагледжанае і карткі не сінхранізуюцца.'
+        },
+        scrob_wizard_start: {
+            uk: 'Почати',
+            ru: 'Начать',
+            en: 'Start',
+            be: 'Пачаць'
+        },
+        scrob_wizard_loading: {
+            uk: 'Збираю списки…',
+            ru: 'Собираю списки…',
+            en: 'Collecting lists…',
+            be: 'Збіраю спісы…'
+        },
+        scrob_wizard_empty: {
+            uk: 'Немає що об’єднувати',
+            ru: 'Нечего объединять',
+            en: 'Nothing to merge',
+            be: 'Няма чаго аб’ядноўваць'
+        },
+        scrob_wizard_mode: {
+            uk: 'Як об’єднати списки?',
+            ru: 'Как объединить списки?',
+            en: 'How to merge lists?',
+            be: 'Як аб’яднаць спісы?'
+        },
+        scrob_wizard_merge: {
+            uk: 'Об’єднати',
+            ru: 'Объединить',
+            en: 'Merge',
+            be: 'Аб’яднаць'
+        },
+        scrob_wizard_push: {
+            uk: 'Тільки відправити',
+            ru: 'Только отправить',
+            en: 'Push only',
+            be: 'Толькі адправіць'
+        },
+        scrob_wizard_pull: {
+            uk: 'Тільки забрати',
+            ru: 'Только забрать',
+            en: 'Pull only',
+            be: 'Толькі забраць'
+        },
+        scrob_wizard_later: {
+            uk: 'Налаштувати потім',
+            ru: 'Настроить позже',
+            en: 'Set up later',
+            be: 'Наладзіць пазней'
+        },
+        scrob_wizard_keep_lampa: {
+            uk: 'Залишити Лампу',
+            ru: 'Оставить Lampa',
+            en: 'Keep Lampa',
+            be: 'Пакінуць Lampa'
+        },
+        scrob_wizard_keep_scrob: {
+            uk: 'Залишити Scrob',
+            ru: 'Оставить Scrob',
+            en: 'Keep Scrob',
+            be: 'Пакінуць Scrob'
+        },
+        scrob_wizard_custom_title: {
+            uk: 'Знайдено власні категорії',
+            ru: 'Найдены свои категории',
+            en: 'Custom categories found',
+            be: 'Знойдзены ўласныя катэгорыі'
+        },
+        scrob_wizard_custom_import: {
+            uk: 'Імпортувати як ключі',
+            ru: 'Импортировать как ключи',
+            en: 'Import as keys',
+            be: 'Імпартаваць як ключы'
+        },
+        scrob_wizard_custom_skip: {
+            uk: 'Пропустити',
+            ru: 'Пропустить',
+            en: 'Skip',
+            be: 'Прапусціць'
+        },
+        scrob_wizard_confirm: {
+            uk: 'Підтвердження',
+            ru: 'Подтверждение',
+            en: 'Confirm',
+            be: 'Пацверджанне'
+        },
+        scrob_wizard_apply: {
+            uk: 'Застосувати',
+            ru: 'Применить',
+            en: 'Apply',
+            be: 'Ужыць'
+        },
+        scrob_wizard_done: {
+            uk: 'Готово, відкат доступний 7 днів',
+            ru: 'Готово, откат доступен 7 дней',
+            en: 'Done, rollback available for 7 days',
+            be: 'Гатова, адкат даступны 7 дзён'
+        },
+        scrob_wizard_rerun: {
+            uk: 'Перезапустити майстер',
+            ru: 'Перезапустить мастер',
+            en: 'Re-run wizard',
+            be: 'Перазапусціць майстар'
+        },
+        scrob_wizard_rollback: {
+            uk: 'Відкотити майстер',
+            ru: 'Откатить мастер',
+            en: 'Roll back wizard',
+            be: 'Адкаціць майстар'
+        },
+        scrob_wizard_rolledback: {
+            uk: 'Закладки відновлено з бекапа',
+            ru: 'Закладки восстановлены из бэкапа',
+            en: 'Bookmarks restored from backup',
+            be: 'Закладкі адноўлены з бэкапа'
+        },
+        scrob_wizard_no_backup: {
+            uk: 'Бекапа немає',
+            ru: 'Бэкапа нет',
+            en: 'No backup found',
+            be: 'Бэкапа няма'
+        },
+        scrob_wizard_person_warn: {
+            uk: 'Увага: картки персон бідні',
+            ru: 'Внимание: карточки персон бедные',
+            en: 'Note: person cards are sparse',
+            be: 'Увага: карткі персон бедныя'
         }
     })
 }
