@@ -5986,6 +5986,12 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
       modal.classList.remove('hidden');
       modal.classList.add('flex');
       setMatchTab('tmdb');
+      // Pre-fill and auto-search using the source title - the correct target
+      // is usually the same franchise under a different TMDB entry, so this
+      // saves retyping what's already on screen (matches openMatchModal and
+      // openMatchMovieModal below, which already do this).
+      searchInput.value = title;
+      doSearch();
     };
 
     (window as any).openMatchModal = (seriesName: string) => {
@@ -6024,6 +6030,19 @@ const sonarrConfigured   = !!(settings.sonarr_url && settings.sonarr_token);
       // Auto-search immediately so results appear right away
       doSearch();
     };
+
+    // Season/episode pages link here with ?remap=<tmdbId>:<season> when TMDB
+    // doesn't know that season. The "Active Season Remaps" panel isn't shown
+    // yet at that point (it only renders once a remap exists), so open the
+    // dialog directly with the show and season already filled in.
+    const remapParam = new URLSearchParams(location.search).get('remap');
+    if (remapParam) {
+      const [tmdbId, season] = remapParam.split(':').map(Number);
+      if (Number.isFinite(tmdbId) && Number.isFinite(season)) {
+        const title = new URLSearchParams(location.search).get('title') || `TMDB #${tmdbId}`;
+        (window as any).openRemapModal(tmdbId, season, title);
+      }
+    }
   }
 
   setupActions();

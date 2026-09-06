@@ -22,7 +22,23 @@ if (!season && !error) {
   return Astro.redirect("/404");
 }
 
+// A 404 here almost always means TMDB has no such season for this show (a
+// library entry filed under a season that doesn't exist there), not a
+// request failure - show a readable explanation instead of the raw error.
+const notOnTmdb = /^API 404\b/.test(error);
 const show = season?.show;
+
+// `show` above is unavailable here (it comes from the season fetch that just
+// failed) - look the show up separately, so the remap dialog gets a real
+// title to search with instead of a bare tmdb id.
+let notOnTmdbTitle = `TMDB #${id}`;
+if (notOnTmdb) {
+  try {
+    notOnTmdbTitle = (await api.shows.get(Number(id), token)).title;
+  } catch (e) {
+    // keep the placeholder
+  }
+}
 ---
 
 <Base title={season ? `${show?.title} - ${season.name}` : "Season Details"}>
@@ -30,8 +46,14 @@ const show = season?.show;
     <div class="max-w-md mx-auto mt-20 text-center">
       <div class="bg-red-500/10 border border-red-500/20 text-red-500 p-6 rounded-2xl mb-6">
         <p class="font-bold text-lg mb-2">Oops!</p>
-        <p class="text-sm opacity-80">{error}</p>
+        <p class="text-sm opacity-80">{notOnTmdb ? "TMDB has no such season for this show." : error}</p>
       </div>
+      {notOnTmdb && (
+        <p class="text-sm text-zinc-500 mb-6">
+          This usually means a library entry ended up under a season the show doesn't actually have — a media server splitting one long season into several, or numbering a sequel as a later season.{" "}
+          <a href={`/connections?remap=${id}:${season_number}&title=${encodeURIComponent(notOnTmdbTitle)}`} class="text-blue-500 hover:underline">Fix it under Connections → Active Season Remaps</a>
+        </p>
+      )}
       <a href="/" class="text-blue-500 hover:underline">Return to Dashboard</a>
     </div>
   )}

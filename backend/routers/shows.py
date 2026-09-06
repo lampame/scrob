@@ -1109,6 +1109,48 @@ async def get_show_recommendations(
         return {"results": []}
 
 
+async def _tmdb_season_numbers(series_tmdb_id: int, api_key: str | None) -> list[int]:
+    """Season numbers TMDB actually lists for a show, or [] if it can't say."""
+    if not check_tmdb_key(api_key):
+        return []
+    try:
+        data = await tmdb.get_show(series_tmdb_id, api_key=api_key)
+    except Exception:
+        return []
+    return sorted(
+        season["season_number"]
+        for season in (data.get("seasons") or [])
+        if isinstance(season, dict) and isinstance(season.get("season_number"), int)
+    )
+
+
+async def _missing_on_tmdb_detail(
+    what: str, series_tmdb_id: int, season_number: int, api_key: str | None
+) -> str:
+    """Readable message for a season/episode TMDB has no record of.
+
+    Letting the underlying httpx error through instead puts TMDB's whole
+    request URL - api params, language and all - on the page, which says
+    nothing about the actual problem. That problem is almost always a library
+    entry filed under a season the show doesn't have on TMDB (a media server
+    splitting one long season into several, or numbering a sequel as season 2),
+    so name the seasons that do exist and point at the fix.
+    """
+    seasons = [n for n in await _tmdb_season_numbers(series_tmdb_id, api_key) if n > 0]
+    if seasons and season_number not in seasons:
+        listed = ", ".join(str(n) for n in seasons)
+        return (
+            f"TMDB has no season {season_number} for this show - it lists season "
+            f"{listed}. An entry filed under a season the show doesn't have usually "
+            "comes from a media server that split one season into several, or that "
+            "numbered a sequel as a later season. Remap it under Connections -> "
+            "Active Season Remaps, or re-scan the show with TMDB's numbering."
+        )
+    if what == "season":
+        return f"TMDB has no season {season_number} for this show."
+    return f"TMDB has no such episode in season {season_number} of this show."
+
+
 @router.get("/{series_tmdb_id}/season/{season_number}")
 async def get_show_season(
     series_tmdb_id: int,
@@ -1476,6 +1518,11 @@ async def get_show_season(
     except Exception as e:
         if isinstance(e, HTTPException):
             raise e
+        if tmdb.is_not_found(e):
+            raise HTTPException(
+                status_code=404,
+                detail=await _missing_on_tmdb_detail("season", series_tmdb_id, season_number, api_key),
+            )
         raise HTTPException(status_code=404, detail=f"Season not found: {e}")
 
 
@@ -1679,6 +1726,11 @@ async def get_episode_detail(
     except Exception as e:
         if isinstance(e, HTTPException):
             raise e
+        if tmdb.is_not_found(e):
+            raise HTTPException(
+                status_code=404,
+                detail=await _missing_on_tmdb_detail("episode", series_tmdb_id, season_number, api_key),
+            )
         raise HTTPException(status_code=404, detail=f"Episode not found: {e}")
 
 

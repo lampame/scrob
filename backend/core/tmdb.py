@@ -153,6 +153,12 @@ async def _get(
     raise last_exc
 
 
+def is_not_found(error: BaseException) -> bool:
+    """True when TMDB itself answered 404 - the id/season/episode isn't there -
+    as opposed to a network, auth or rate-limit failure."""
+    return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 404
+
+
 async def validate_api_key(api_key: str) -> bool:
     if not api_key:
         return False
