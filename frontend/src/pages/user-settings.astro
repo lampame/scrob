@@ -850,7 +850,11 @@ const COUNTRIES = [
 
     function updateDisplay() {
       if (!selectedValue) {
-        searchInput.value = '';
+        // Show what "nothing selected" actually means here (differs per
+        // field - a real fallback vs. no filter at all) instead of leaving
+        // the box blank, which just shows the generic placeholder text and
+        // reads as "no value shown yet" rather than "this is the value".
+        searchInput.value = opts.defaultLabel;
         return;
       }
       const lang = languages.find(l => l.iso_639_1 === selectedValue);
@@ -879,6 +883,10 @@ const COUNTRIES = [
 
     searchInput.addEventListener('focus', () => {
       if (languages.length === 0) { loadLanguages(); }
+      // Clear the idle default-label text (see updateDisplay()) so typing
+      // starts fresh instead of filtering against "English (default)"/
+      // "— Any language —", which wouldn't match any real language name.
+      if (!selectedValue) searchInput.value = '';
       openList();
     });
 
