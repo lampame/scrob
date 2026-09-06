@@ -5,7 +5,7 @@ import * as api from './utils/api'
 import { scrobSocketInit, scrobSocketDisconnect, getScrobSocket } from './utils/socket'
 import * as sync from './utils/sync'
 import { KEYS, hasSession, getMe, getProfiles, activeProfile, clearSession, serverUrl } from './utils/storage'
-import { avatarHtml, switchProfile } from './utils/profiles'
+import { avatarHtml, switchProfile, restoreIsolatedData } from './utils/profiles'
 import * as custom from './utils/sync/custom'
 import CategoryComponent from './component/category'
 
@@ -81,6 +81,16 @@ function completeLogin(token, me, username, password) {
     Lampa.Storage.set(KEYS.ACCESS_TOKEN, token)
     Lampa.Storage.set(KEYS.ME, me)
     Lampa.Storage.set(KEYS.OWN_API_KEY, me.api_key || '')
+
+    // Give this account its own isolated local data (favorite, online_view, ...)
+    // instead of silently inheriting whatever was left in storage from an
+    // unrelated earlier session/profile - same isolation switchProfile() already
+    // does for an in-session switch, needed here too since this is equally a
+    // "become profile me.id" transition, just via a fresh login instead.
+    restoreIsolatedData(me.id)
+    Lampa.Timeline.read()
+    Lampa.Favorite.read()
+
     Lampa.Storage.set(KEYS.ACTIVE_PROFILE_ID, me.id)
     Lampa.Storage.set(KEYS.ACTIVE_API_KEY, me.api_key || '')
     // Store credentials for socket re-authentication
