@@ -29,31 +29,6 @@ const PRIVACY_LEVELS: [PrivacyLevel, string, string][] = [
   ["public", "Public", "Anyone on this instance can see your profile and activity."],
 ];
 
-const CONTENT_LANGUAGES: [string, string][] = [
-  ["en", "English"],
-  ["fr", "French"],
-  ["de", "German"],
-  ["es", "Spanish"],
-  ["it", "Italian"],
-  ["pt", "Portuguese"],
-  ["ja", "Japanese"],
-  ["ko", "Korean"],
-  ["zh", "Chinese"],
-  ["hi", "Hindi"],
-  ["ar", "Arabic"],
-  ["ru", "Russian"],
-  ["nl", "Dutch"],
-  ["pl", "Polish"],
-  ["tr", "Turkish"],
-  ["sv", "Swedish"],
-  ["cs", "Czech"],
-  ["hu", "Hungarian"],
-  ["hr", "Croatian"],
-  ["sr", "Serbian"],
-];
-
-
-
 const MOVIE_GENRES = [
   "Action","Adventure","Animation","Comedy","Crime",
   "Documentary","Drama","Family","Fantasy","History",
@@ -229,17 +204,27 @@ const COUNTRIES = [
           <h2 class="section-headline">Content Language</h2>
         </div>
         <div class="space-y-2 max-w-xs">
-          <label for="content_language" class="block text-sm font-medium text-zinc-400">Preferred Language</label>
-          <select
-            id="content_language"
-            name="content_language"
-            class="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
-          >
-            <option value="">— Any language —</option>
-            {CONTENT_LANGUAGES.map(([code, name]) => (
-              <option value={code} selected={prefs.content_language === code}>{name}</option>
-            ))}
-          </select>
+          <label for="content_language_search" class="block text-sm font-medium text-zinc-400">Preferred Language</label>
+          <div class="relative" id="content-language-combobox">
+            <input
+              type="text"
+              id="content_language_search"
+              class="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-3 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+              placeholder="Search languages..."
+              autocomplete="off"
+              role="combobox"
+              aria-expanded="false"
+              aria-controls="content-language-listbox"
+            />
+            <input type="hidden" id="content_language" name="content_language" value={prefs.content_language ?? ''} />
+            <div
+              id="content-language-listbox"
+              class="hidden absolute z-50 w-full mt-1 bg-zinc-900 border border-zinc-800 rounded-lg shadow-xl max-h-60 overflow-y-auto"
+              role="listbox"
+            >
+              <div class="px-4 py-3 text-zinc-500 text-sm cursor-pointer hover:bg-zinc-800" data-value="">— Any language —</div>
+            </div>
+          </div>
           <p class="text-xs text-zinc-500">
             Filter Discover recommendations to your preferred original language.
           </p>
@@ -764,17 +749,34 @@ const COUNTRIES = [
       }
     });
 
-    // ── Metadata language combobox ─────────────────────────────────────────
-    initMetadataLanguageCombobox(token);
+    // ── Language comboboxes ─────────────────────────────────────────────────
+    initLanguageCombobox(token, {
+      searchId: 'metadata_language_search',
+      hiddenId: 'metadata_language',
+      listboxId: 'metadata-language-listbox',
+      defaultLabel: 'English (default)',
+    });
+    initLanguageCombobox(token, {
+      searchId: 'content_language_search',
+      hiddenId: 'content_language',
+      listboxId: 'content-language-listbox',
+      defaultLabel: '— Any language —',
+    });
 
     if (token) initStatus();
   }
 
-  // ── Metadata language combobox ─────────────────────────────────────────────
-  function initMetadataLanguageCombobox(token: string) {
-    const searchInput = document.getElementById('metadata_language_search') as HTMLInputElement | null;
-    const hiddenInput = document.getElementById('metadata_language') as HTMLInputElement | null;
-    const listbox = document.getElementById('metadata-language-listbox') as HTMLDivElement | null;
+  // ── Language combobox (shared: Metadata Language + Content Language) ───────
+  // Same TMDB-sourced language list for both - a movie's original_language
+  // (content_language, filters Discover via with_original_language) and the
+  // metadata translation language use the same ISO 639-1 code space, and
+  // /tmdb/languages is TMDB's full list of everything it recognizes either
+  // way. Only the empty-selection label differs: "no metadata language" still
+  // falls back to English, "no content language" means no filter at all.
+  function initLanguageCombobox(token: string, opts: { searchId: string; hiddenId: string; listboxId: string; defaultLabel: string }) {
+    const searchInput = document.getElementById(opts.searchId) as HTMLInputElement | null;
+    const hiddenInput = document.getElementById(opts.hiddenId) as HTMLInputElement | null;
+    const listbox = document.getElementById(opts.listboxId) as HTMLDivElement | null;
     if (!searchInput || !hiddenInput || !listbox) return;
 
     let languages: { iso_639_1: string; english_name: string; name: string }[] = [];
@@ -792,6 +794,13 @@ const COUNTRIES = [
         if (!res.ok) return;
         languages = await res.json() as { iso_639_1: string; english_name: string; name: string }[];
         renderList('');
+        // The initial updateDisplay() call below runs before this fetch
+        // resolves, so languages is still empty and the lookup finds
+        // nothing - the search box shows blank even for an already-saved
+        // preference (the hidden input's value is still correct; only the
+        // visible text was never filled in). Now that names are loaded,
+        // fill it in for real.
+        updateDisplay();
       } catch (_) {}
     }
 
@@ -809,7 +818,7 @@ const COUNTRIES = [
       const defaultOpt = document.createElement('div');
       defaultOpt.className = 'px-4 py-3 text-zinc-500 text-sm cursor-pointer hover:bg-zinc-800';
       defaultOpt.dataset.value = '';
-      defaultOpt.textContent = 'English (default)';
+      defaultOpt.textContent = opts.defaultLabel;
       defaultOpt.setAttribute('role', 'option');
       if (!selectedValue) defaultOpt.classList.add('bg-zinc-800', 'text-zinc-200');
       listbox.appendChild(defaultOpt);
@@ -841,7 +850,11 @@ const COUNTRIES = [
 
     function updateDisplay() {
       if (!selectedValue) {
-        searchInput.value = '';
+        // Show what "nothing selected" actually means here (differs per
+        // field - a real fallback vs. no filter at all) instead of leaving
+        // the box blank, which just shows the generic placeholder text and
+        // reads as "no value shown yet" rather than "this is the value".
+        searchInput.value = opts.defaultLabel;
         return;
       }
       const lang = languages.find(l => l.iso_639_1 === selectedValue);
@@ -863,13 +876,19 @@ const COUNTRIES = [
     function selectLanguage(value: string, display: string) {
       selectedValue = value;
       hiddenInput.value = value;
-      searchInput.value = value ? display : '';
+      // Same "what does unset mean here" label as updateDisplay() - picking
+      // the default row explicitly is still "unset", not blank.
+      searchInput.value = value ? display : opts.defaultLabel;
       closeList();
       hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     searchInput.addEventListener('focus', () => {
       if (languages.length === 0) { loadLanguages(); }
+      // Clear the idle default-label text (see updateDisplay()) so typing
+      // starts fresh instead of filtering against "English (default)"/
+      // "— Any language —", which wouldn't match any real language name.
+      if (!selectedValue) searchInput.value = '';
       openList();
     });
 
