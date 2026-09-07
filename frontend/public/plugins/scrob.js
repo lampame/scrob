@@ -1,6 +1,6 @@
 /**
  * Scrob — Lampa plugin for self-hosted media tracking
- * Build: 2026-09-05
+ * Build: 2026-09-07
  * Source: https://github.com/ellite/scrob
  */
 (function () {
@@ -354,7 +354,13 @@
     // Defaults applied when the target profile has no saved data yet.
     var DEFAULTS = {
       favorite: '{}',
-      online_view: '{}',
+      // Flat array of viewed-item hashes (online.js: Lampa.Storage.cache('online_view',
+      // 5000, []), later viewed.indexOf(hash)) - NOT an object. Restoring a profile with
+      // no backup yet used to write '{}' here, and online.js's own source-list screen
+      // threw "viewed.indexOf is not a function" on the very next render, since a value
+      // now genuinely exists (just the wrong shape) instead of falling through to its
+      // own default.
+      online_view: '[]',
       online_watched_last: '{}',
       online_last_balanser: '{}',
       file_view: '{}',
