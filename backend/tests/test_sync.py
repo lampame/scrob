@@ -8,9 +8,20 @@ os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
 
 from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.pool import StaticPool
 
 from models.connections import MediaServerConnection
 from routers import sync
+
+
+@compiles(JSONB, "sqlite")
+def _jsonb_as_json_on_sqlite(type_, compiler, **kw):
+    """JSONB is PostgreSQL-only and has no SQLite rendering of its own."""
+    return "JSON"
 
 
 class _Result:
@@ -994,6 +1005,261 @@ class MarkJobRunningUnlessCancelledTests(unittest.IsolatedAsyncioTestCase):
         started, db, _ = await self._run(matched=False)
         self.assertFalse(started)
         db.commit.assert_awaited_once()
+
+
+class _PartialWatchDB(unittest.IsolatedAsyncioTestCase):
+    """SQLite harness for the tests below - the bug they guard against was in
+    a WHERE clause, so these run the real queries instead of a fake."""
+
+    async def asyncSetUp(self):
+        import models  # noqa: F401 - registers every table on Base.metadata
+        from models.base import Base
+
+        self.engine = create_async_engine(
+            "sqlite+aiosqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+        )
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        self.Session = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.addAsyncCleanup(self.engine.dispose)
+
+
+class SyncItemsPartialWatchFanOutTests(_PartialWatchDB):
+    """Regression tests: a started-but-unfinished Jellyfin/Emby play (#253)
+    is recorded as completed=False, and passing it to the push fan-out marked
+    the item fully watched on every other target."""
+
+    async def _sync_one_movie(self, user_data: dict) -> tuple[set[int], "WatchEvent"]:
+        from models.collection import Collection, CollectionFile, CollectionSource
+        from models.events import WatchEvent
+        from models.media import Media, MediaType
+
+        async with self.Session() as db:
+            media = Media(tmdb_id=603, media_type=MediaType.movie, title="The Matrix")
+            db.add(media)
+            await db.flush()
+            coll = Collection(user_id=1, media_id=media.id)
+            db.add(coll)
+            await db.flush()
+            db.add(CollectionFile(
+                collection_id=coll.id, connection_id=7,
+                source=CollectionSource.jellyfin, source_id="jf-1",
+            ))
+            await db.commit()
+            media_id = media.id
+
+            new_watched_ids: set[int] = set()
+            await sync.sync_items(
+                items=[{
+                    "Id": "jf-1",
+                    "Name": "The Matrix",
+                    "ProviderIds": {"Tmdb": "603"},
+                    "UserData": user_data,
+                }],
+                media_type=MediaType.movie,
+                source=CollectionSource.jellyfin,
+                db=db,
+                stats={"movies": 0, "episodes": 0, "skipped": 0, "errors": 0},
+                user_id=1,
+                connection_id=7,
+                new_watched_ids=new_watched_ids,
+            )
+
+            events = (await db.execute(
+                select(WatchEvent).where(WatchEvent.media_id == media_id)
+            )).scalars().all()
+            self.assertEqual(len(events), 1)
+            return new_watched_ids, events[0]
+
+    async def test_a_started_item_is_recorded_but_never_fanned_out(self):
+        new_watched_ids, event = await self._sync_one_movie(
+            {"Played": False, "PlayCount": 1, "LastPlayedDate": "2026-01-02T20:00:00.000Z"}
+        )
+        # Still recorded locally (Next Up and the #253 healing need it),
+        # just not pushed anywhere.
+        self.assertFalse(event.completed)
+        self.assertEqual(new_watched_ids, set())
+
+    async def test_a_finished_item_still_fans_out(self):
+        new_watched_ids, event = await self._sync_one_movie(
+            {"Played": True, "PlayCount": 1, "LastPlayedDate": "2026-01-02T20:00:00.000Z"}
+        )
+        self.assertTrue(event.completed)
+        self.assertEqual(new_watched_ids, {event.media_id})
+
+
+class FullPushPartialWatchTests(_PartialWatchDB):
+    """Same bug on the manual push path, which read every WatchEvent as
+    watched regardless of completed."""
+
+    async def _seed(self) -> tuple[int, int]:
+        from models.collection import Collection, CollectionFile, CollectionSource
+        from models.events import WatchEvent
+        from models.media import Media, MediaType
+        from models.sync import SyncJob, SyncStatus
+
+        async with self.Session() as db:
+            conn = MediaServerConnection(
+                user_id=1, type="jellyfin", name="Jellyfin", url="http://jf", token="tok",
+                server_user_id="jf-user", push_watched=True,
+            )
+            db.add(conn)
+            await db.flush()
+            job = SyncJob(
+                user_id=1, source=CollectionSource.jellyfin, status=SyncStatus.pending,
+                connection_id=conn.id, job_type="push",
+            )
+            db.add(job)
+            finished = Media(tmdb_id=603, media_type=MediaType.movie, title="Finished")
+            started = Media(tmdb_id=604, media_type=MediaType.movie, title="Started")
+            db.add_all([finished, started])
+            await db.flush()
+            for media, source_id in ((finished, "jf-finished"), (started, "jf-started")):
+                coll = Collection(user_id=1, media_id=media.id)
+                db.add(coll)
+                await db.flush()
+                db.add(CollectionFile(
+                    collection_id=coll.id, connection_id=conn.id,
+                    source=CollectionSource.jellyfin, source_id=source_id,
+                ))
+            db.add(WatchEvent(
+                user_id=1, media_id=finished.id, watched_at=datetime(2026, 1, 1),
+                completed=True, play_count=1, progress_percent=1.0,
+            ))
+            db.add(WatchEvent(
+                user_id=1, media_id=started.id, watched_at=datetime(2026, 1, 2),
+                completed=False, play_count=1, progress_percent=0.0,
+            ))
+            await db.commit()
+            self.finished_media_id = finished.id
+            self.started_media_id = started.id
+            return conn.id, job.id
+
+    async def _push(self):
+        connection_id, job_id = await self._seed()
+        mark_watched = AsyncMock(return_value=True)
+        # Neither is played on the server (the started one only has a resume
+        # position), so the #302 check waves both through.
+        watched_state = AsyncMock(return_value={"jf-finished": False, "jf-started": False})
+        with patch.object(sync, "engine", self.engine), \
+             patch.object(sync.jellyfin, "mark_watched", mark_watched), \
+             patch.object(sync.jellyfin, "get_items_watched_state", watched_state), \
+             patch("routers.webhooks.mark_pushed_watched") as mark_pushed:
+            await sync._run_full_push(1, connection_id, job_id)
+        return mark_watched, mark_pushed, job_id
+
+    async def _job(self, job_id: int):
+        from models.sync import SyncJob
+
+        async with self.Session() as db:
+            return (await db.execute(select(SyncJob).where(SyncJob.id == job_id))).scalar_one()
+
+    async def test_only_the_finished_item_is_pushed(self):
+        mark_watched, _, job_id = await self._push()
+        pushed_source_ids = [call.args[3] for call in mark_watched.await_args_list]
+        self.assertEqual(pushed_source_ids, ["jf-finished"])
+        job = await self._job(job_id)
+        self.assertEqual(job.status.value, "completed")
+        self.assertEqual(job.total_items, 1)
+        self.assertEqual(job.stats, {"succeeded": 1, "failed": 0})
+
+    async def test_no_echo_token_is_armed_for_the_started_item(self):
+        # An armed token swallows the item's next webhook as a push echo
+        # (#247/#251).
+        _, mark_pushed, _ = await self._push()
+        armed_media_ids = [call.args[1] for call in mark_pushed.call_args_list]
+        self.assertEqual(armed_media_ids, [self.finished_media_id])
+
+
+class FullPushEchoTokenTimingTests(_PartialWatchDB):
+    """#372: the push-echo token is armed in _push_watched_group, right
+    before the mark_watched call - not once for the whole job up front,
+    where a large-library push runs past the token's 10-minute TTL and its
+    own echo comes back unprotected. A side effect of moving it: an item the
+    server already shows as watched (the push is skipped) no longer leaves a
+    stray token behind."""
+
+    async def _seed(self) -> tuple[int, int]:
+        from models.collection import Collection, CollectionFile, CollectionSource
+        from models.events import WatchEvent
+        from models.media import Media, MediaType
+        from models.sync import SyncJob, SyncStatus
+
+        async with self.Session() as db:
+            conn = MediaServerConnection(
+                user_id=1, type="jellyfin", name="Jellyfin", url="http://jf", token="tok",
+                server_user_id="jf-user", push_watched=True,
+            )
+            db.add(conn)
+            await db.flush()
+            job = SyncJob(
+                user_id=1, source=CollectionSource.jellyfin, status=SyncStatus.pending,
+                connection_id=conn.id, job_type="push",
+            )
+            db.add(job)
+            new_on_server = Media(tmdb_id=603, media_type=MediaType.movie, title="New on server")
+            already_on_server = Media(tmdb_id=604, media_type=MediaType.movie, title="Already on server")
+            db.add_all([new_on_server, already_on_server])
+            await db.flush()
+            for media, source_id in ((new_on_server, "jf-new"), (already_on_server, "jf-already")):
+                coll = Collection(user_id=1, media_id=media.id)
+                db.add(coll)
+                await db.flush()
+                db.add(CollectionFile(
+                    collection_id=coll.id, connection_id=conn.id,
+                    source=CollectionSource.jellyfin, source_id=source_id,
+                ))
+                db.add(WatchEvent(
+                    user_id=1, media_id=media.id, watched_at=datetime(2026, 1, 1),
+                    completed=True, play_count=1, progress_percent=1.0,
+                ))
+            await db.commit()
+            self.new_media_id = new_on_server.id
+            self.already_media_id = already_on_server.id
+            return conn.id, job.id
+
+    async def test_token_armed_only_when_the_push_actually_fires(self):
+        connection_id, job_id = await self._seed()
+        mark_watched = AsyncMock(return_value=True)
+        watched_state = AsyncMock(return_value={"jf-new": False, "jf-already": True})
+        with patch.object(sync, "engine", self.engine), \
+             patch.object(sync.jellyfin, "mark_watched", mark_watched), \
+             patch.object(sync.jellyfin, "get_items_watched_state", watched_state), \
+             patch("routers.webhooks.mark_pushed_watched") as mark_pushed:
+            await sync._run_full_push(1, connection_id, job_id)
+
+        pushed_source_ids = [call.args[3] for call in mark_watched.await_args_list]
+        self.assertEqual(pushed_source_ids, ["jf-new"])
+        armed_media_ids = [call.args[1] for call in mark_pushed.call_args_list]
+        self.assertEqual(armed_media_ids, [self.new_media_id])
+
+
+class WatchedLookupFailedWarningTests(unittest.TestCase):
+    """#304: push lookup misses must carry reason + media_type so Connections
+    does not render them as unmatched TMDB (unknown reason, Match-as-show)."""
+
+    def test_copies_title_and_media_type_value(self):
+        for media_type in (sync.MediaType.movie, sync.MediaType.episode):
+            with self.subTest(media_type=media_type):
+                media = SimpleNamespace(title="Any Title", media_type=media_type)
+                self.assertEqual(
+                    sync.watched_lookup_failed_warning(1, media),
+                    {
+                        "type": "watched_lookup_failed",
+                        "media_id": 1,
+                        "title": "Any Title",
+                        "media_type": media_type.value,
+                        "reason": sync.WATCHED_LOOKUP_FAILED_REASON,
+                    },
+                )
+
+    def test_missing_media_still_has_type_and_reason(self):
+        warning = sync.watched_lookup_failed_warning(1, None)
+        self.assertEqual(warning["type"], "watched_lookup_failed")
+        self.assertEqual(warning["media_id"], 1)
+        self.assertIsNone(warning["title"])
+        self.assertIsNone(warning["media_type"])
+        self.assertEqual(warning["reason"], sync.WATCHED_LOOKUP_FAILED_REASON)
 
 
 if __name__ == "__main__":
