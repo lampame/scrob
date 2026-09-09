@@ -2311,7 +2311,10 @@ async def sync_items(
                             existing_watched.add(media_id_for_watch)
                             if rewatch_eligible:
                                 rewatch_progressed_media_ids.add(media_id_for_watch)
-                            if new_watched_ids is not None:
+                            # Only finished plays fan out - mark_watched is
+                            # all-or-nothing, so pushing a merely started item
+                            # (#253) marks it fully watched on the other side.
+                            if new_watched_ids is not None and watch_state["completed"]:
                                 new_watched_ids.add(media_id_for_watch)
 
                     if sync_ratings and watch_state["user_rating"] is not None:
@@ -6199,6 +6202,25 @@ async def _push_stremio_connection(
     return len(changes)
 
 
+# Shown on Connections when a full push cannot resolve a WatchEvent to a
+# server item (#304). Must not look like an unmatched-TMDB pull warning:
+# those have `title` + `reason` + `media_type` and a Match button.
+WATCHED_LOOKUP_FAILED_REASON = (
+    "Not found on this server - no matching library item for this watch"
+)
+
+
+def watched_lookup_failed_warning(media_id: int, media: Media | None) -> dict:
+    """Warning dict for a watch the full-push slow path could not resolve."""
+    return {
+        "type": "watched_lookup_failed",
+        "media_id": media_id,
+        "title": media.title if media else None,
+        "media_type": media.media_type.value if media and media.media_type else None,
+        "reason": WATCHED_LOOKUP_FAILED_REASON,
+    }
+
+
 async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
     import httpx as _httpx
     from routers.webhooks import mark_pushed_watched
@@ -6357,8 +6379,14 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
             ratings_map: RatingChanges = {}
 
             if conn.push_watched:
+                # completed only - a WatchEvent can also be a started-but-
+                # unfinished play (#253) or a manually logged partial watch,
+                # and pushing one of those marks the item fully watched.
                 watched_result = await db.execute(
-                    select(WatchEvent.media_id).where(WatchEvent.user_id == user_id).distinct()
+                    select(WatchEvent.media_id).where(
+                        WatchEvent.user_id == user_id,
+                        WatchEvent.completed == True,  # noqa: E712
+                    ).distinct()
                 )
                 watched_ids = {row[0] for row in watched_result.all()}
 
@@ -6493,9 +6521,12 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
 
             # Jellyfin/Emby's UserDataSaved webhook can echo a mark-watched push
             # straight back and, without this, land as a brand new WatchEvent
-            # stamped at push time (see #247/#251) - registered up front for
-            # every item about to be pushed, not inside the push call itself,
-            # since the echo can arrive before an in-task registration would.
+            # stamped at push time (see #247/#251). Its echo-suppression token
+            # is armed in _push_watched_group below, right before the actual
+            # mark_watched call - not here, up front: a full push of a large
+            # library runs well past the token's 10-minute TTL, so anything
+            # armed at the start of the job would have expired before its own
+            # echo came back (#372).
             echoes_watched = conn.type in ("jellyfin", "emby")
 
             # A combined multi-episode file (Jellyfin/Emby's IndexNumber..
@@ -6521,7 +6552,6 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                 for mid in watched_ids:
                     for sid in source_ids_map.get(mid, []):
                         if echoes_watched:
-                            mark_pushed_watched(user_id, mid)
                             watched_sid_to_mids.setdefault(sid, set()).add(mid)
                         else:
                             push_items.append(("watched", sid, mid))
@@ -6734,13 +6764,13 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                     return mid, await _find_source_id(mid)
 
             async def _push_watched_group(client: _httpx.AsyncClient, sid: str, mids: set[int]) -> bool:
-                # Tokens for every mid here are already armed (at queue-build
-                # time for known items, right after resolution below for
-                # looked-up ones) - this call only needs to fire the single
-                # deduped mark_watched (#298). A token that goes unconsumed
-                # because the check below skips the push is harmless - it
-                # just expires on its own TTL, same as one left over from a
-                # failed push call.
+                # One deduped mark_watched per server item, expanded over the N
+                # local rows that share it (#298). The echo-suppression token
+                # for every one of those rows is armed here, immediately before
+                # the call - not when this group was queued: on a long push
+                # that was minutes ago, past the token's 10-minute TTL (#372).
+                # Arming only once the already-watched checks have passed also
+                # means a skipped push leaves no stray token behind.
                 async with sem:
                     try:
                         already = await _already_watched_on_server(sid)
@@ -6748,6 +6778,8 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                             return False
                         if already:
                             return True
+                        for mid in mids:
+                            mark_pushed_watched(user_id, mid)
                         if conn.type == "jellyfin":
                             return await jellyfin.mark_watched(conn.url, conn.token, conn.server_user_id, sid, client=client)
                         else:
@@ -6770,18 +6802,11 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                     newly_failed = 0
                     for mid, sid in resolved:
                         if sid:
-                            # Armed before the actual mark_watched call below,
-                            # same as the known-item path (#298).
-                            mark_pushed_watched(user_id, mid)
                             watched_sid_to_mids.setdefault(sid, set()).add(mid)
                         else:
                             newly_failed += 1
                             m = media_info.get(mid)
-                            lookup_warnings.append({
-                                "type": "watched_lookup_failed",
-                                "media_id": mid,
-                                "title": m.title if m else None,
-                            })
+                            lookup_warnings.append(watched_lookup_failed_warning(mid, m))
                     if newly_failed:
                         done += newly_failed
                         failed_count += newly_failed
