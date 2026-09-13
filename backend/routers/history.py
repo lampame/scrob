@@ -22,6 +22,7 @@ from models.episode_order import EpisodeOrderMapping, UserShowEpisodeOrder
 from models.rewatch import ShowRewatch, RewatchProgress
 from models.ratings import Rating
 from routers.media import enrich_with_state, get_user_tmdb_key, check_tmdb_key, _attach_episode_order_fields
+from core.episode_order import get_order_keys_for_series, get_positions_for_series, canonical_pairs_for_display_season, resolve_display_to_canonical, normalize_order_key, is_aired_order
 from core.translations import get_user_metadata_language, get_media_translations, apply_media_translations
 from core.rewatch import get_active_rewatch, record_rewatch_progress, get_already_watched_for_bulk_mark, capped_season_episode_counts
 from core.enrichment import create_media_safely
@@ -339,6 +340,21 @@ async def _push_watch_state(
     await db.commit()
 
 
+def _effective_runtime(media: Media) -> int | None:
+    """Media.runtime, falling back to the cached tmdb_data.runtime for rows
+    enriched before #169 populated the column - a NULL there freezes the
+    Now Playing bar's live progress (#383). The migration backfills existing
+    rows; this covers anything that still slips through."""
+    if media.runtime:
+        return media.runtime
+    raw = (media.tmdb_data or {}).get("runtime")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def format_event(event: WatchEvent | PlaybackProgress, media: Media) -> dict:
     # PlaybackProgress has no watched_at; its updated_at remains the display timestamp.
     # A WatchEvent's watched_at may be None (unknown watch date) — preserve that as-is.
@@ -359,7 +375,7 @@ def format_event(event: WatchEvent | PlaybackProgress, media: Media) -> dict:
             "user_rating": (media.tmdb_data or {}).get("user_rating"), # Placeholder, will be enriched
             "season_number": media.season_number,
             "episode_number": media.episode_number,
-            "runtime": media.runtime,
+            "runtime": _effective_runtime(media),
             "tagline": media.tagline,
             "genres": (media.tmdb_data or {}).get("genres", []),
             "tvdb_sourced": is_unmapped_tvdb_episode(media),
@@ -715,7 +731,7 @@ def _format_media_item(media: Media) -> dict:
         "tmdb_rating": media.tmdb_rating,
         "season_number": media.season_number,
         "episode_number": media.episode_number,
-        "runtime": media.runtime,
+        "runtime": _effective_runtime(media),
         "genres": (media.tmdb_data or {}).get("genres", []),
         "library": None,
         "in_library": False,
@@ -863,6 +879,39 @@ def _has_confirmed_air_date(release_date: str | None, today: date) -> bool:
 class _NextUpEpisodeNotOnTmdb(Exception):
     """Internal signal to roll back a speculative next-up episode row when TMDB
     doesn't actually have it — not a real error, never raised past get_next_up."""
+
+
+def _progress_percentages(
+    season_ep_counts: dict[int, int],
+    watched_per_season: dict[int, int],
+    collected_per_season: dict[int, int],
+) -> dict | None:
+    """Watched / collected episode counts and percentages for one show's
+    Progress row (#374). season_ep_counts is capped_season_episode_counts
+    output; per-season counts are themselves capped at that so a provider
+    numbering mismatch (more local rows than TMDB says a season has) can't
+    push a percentage past 100. Specials (season 0) are excluded, matching
+    total_aired_episodes. Returns None for a show with no usable season
+    metadata at all - a "0 / 0" row is just noise.
+    """
+    total = sum(cnt for sn, cnt in season_ep_counts.items() if sn != 0)
+    if total == 0:
+        return None
+    watched = sum(
+        min(watched_per_season.get(sn, 0), cnt)
+        for sn, cnt in season_ep_counts.items() if sn != 0
+    )
+    collected = sum(
+        min(collected_per_season.get(sn, 0), cnt)
+        for sn, cnt in season_ep_counts.items() if sn != 0
+    )
+    return {
+        "episodes_total": total,
+        "episodes_watched": watched,
+        "episodes_collected": collected,
+        "watch_pct": min(100, round(watched / total * 100)),
+        "collection_pct": min(100, round(collected / total * 100)),
+    }
 
 
 def _remaining_episode_stats(
@@ -1794,6 +1843,178 @@ async def list_dropped(
     return {"shows": shows_out, "movies": movies_out}
 
 
+_PROGRESS_SORTS = (
+    "recent", "watch_asc", "watch_desc",
+    "collection_asc", "collection_desc", "remaining", "title",
+)
+
+
+@router.get("/progress")
+async def get_progress(
+    type: str = Query("watched", pattern="^(watched|collection)$"),
+    sort: str = Query("recent"),
+    hide_complete: bool = Query(False),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(60, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_or_api_key),
+):
+    """Per-show progress for the Progress dashboard (#374), as two independent
+    lists picked by `type`:
+
+    - `watched`: every show with at least one watched episode.
+    - `collection`: every show with at least one collected episode.
+
+    The two are deliberately not linked - a show you have every episode of
+    but have never watched belongs on the collection list and nowhere near
+    the watched one, and vice versa. Both `watch_pct` and `collection_pct`
+    are still returned for each row as context. Dropped shows are left out
+    (same as Next Up); sorting and the hide-completed filter are client-side.
+
+    Episode totals come from stored TMDB metadata only (capped at the last
+    aired episode, unaired seasons dropped by their premiere date) - no live
+    TMDB call per show, so a still-airing show whose cached metadata lags may
+    briefly read a few episodes short. That's the same trade-off
+    total_aired_episodes() already documents.
+    """
+    user_id = current_user.id
+    settings = (await db.execute(
+        select(UserSettings).where(UserSettings.user_id == user_id)
+    )).scalar_one_or_none()
+    dropped_show_ids = set(settings.dropped_shows or []) if settings else set()
+
+    if type == "collection":
+        membership_join = (Collection, Collection.media_id == Media.id)
+        membership_where = Collection.user_id == user_id
+    else:
+        membership_join = (WatchEvent, WatchEvent.media_id == Media.id)
+        membership_where = WatchEvent.user_id == user_id
+
+    started_result = await db.execute(
+        select(func.distinct(Media.show_id))
+        .join(*membership_join)
+        .where(
+            membership_where,
+            Media.media_type == MediaType.episode,
+            Media.show_id.isnot(None),
+        )
+    )
+    show_ids = {row[0] for row in started_result.all()} - dropped_show_ids
+    if not show_ids:
+        return {"shows": [], "page": 1, "page_size": page_size, "total": 0, "total_pages": 1}
+
+    shows_by_id = {
+        s.id: s for s in (
+            await db.execute(select(Show).where(Show.id.in_(show_ids)))
+        ).scalars().all()
+    }
+
+    # One pass over every episode row of these shows: distinct watched and
+    # distinct collected episode numbers per season (same shape the show
+    # detail page's season_stats query produces, just batched across shows).
+    watch_a = aliased(WatchEvent)
+    coll_a = aliased(Collection)
+    season_rows = await db.execute(
+        select(
+            Media.show_id,
+            Media.season_number,
+            func.count(func.distinct(
+                case((watch_a.id.isnot(None), Media.episode_number), else_=None)
+            )),
+            func.count(func.distinct(
+                case((coll_a.id.isnot(None), Media.episode_number), else_=None)
+            )),
+        )
+        .select_from(Media)
+        .outerjoin(watch_a, and_(watch_a.media_id == Media.id, watch_a.user_id == user_id))
+        .outerjoin(coll_a, and_(coll_a.media_id == Media.id, coll_a.user_id == user_id))
+        .where(
+            Media.show_id.in_(show_ids),
+            Media.media_type == MediaType.episode,
+            Media.season_number.isnot(None),
+            Media.episode_number.isnot(None),
+        )
+        .group_by(Media.show_id, Media.season_number)
+    )
+    watched_per_show: dict[int, dict[int, int]] = {}
+    collected_per_show: dict[int, dict[int, int]] = {}
+    for sid, season_number, watched_count, collected_count in season_rows.all():
+        watched_per_show.setdefault(sid, {})[season_number] = watched_count
+        collected_per_show.setdefault(sid, {})[season_number] = collected_count
+
+    last_watched_rows = await db.execute(
+        select(Media.show_id, func.max(WatchEvent.watched_at))
+        .join(WatchEvent, WatchEvent.media_id == Media.id)
+        .where(WatchEvent.user_id == user_id, Media.show_id.in_(show_ids))
+        .group_by(Media.show_id)
+    )
+    last_watched = {sid: ts for sid, ts in last_watched_rows.all()}
+
+    shows_out: list[dict] = []
+    for sid, show in shows_by_id.items():
+        stats = _progress_percentages(
+            capped_season_episode_counts(show),
+            watched_per_show.get(sid, {}),
+            collected_per_show.get(sid, {}),
+        )
+        if stats is None:
+            continue
+        ts = last_watched.get(sid)
+        shows_out.append({
+            "show_id": sid,
+            "tmdb_id": show.tmdb_id,
+            "tvdb_id": show.tvdb_id,
+            "title": show.title,
+            "poster_path": show.poster_path,
+            "status": show.status,
+            **stats,
+            "last_watched_at": ts.isoformat() if ts else None,
+        })
+
+    done_key = "episodes_collected" if type == "collection" else "episodes_watched"
+    pct_key = "collection_pct" if type == "collection" else "watch_pct"
+
+    # A show reaches the "started" query above on any episode row - including a
+    # Special, or an episode in a season the cached TMDB metadata doesn't list.
+    # _progress_percentages counts neither, so those would show as "0 / 85".
+    # Keep a row only if it has real progress on this list's own metric.
+    shows_out = [s for s in shows_out if s[done_key] > 0]
+
+    if hide_complete:
+        shows_out = [s for s in shows_out if s[pct_key] < 100]
+
+    # "remaining" is episodes left to reach 100% of whichever list this is.
+    def _remaining(s: dict) -> int:
+        return s["episodes_total"] - s[done_key]
+
+    if sort not in _PROGRESS_SORTS:
+        sort = "recent"
+    sort_keys = {
+        "recent": (lambda s: s["last_watched_at"] or "", True),
+        "watch_asc": (lambda s: s["watch_pct"], False),
+        "watch_desc": (lambda s: s["watch_pct"], True),
+        "collection_asc": (lambda s: s["collection_pct"], False),
+        "collection_desc": (lambda s: s["collection_pct"], True),
+        "remaining": (_remaining, True),
+        "title": (lambda s: s["title"].lower(), False),
+    }
+    key_fn, reverse = sort_keys[sort]
+    # Stable secondary sort by title so equal percentages have a predictable order.
+    shows_out.sort(key=lambda s: s["title"].lower())
+    shows_out.sort(key=key_fn, reverse=reverse)
+
+    total = len(shows_out)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    offset = (page - 1) * page_size
+    return {
+        "shows": shows_out[offset:offset + page_size],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+    }
+
+
 class SeasonWatchRequest(BaseModel):
     series_tmdb_id: int
     series_tvdb_id: int | None = None  # links the show to TVDB on demand, see #101
@@ -2238,25 +2459,21 @@ async def mark_season_watched(
     target_positions: set[tuple[int, int]] | None = None
     canonical_seasons = [body.season_number]
     tvdb_fallback_episodes: list[dict] | None = None
-    if body.episode_order == "tvdb":
-        mapping_result = await db.execute(
-            select(EpisodeOrderMapping).where(
-                EpisodeOrderMapping.series_tmdb_id == body.series_tmdb_id,
-                EpisodeOrderMapping.tvdb_season_number == body.season_number,
-            )
+    _watch_order = normalize_order_key(body.episode_order)
+    if not is_aired_order(_watch_order):
+        target_positions = await canonical_pairs_for_display_season(
+            db, body.series_tmdb_id, _watch_order, body.season_number
         )
-        mappings = list(mapping_result.scalars().all())
-        if not mappings:
-            # No computed mapping — if TMDB doesn't even have a season with
-            # this number, it's confidently absent (see #101): fetch straight
-            # from TVDB instead of guessing or 400ing. If TMDB DOES have a
-            # season here, stay conservative — don't guess positions.
+        if not target_positions:
+            target_positions = None
+            # No positions - tvdb:official with a TVDB-only season can fetch
+            # straight from TVDB (#101); other orders must be built first.
             season_on_tmdb = any(
                 s.get("season_number") == body.season_number
                 for s in (show.tmdb_data or {}).get("seasons", [])
             )
-            if season_on_tmdb or not show.tvdb_id:
-                raise HTTPException(status_code=400, detail="TVDB episode mapping is not available")
+            if _watch_order != "tvdb:official" or season_on_tmdb or not show.tvdb_id:
+                raise HTTPException(status_code=400, detail="This episode order is not available for this show")
             from routers.shows import get_user_tvdb_key
             import core.tvdb as tvdb_client
 
@@ -2270,10 +2487,6 @@ async def mark_season_watched(
                 raise HTTPException(status_code=404, detail=f"TVDB season fetch failed: {e}")
             tvdb_fallback_episodes = [tvdb_client.format_episode(e) for e in raw_eps]
         else:
-            target_positions = {
-                (mapping.tmdb_season_number, mapping.tmdb_episode_number)
-                for mapping in mappings
-            }
             canonical_seasons = sorted({season for season, _ in target_positions})
 
     now = datetime.utcnow()
@@ -2455,34 +2668,24 @@ async def unwatch_season(
         Media.show_id == show.id,
         Media.media_type == MediaType.episode,
     ]
-    if episode_order == "tvdb":
-        mapping_result = await db.execute(
-            select(EpisodeOrderMapping).where(
-                EpisodeOrderMapping.series_tmdb_id == series_tmdb_id,
-                EpisodeOrderMapping.tvdb_season_number == season_number,
-            )
+    _unwatch_order = normalize_order_key(episode_order)
+    if not is_aired_order(_unwatch_order):
+        pairs = await canonical_pairs_for_display_season(
+            db, series_tmdb_id, _unwatch_order, season_number
         )
-        positions = [
-            and_(
-                Media.season_number == mapping.tmdb_season_number,
-                Media.episode_number == mapping.tmdb_episode_number,
-            )
-            for mapping in mapping_result.scalars().all()
-        ]
-        if not positions:
-            # No computed mapping. If TMDB doesn't have a season with this
-            # number at all, these episodes were tracked via the raw TVDB
-            # numbers (see #101) — fall back to that. Otherwise stay
-            # conservative and no-op rather than guess positions.
+        if not pairs:
             season_on_tmdb = any(
                 s.get("season_number") == season_number
                 for s in (show.tmdb_data or {}).get("seasons", [])
             )
-            if season_on_tmdb:
+            if season_on_tmdb or _unwatch_order != "tvdb:official":
                 return {"status": "ok", "count": 0}
             media_filters.append(Media.season_number == season_number)
         else:
-            media_filters.append(or_(*positions))
+            media_filters.append(or_(*[
+                and_(Media.season_number == cs, Media.episode_number == ce)
+                for cs, ce in pairs
+            ]))
     else:
         media_filters.append(Media.season_number == season_number)
 
