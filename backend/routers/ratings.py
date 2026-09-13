@@ -105,13 +105,15 @@ async def submit_rating(
             raise HTTPException(status_code=404, detail=f"TMDB Media not found: {e}")
 
     effective_season = None if media_type == MediaType.episode else body.season_number
-    effective_episode_order = (
-        body.episode_order
-        if media_type == MediaType.series and effective_season is not None
-        else None
-    )
-    if effective_episode_order not in (None, "tvdb"):
-        raise HTTPException(status_code=400, detail="Invalid episode order")
+    # A season rating carries the ordering it was made under (#174) so
+    # "Season 3" of DVD order and of aired order stay distinct. NULL = aired.
+    effective_episode_order = None
+    if media_type == MediaType.series and effective_season is not None and body.episode_order:
+        try:
+            key = validate_episode_order(body.episode_order)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid episode order")
+        effective_episode_order = None if is_aired_order(key) else key
 
     result2 = await db.execute(
         select(Rating).where(
@@ -230,11 +232,10 @@ async def delete_rating(
         raise HTTPException(status_code=404, detail="Media not found")
 
     effective_season = None if mt == MediaType.episode else season_number
-    effective_episode_order = (
-        episode_order
-        if mt == MediaType.series and effective_season is not None
-        else None
-    )
+    effective_episode_order = None
+    if mt == MediaType.series and effective_season is not None and episode_order:
+        key = normalize_order_key(episode_order)
+        effective_episode_order = None if is_aired_order(key) else key
 
     result = await db.execute(
         select(Rating).where(

@@ -119,6 +119,8 @@ class TotpBackupCodesResponse(BaseModel):
 
 class UserSettings(BaseModel):
     tmdb_api_key: Optional[str] = None
+    rpdb_api_key: Optional[str] = Field(default=None, max_length=255)
+    has_rpdb_key: bool = False
     has_effective_tmdb_key: bool = False
     has_global_tmdb_key: bool = False
 
@@ -211,6 +213,12 @@ class UserSettings(BaseModel):
     rate_prompt_movies: Optional[bool] = None
     rate_prompt_episodes: Optional[bool] = None
     watchlist_auto_remove_id: Optional[int] = None
+
+    @field_validator("rpdb_api_key", mode="before")
+    @classmethod
+    def normalize_rpdb_api_key(cls, value):
+        from core.rpdb import normalize_api_key
+        return normalize_api_key(value) if isinstance(value, str) or value is None else value
 
     class Config:
         from_attributes = True

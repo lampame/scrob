@@ -13,6 +13,7 @@ from models.base import MediaType
 from routers import webhooks
 from routers.webhooks import (
     _backfill_credits_stingers,
+    _backfill_jellyfin_runtimes,
     _backfill_plex_runtime,
     _commit_playback_session_update,
     _consume_recently_pushed_watched,
@@ -52,6 +53,7 @@ class _FakeDB:
         self._queued = list(queued_scalars)
         self.added = []
         self.executed_statements = []
+        self.commits = 0
 
     async def execute(self, stmt):
         self.executed_statements.append(stmt)
@@ -63,6 +65,9 @@ class _FakeDB:
 
     async def flush(self):
         pass
+
+    async def commit(self):
+        self.commits += 1
 
 
 class DuplicateWebhookDeliveryTests(unittest.TestCase):
@@ -546,6 +551,110 @@ class ParseJellyfinMultiEpisodePayloadTests(unittest.TestCase):
         }
         data = parse_jellyfin_payload(payload)
         self.assertIsNone(data["episode_number_end"])
+
+
+class ParseJellyfinSeriesYearTests(unittest.TestCase):
+    """#373: the flat plugin sets Year to the series' production year on an
+    episode payload - carried as series_year so _resolve_show_for_episode can
+    pick between two shows that share a title."""
+
+    def test_flat_episode_carries_the_series_year(self):
+        data = parse_jellyfin_payload({
+            "NotificationType": "PlaybackStop", "ItemType": "Episode",
+            "Name": "The Holy Trinity", "SeriesName": "The Grand Tour",
+            "Year": 2026, "SeasonNumber": 1, "EpisodeNumber": 1,
+        })
+        self.assertEqual(data["series_year"], 2026)
+
+    def test_flat_movie_has_no_series_year(self):
+        data = parse_jellyfin_payload({
+            "NotificationType": "PlaybackStop", "ItemType": "Movie",
+            "Name": "The Matrix", "Year": 1999,
+        })
+        self.assertIsNone(data["series_year"])
+
+    def test_nested_episode_has_no_series_year(self):
+        # item.ProductionYear there is the episode's year, not the series'.
+        data = parse_jellyfin_payload({
+            "Event": "playback.stop",
+            "Item": {"Id": "ep1", "Name": "Ep", "Type": "Episode", "ProductionYear": 2026},
+            "Session": {"Id": "s", "PlayState": {}},
+        })
+        self.assertIsNone(data["series_year"])
+
+
+class PickShowByYearTests(unittest.TestCase):
+    """#373: from same-title Show candidates, pick the one matching the
+    payload's series year (within a year), else fall back to the first."""
+
+    def _show(self, tmdb_id, first_air_date):
+        return SimpleNamespace(tmdb_id=tmdb_id, first_air_date=first_air_date)
+
+    def test_single_candidate_is_returned_as_is(self):
+        s = self._show(1, "2016-01-01")
+        self.assertIs(webhooks._pick_show_by_year([s], 2020), s)
+
+    def test_no_year_returns_the_first(self):
+        a, b = self._show(1, "2016"), self._show(2, "2026")
+        self.assertIs(webhooks._pick_show_by_year([a, b], None), a)
+
+    def test_year_within_one_matches(self):
+        a, b = self._show(1, "2016-05-13"), self._show(2, "2025-12-31")
+        self.assertIs(webhooks._pick_show_by_year([a, b], 2026), b)
+
+    def test_no_match_falls_back_to_the_first(self):
+        a, b = self._show(1, "2016"), self._show(2, "2018")
+        self.assertIs(webhooks._pick_show_by_year([a, b], 2030), a)
+
+    def test_empty_is_none(self):
+        self.assertIsNone(webhooks._pick_show_by_year([], 2020))
+
+
+class ResolveShowForEpisodeYearTests(IsolatedAsyncioTestCase):
+    """#373: an episode of a show whose title collides with another show's
+    (a remake/reboot) was attributed to whichever row came back first."""
+
+    def _db(self, shows):
+        async def execute(_stmt):
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: list(shows)))
+        return SimpleNamespace(execute=execute)
+
+    def _data(self, **over):
+        d = {
+            "media_type": "episode", "series_name": "The Grand Tour",
+            "series_year": 2026, "series_tmdb_id": None,
+        }
+        d.update(over)
+        return d
+
+    async def test_local_year_match_wins_over_the_first_row(self):
+        old = SimpleNamespace(id=1, tmdb_id=67557, first_air_date="2016-05-13")
+        new = SimpleNamespace(id=2, tmdb_id=329471, first_air_date="2026-01-01")
+        created = SimpleNamespace(id=2, tmdb_id=329471)
+        with patch("routers.webhooks._find_or_create_show", AsyncMock(return_value=created)) as find_show:
+            show, series_tmdb_id = await webhooks._resolve_show_for_episode(self._data(), self._db([old, new]))
+        self.assertEqual(series_tmdb_id, 329471)
+        self.assertIs(show, created)
+        self.assertEqual(find_show.await_args.args[1], 329471)
+
+    async def test_no_series_year_keeps_the_first_row(self):
+        old = SimpleNamespace(id=1, tmdb_id=67557, first_air_date="2016-05-13")
+        new = SimpleNamespace(id=2, tmdb_id=329471, first_air_date="2026-01-01")
+        with patch("routers.webhooks._find_or_create_show",
+                   AsyncMock(return_value=SimpleNamespace(id=1, tmdb_id=67557))):
+            _, series_tmdb_id = await webhooks._resolve_show_for_episode(
+                self._data(series_year=None), self._db([old, new])
+            )
+        self.assertEqual(series_tmdb_id, 67557)
+
+    async def test_tmdb_search_fallback_is_year_scoped_first(self):
+        search = AsyncMock(return_value={"results": [{"id": 329471}]})
+        with patch("routers.webhooks.tmdb.search_shows", search), \
+             patch("routers.webhooks._find_or_create_show",
+                   AsyncMock(return_value=SimpleNamespace(id=9, tmdb_id=329471))):
+            _, series_tmdb_id = await webhooks._resolve_show_for_episode(self._data(), self._db([]))
+        self.assertEqual(series_tmdb_id, 329471)
+        self.assertEqual(search.await_args_list[0].kwargs.get("year"), 2026)
 
 
 class FindOrCreateMediaJellyfinMultiTests(IsolatedAsyncioTestCase):
@@ -1275,6 +1384,100 @@ class BackfillPlexRuntimeTests(IsolatedAsyncioTestCase):
         # rather than also exercising the TMDB fallback that follows it.
         await _backfill_plex_runtime(db, media, {"duration_ms": "not-a-number"}, None, None)
         self.assertIsNone(media.runtime)
+
+
+class ParseJellyfinRuntimeTicksTests(unittest.TestCase):
+    """#383: the parser now surfaces RunTimeTicks so the handler can backfill
+    Media.runtime from it, instead of only using it for the progress ratio."""
+
+    _MIN = 600_000_000  # RunTimeTicks per minute
+
+    def test_nested_payload_carries_runtime_ticks(self):
+        data = parse_jellyfin_payload({
+            "Event": "playback.progress",
+            "Item": {"Id": "m1", "Name": "Heat", "Type": "Movie", "RunTimeTicks": 170 * self._MIN},
+            "Session": {"Id": "s", "PlayState": {"PositionTicks": 0}},
+        })
+        self.assertEqual(data["runtime_ticks"], 170 * self._MIN)
+
+    def test_flat_payload_carries_runtime_ticks(self):
+        data = parse_jellyfin_payload({
+            "NotificationType": "PlaybackProgress", "ItemType": "Episode", "ItemId": "e1",
+            "Name": "Ep", "SeasonNumber": 1, "EpisodeNumber": 1, "RunTimeTicks": 22 * self._MIN,
+        })
+        self.assertEqual(data["runtime_ticks"], 22 * self._MIN)
+
+    def test_absent_runtime_ticks_is_none(self):
+        data = parse_jellyfin_payload({
+            "NotificationType": "PlaybackStop", "ItemType": "Movie", "ItemId": "m2", "Name": "x",
+        })
+        self.assertIsNone(data["runtime_ticks"])
+
+
+class BackfillJellyfinRuntimesTests(IsolatedAsyncioTestCase):
+    """#383: Jellyfin/Emby used RunTimeTicks only for the progress ratio and
+    never wrote Media.runtime, so an item enriched before #169 kept the
+    column NULL however many times it was replayed - freezing the Now
+    Playing bar. Mirrors what Plex already does."""
+
+    _MIN = 600_000_000
+
+    def _movie(self, **overrides):
+        defaults = dict(runtime=None, media_type=MediaType.movie, tmdb_id=550,
+                        show_id=None, season_number=None, episode_number=None)
+        return SimpleNamespace(**{**defaults, **overrides})
+
+    def _episode(self, **overrides):
+        defaults = dict(runtime=None, media_type=MediaType.episode, tmdb_id=None,
+                        show_id=1, season_number=2, episode_number=3)
+        return SimpleNamespace(**{**defaults, **overrides})
+
+    async def test_fills_from_runtime_ticks_and_commits(self):
+        media = self._movie()
+        db = _FakeDB([])
+        await _backfill_jellyfin_runtimes(db, [media], {"runtime_ticks": 53 * self._MIN}, "tmdb-key")
+        self.assertEqual(media.runtime, 53)
+        self.assertEqual(db.commits, 1)
+
+    async def test_noop_when_runtime_already_set(self):
+        media = self._movie(runtime=90)
+        db = _FakeDB([])
+        with patch("core.tmdb.get_movie", new_callable=AsyncMock) as get_movie:
+            await _backfill_jellyfin_runtimes(db, [media], {"runtime_ticks": 10 * self._MIN}, "tmdb-key")
+        self.assertEqual(media.runtime, 90)
+        self.assertEqual(db.commits, 0)
+        get_movie.assert_not_called()
+
+    async def test_falls_back_to_tmdb_when_no_ticks(self):
+        media = self._episode(show_id=7)
+        show = SimpleNamespace(id=7, tmdb_id=999)
+        db = _FakeDB([show])
+        with patch("core.tmdb.get_episode", new_callable=AsyncMock, return_value={"runtime": 45}) as get_episode:
+            await _backfill_jellyfin_runtimes(db, [media], {"runtime_ticks": None}, "tmdb-key")
+        get_episode.assert_awaited_once_with(999, 2, 3, api_key="tmdb-key")
+        self.assertEqual(media.runtime, 45)
+
+    async def test_multi_episode_file_fills_every_row(self):
+        a, b = self._episode(id=1, episode_number=3), self._episode(id=2, episode_number=4)
+        db = _FakeDB([])
+        await _backfill_jellyfin_runtimes(db, [a, b], {"runtime_ticks": 44 * self._MIN}, "tmdb-key")
+        # Each row of a combined file gets the file duration (the Now Playing
+        # bar divides it across episodes at display time), same as Plex.
+        self.assertEqual((a.runtime, b.runtime), (44, 44))
+        self.assertEqual(db.commits, 1)
+
+    async def test_only_the_missing_rows_are_touched(self):
+        got, missing = self._episode(id=1, runtime=30), self._episode(id=2, runtime=None)
+        db = _FakeDB([])
+        await _backfill_jellyfin_runtimes(db, [got, missing], {"runtime_ticks": 22 * self._MIN}, "tmdb-key")
+        self.assertEqual((got.runtime, missing.runtime), (30, 22))
+
+    async def test_nothing_resolvable_leaves_runtime_none_without_committing(self):
+        media = self._movie(tmdb_id=None)
+        db = _FakeDB([])
+        await _backfill_jellyfin_runtimes(db, [media], {"runtime_ticks": None}, "tmdb-key")
+        self.assertIsNone(media.runtime)
+        self.assertEqual(db.commits, 0)
 
 
 class ResolvePlexProgressTests(IsolatedAsyncioTestCase):
