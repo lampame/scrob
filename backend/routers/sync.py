@@ -31,9 +31,11 @@ from core import arvio, jellyfin, emby, plex, nuvio, stremio, tmdb
 from core.jellyfin import get_jellyfin_tmdb_id
 import core.trakt as trakt_client
 from core.enrichment import enrich_media, is_unmapped_tvdb_episode, create_media_safely, enrich_media_safely, apply_media_change_safely, enrich_episode_from_tvdb
+from core.identity import coerce_id, link_show_ids
 from core.image_cache import pre_cache_all_collected_bg
 from core.translations import get_user_metadata_language
 from core.rewatch import record_rewatch_progress, get_active_rewatches_for_shows
+from core.watch_dedup import get_dedup_window_minutes, find_duplicate_watch_event, is_duplicate_watch_time
 from core.watchlist_reconcile import compute_new_baseline, media_key, plan_watchlist_reconcile
 from models.rewatch import ShowRewatch, RewatchProgress
 
@@ -375,10 +377,40 @@ async def sync_shows_batch(
         await asyncio.gather(*[fetch_show(tid) for tid in to_fetch])
 
     if fetched:
+        # Persist TMDB's TVDB cross-reference on the row (step 1 of
+        # docs/tvdb-first-class-plan.md). shows.tvdb_id is unique, so only
+        # claim ids no other show holds and that exactly one fetched show
+        # wants; the rest are left for link_show_ids to sort out later.
+        wanted_tvdb: dict[int, int] = {}
+        tvdb_claims: dict[int, int] = {}
+        for tmdb_id, d in fetched.items():
+            ext_tvdb = coerce_id((d.get("external_ids") or {}).get("tvdb_id"))
+            if ext_tvdb:
+                wanted_tvdb.setdefault(ext_tvdb, tmdb_id)
+                tvdb_claims[ext_tvdb] = tvdb_claims.get(ext_tvdb, 0) + 1
+        dup_tvdb = {t for t, n in tvdb_claims.items() if n > 1}
+        taken_tvdb: dict[int, int | None] = {}
+        if wanted_tvdb:
+            taken_rows = await _select_in_chunks(
+                db,
+                lambda chunk: select(Show).where(Show.tvdb_id.in_(chunk)),
+                list(wanted_tvdb.keys()),
+            )
+            taken_tvdb = {s.tvdb_id: s.tmdb_id for s in taken_rows}
+
+        def _claimable_tvdb_id(tmdb_id: int, d: dict) -> int | None:
+            ext_tvdb = coerce_id((d.get("external_ids") or {}).get("tvdb_id"))
+            if not ext_tvdb or ext_tvdb in dup_tvdb:
+                return None
+            if ext_tvdb in taken_tvdb and taken_tvdb[ext_tvdb] != tmdb_id:
+                return None
+            return ext_tvdb
+
         values = []
         for tmdb_id, d in fetched.items():
             values.append({
                 "tmdb_id": tmdb_id,
+                "tvdb_id": _claimable_tvdb_id(tmdb_id, d),
                 "title": d.get("name"),
                 "original_title": d.get("original_name"),
                 "overview": d.get("overview"),
@@ -409,13 +441,17 @@ async def sync_shows_batch(
 
         # Show has 12 value columns; 32767 / 12 = 2730 rows max per statement.
         # Use BATCH_SIZE (500) to stay well under the asyncpg 32767-parameter limit.
-        update_cols = [k for k in values[0].keys() if k != "tmdb_id"]
+        update_cols = [k for k in values[0].keys() if k not in ("tmdb_id", "tvdb_id")]
         for i in range(0, len(values), BATCH_SIZE):
             chunk = values[i : i + BATCH_SIZE]
             stmt = insert(Show).values(chunk)
+            set_ = {k: getattr(stmt.excluded, k) for k in update_cols}
+            # Fill a missing tvdb_id on an existing row, never clear or
+            # replace one already there.
+            set_["tvdb_id"] = func.coalesce(Show.__table__.c.tvdb_id, stmt.excluded.tvdb_id)
             stmt = stmt.on_conflict_do_update(
                 index_elements=["tmdb_id"],
-                set_={k: getattr(stmt.excluded, k) for k in update_cols},
+                set_=set_,
             )
             stmt = stmt.returning(Show)
             res = await db.execute(stmt)
@@ -2311,7 +2347,10 @@ async def sync_items(
                             existing_watched.add(media_id_for_watch)
                             if rewatch_eligible:
                                 rewatch_progressed_media_ids.add(media_id_for_watch)
-                            if new_watched_ids is not None:
+                            # Only finished plays fan out - mark_watched is
+                            # all-or-nothing, so pushing a merely started item
+                            # (#253) marks it fully watched on the other side.
+                            if new_watched_ids is not None and watch_state["completed"]:
                                 new_watched_ids.add(media_id_for_watch)
 
                     if sync_ratings and watch_state["user_rating"] is not None:
@@ -2965,6 +3004,7 @@ async def _backfill_plex_watch_history(
     server_username: str | None,
     ratingkey_to_media: dict[str, int],
     job_id: int | None = None,
+    window_minutes: int = 0,
 ) -> tuple[int, int]:
     """Import every distinct Plex play as its own WatchEvent, not just the most
     recent one — Plex's library-scan endpoints (get_movies/get_shows/get_episodes)
@@ -3044,11 +3084,23 @@ async def _backfill_plex_watch_history(
             else:
                 confirmed_watched_by_media[media_id].add(watched_at)
 
+        # window_minutes is the user's raw configured override (0 if unset) -
+        # deliberately NOT the floored effective value the general dedup
+        # setting uses elsewhere (core.watch_dedup.DEFAULT_DEDUP_WINDOW_MINUTES
+        # = 5), which would otherwise widen PLEX_CONFIRMED_RECONCILE_WINDOW's
+        # tuned 2-minute echo check by default and reintroduce #320 (a genuine
+        # distinct play a few minutes after a confirmed one wrongly suppressed
+        # as an echo). An explicit override only ever widens these two
+        # reconcile windows beyond their tuned defaults, never narrows them.
+        user_window = timedelta(minutes=window_minutes)
+        provisional_window = max(PLEX_WEBHOOK_RECONCILE_WINDOW, user_window)
+        confirmed_window = max(PLEX_CONFIRMED_RECONCILE_WINDOW, user_window)
+
         def _closest_provisional(media_id: int, watched_at: datetime) -> tuple[int, datetime] | None:
             candidates = provisional_by_media.get(media_id) or []
             in_range = [
                 c for c in candidates
-                if abs((watched_at - c[1]).total_seconds()) <= PLEX_WEBHOOK_RECONCILE_WINDOW.total_seconds()
+                if abs((watched_at - c[1]).total_seconds()) <= provisional_window.total_seconds()
             ]
             if not in_range:
                 return None
@@ -3057,7 +3109,7 @@ async def _backfill_plex_watch_history(
         def _has_nearby_confirmed(media_id: int, watched_at: datetime) -> bool:
             candidates = confirmed_watched_by_media.get(media_id) or set()
             return any(
-                abs((watched_at - c).total_seconds()) <= PLEX_CONFIRMED_RECONCILE_WINDOW.total_seconds()
+                abs((watched_at - c).total_seconds()) <= confirmed_window.total_seconds()
                 for c in candidates
             )
 
@@ -3858,6 +3910,7 @@ async def _run_plex_sync(user_id: int, job_id: int, movie_limit: int, show_limit
             if conn.sync_watched:
                 new_events, reconciled, unmatched = await _backfill_plex_watch_history(
                     user_id, conn.id, p_url, p_token, conn.server_username, _plex_ratingkey_to_media, job_id,
+                    window_minutes=(settings.duplicate_watch_window_minutes or 0) if settings else 0,
                 )
                 if new_events or reconciled or unmatched:
                     print(
@@ -4114,23 +4167,23 @@ async def _apply_nuvio_watch_history(
             WatchEvent.media_id.in_(media_ids),
         )
     )
-    existing = set(existing_result.all())
-    existing_by_media: dict[int, datetime | None] = {}
-    for existing_media_id, existing_watched_at in existing:
-        existing_by_media.setdefault(existing_media_id, existing_watched_at)
+    existing_by_media: dict[int, list[datetime | None]] = {}
+    for existing_media_id, existing_watched_at in existing_result.all():
+        existing_by_media.setdefault(existing_media_id, []).append(existing_watched_at)
+
+    window_minutes = await get_dedup_window_minutes(db, user_id)
     added_media_ids: set[int] = set()
     new_events: list[WatchEvent] = []
     for media, watched_at in candidates:
+        times = existing_by_media.get(media.id, [])
         if dedupe_by_media_id_only:
-            if media.id in existing_by_media:
+            if times:
                 continue
-        else:
-            existing_watched_at = existing_by_media.get(media.id)
-            if watched_at is None:
-                if existing_watched_at is not None:
-                    continue
-            elif (media.id, watched_at) in existing:
+        elif watched_at is None:
+            if any(t is None for t in times):
                 continue
+        elif is_duplicate_watch_time({media.id: [t for t in times if t is not None]}, media.id, watched_at, window_minutes):
+            continue
         event = WatchEvent(
             user_id=user_id,
             media_id=media.id,
@@ -4141,12 +4194,9 @@ async def _apply_nuvio_watch_history(
         )
         db.add(event)
         new_events.append(event)
-        # Keep both structures in sync - exact-match dedup (the default path)
-        # still checks `existing` directly, and without this an exact-duplicate
-        # row later in the same batch would no longer be caught, creating a
-        # second WatchEvent for it in one sync run.
-        existing.add((media.id, watched_at))
-        existing_by_media[media.id] = watched_at
+        # Keep in sync - a duplicate row later in the same batch must still be
+        # caught, or it'd create a second WatchEvent for it in one sync run.
+        existing_by_media.setdefault(media.id, []).append(watched_at)
         added_media_ids.add(media.id)
     await db.commit()
     for event in new_events:
@@ -5303,15 +5353,8 @@ async def _apply_arvio_watched_movie(
         if tmdb_api_key:
             await enrich_media(media, api_key=tmdb_api_key)
 
-    event_query = select(WatchEvent).where(
-        WatchEvent.user_id == user_id,
-        WatchEvent.media_id == media.id,
-        WatchEvent.completed == True,
-    )
-    if watched_at:
-        event_query = event_query.where(WatchEvent.watched_at == watched_at)
-
-    existing = (await db.execute(event_query)).scalars().first()
+    window_minutes = await get_dedup_window_minutes(db, user_id)
+    existing = await find_duplicate_watch_event(db, user_id, media.id, watched_at, window_minutes)
     if not existing:
         event = WatchEvent(
             user_id=user_id,
@@ -5440,15 +5483,8 @@ async def _apply_arvio_watched_episode(
         if tmdb_api_key:
             await enrich_media(media, api_key=tmdb_api_key)
 
-    event_query = select(WatchEvent).where(
-        WatchEvent.user_id == user_id,
-        WatchEvent.media_id == media.id,
-        WatchEvent.completed == True,
-    )
-    if watched_at:
-        event_query = event_query.where(WatchEvent.watched_at == watched_at)
-
-    existing = (await db.execute(event_query)).scalars().first()
+    window_minutes = await get_dedup_window_minutes(db, user_id)
+    existing = await find_duplicate_watch_event(db, user_id, media.id, watched_at, window_minutes)
     if not existing:
         event = WatchEvent(
             user_id=user_id,
@@ -6199,6 +6235,33 @@ async def _push_stremio_connection(
     return len(changes)
 
 
+# Shown on Connections when a full push cannot resolve a WatchEvent to a
+# server item (#304). Must not look like an unmatched-TMDB pull warning:
+# those have `title` + `reason` + `media_type` and a Match button.
+WATCHED_LOOKUP_FAILED_REASON = (
+    "Not found on this server - no matching library item for this watch"
+)
+
+
+def watched_lookup_failed_warning(media_id: int, media: Media | None, series_name: str | None = None) -> dict:
+    """Warning dict for a watch the full-push slow path could not resolve.
+
+    series_name (episodes only) lets Connections group these the same way it
+    already groups pull-side unmatched warnings - a large legacy watch
+    history against a partial library can produce thousands of these for a
+    handful of shows, and one row per episode makes the panel unusable (#400).
+    """
+    is_episode = bool(media and media.media_type == MediaType.episode)
+    return {
+        "type": "watched_lookup_failed",
+        "media_id": media_id,
+        "title": media.title if media else None,
+        "media_type": media.media_type.value if media and media.media_type else None,
+        "series_name": series_name if is_episode else None,
+        "reason": WATCHED_LOOKUP_FAILED_REASON,
+    }
+
+
 async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
     import httpx as _httpx
     from routers.webhooks import mark_pushed_watched
@@ -6357,8 +6420,14 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
             ratings_map: RatingChanges = {}
 
             if conn.push_watched:
+                # completed only - a WatchEvent can also be a started-but-
+                # unfinished play (#253) or a manually logged partial watch,
+                # and pushing one of those marks the item fully watched.
                 watched_result = await db.execute(
-                    select(WatchEvent.media_id).where(WatchEvent.user_id == user_id).distinct()
+                    select(WatchEvent.media_id).where(
+                        WatchEvent.user_id == user_id,
+                        WatchEvent.completed == True,  # noqa: E712
+                    ).distinct()
                 )
                 watched_ids = {row[0] for row in watched_result.all()}
 
@@ -6452,6 +6521,7 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
             lookup_media_ids = missing_ids | season_rating_ids
             media_info: dict[int, Media] = {}
             show_tmdb_map: dict[int, int] = {}  # show.id → show.tmdb_id
+            show_title_map: dict[int, str] = {}  # show.id → show.title, for grouping lookup-failed warnings (#400)
 
             if lookup_media_ids:
                 media_rows_list = await _select_in_chunks(
@@ -6467,9 +6537,10 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                     show_ids_list = list(show_ids_needed)
                     for i in range(0, len(show_ids_list), _MAX_IN_PARAMS):
                         chunk = show_ids_list[i : i + _MAX_IN_PARAMS]
-                        show_rows = await db.execute(select(Show.id, Show.tmdb_id).where(Show.id.in_(chunk)))
+                        show_rows = await db.execute(select(Show.id, Show.tmdb_id, Show.title).where(Show.id.in_(chunk)))
                         for row in show_rows.all():
                             show_tmdb_map[row[0]] = row[1]
+                            show_title_map[row[0]] = row[2]
 
             # For Jellyfin/Emby, AnyProviderIdEquals can't be trusted to
             # narrow results on every server version - a per-item lookup can
@@ -6493,9 +6564,12 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
 
             # Jellyfin/Emby's UserDataSaved webhook can echo a mark-watched push
             # straight back and, without this, land as a brand new WatchEvent
-            # stamped at push time (see #247/#251) - registered up front for
-            # every item about to be pushed, not inside the push call itself,
-            # since the echo can arrive before an in-task registration would.
+            # stamped at push time (see #247/#251). Its echo-suppression token
+            # is armed in _push_watched_group below, right before the actual
+            # mark_watched call - not here, up front: a full push of a large
+            # library runs well past the token's 10-minute TTL, so anything
+            # armed at the start of the job would have expired before its own
+            # echo came back (#372).
             echoes_watched = conn.type in ("jellyfin", "emby")
 
             # A combined multi-episode file (Jellyfin/Emby's IndexNumber..
@@ -6521,7 +6595,6 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                 for mid in watched_ids:
                     for sid in source_ids_map.get(mid, []):
                         if echoes_watched:
-                            mark_pushed_watched(user_id, mid)
                             watched_sid_to_mids.setdefault(sid, set()).add(mid)
                         else:
                             push_items.append(("watched", sid, mid))
@@ -6572,6 +6645,15 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
             print(f"Full push for connection {connection_id}: pushing {total} items ({len(push_items)} known, {len(lookup_items)} via live lookup, {watched_group_row_count} watched rows in {len(watched_sid_to_mids)} groups, {len(watched_lookup_mids)} watched rows pending lookup)...")
 
             sem = asyncio.Semaphore(10)
+            # Separate, higher limit for _resolve_watched_lookup only - a
+            # read-only "does this exist" check, unlike everything else
+            # sharing `sem` (which also issues mutating mark_watched/
+            # set_rating calls and is kept conservative on purpose). A large
+            # legacy watch history against a partial library can mean
+            # thousands of these, almost all misses, and gating them behind
+            # the same limit as writes made a full push take minutes longer
+            # than it needed to (#400).
+            lookup_sem = asyncio.Semaphore(25)
             _PROGRESS_INTERVAL = 20
 
             def _extract_source_id(item_dict: dict | None) -> str | None:
@@ -6730,17 +6812,17 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                         return False
 
             async def _resolve_watched_lookup(mid: int) -> tuple[int, str | None]:
-                async with sem:
+                async with lookup_sem:
                     return mid, await _find_source_id(mid)
 
             async def _push_watched_group(client: _httpx.AsyncClient, sid: str, mids: set[int]) -> bool:
-                # Tokens for every mid here are already armed (at queue-build
-                # time for known items, right after resolution below for
-                # looked-up ones) - this call only needs to fire the single
-                # deduped mark_watched (#298). A token that goes unconsumed
-                # because the check below skips the push is harmless - it
-                # just expires on its own TTL, same as one left over from a
-                # failed push call.
+                # One deduped mark_watched per server item, expanded over the N
+                # local rows that share it (#298). The echo-suppression token
+                # for every one of those rows is armed here, immediately before
+                # the call - not when this group was queued: on a long push
+                # that was minutes ago, past the token's 10-minute TTL (#372).
+                # Arming only once the already-watched checks have passed also
+                # means a skipped push leaves no stray token behind.
                 async with sem:
                     try:
                         already = await _already_watched_on_server(sid)
@@ -6748,6 +6830,8 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                             return False
                         if already:
                             return True
+                        for mid in mids:
+                            mark_pushed_watched(user_id, mid)
                         if conn.type == "jellyfin":
                             return await jellyfin.mark_watched(conn.url, conn.token, conn.server_user_id, sid, client=client)
                         else:
@@ -6770,18 +6854,12 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int) -> None:
                     newly_failed = 0
                     for mid, sid in resolved:
                         if sid:
-                            # Armed before the actual mark_watched call below,
-                            # same as the known-item path (#298).
-                            mark_pushed_watched(user_id, mid)
                             watched_sid_to_mids.setdefault(sid, set()).add(mid)
                         else:
                             newly_failed += 1
                             m = media_info.get(mid)
-                            lookup_warnings.append({
-                                "type": "watched_lookup_failed",
-                                "media_id": mid,
-                                "title": m.title if m else None,
-                            })
+                            series_name = show_title_map.get(m.show_id) if m and m.show_id else None
+                            lookup_warnings.append(watched_lookup_failed_warning(mid, m, series_name=series_name))
                     if newly_failed:
                         done += newly_failed
                         failed_count += newly_failed
@@ -7436,6 +7514,7 @@ async def apply_season_override(
             target_show = Show(
                 tvdb_id=override.target_show_tvdb_id,
                 tmdb_id=None,
+                canonical_source="tvdb",
                 title=show_fmt.get("title") or f"TVDB #{override.target_show_tvdb_id}",
                 original_title=show_fmt.get("original_title"),
                 overview=show_fmt.get("overview"),
@@ -7571,6 +7650,7 @@ async def match_unmatched_show(
             sa_func.lower(Media.tmdb_data["show_title"].astext) == body.show_title.lower(),
         )
         .distinct()
+        .order_by(Media.id)
     )
     episodes = ep_result.scalars().all()
     if not episodes:
@@ -7685,6 +7765,26 @@ async def match_unmatched_show(
     skipped = 0
     sem = asyncio.Semaphore(10)
 
+    from core.episode_order import _merge_episode_media
+
+    async def _apply_episode(media: Media, mutate) -> None:
+        """Apply one episode match. If another stub already owns this episode's
+        id - which happens when the user keeps two library versions of the same
+        show (a colour and a B&W cut, say) - fold this stub's files and history
+        into that row instead of leaving it stranded as 'unmatched'."""
+        loser_id = media.id
+        result = await apply_media_change_safely(db, media, mutate)
+        if result is not None and result is not media:
+            try:
+                async with db.begin_nested():
+                    await db.refresh(media)
+                    await _merge_episode_media(db, result, media, keep_divergent_files=True)
+            except Exception:
+                logger.exception(
+                    "match-unmatched-show: could not fold duplicate stub media %s into %s",
+                    loser_id, result.id,
+                )
+
     if body.tvdb_id:
         # ── TVDB path ──────────────────────────────────────────────────────
         from core import tvdb as tvdb_client
@@ -7707,6 +7807,7 @@ async def match_unmatched_show(
             target_show = Show(
                 tvdb_id=body.tvdb_id,
                 tmdb_id=None,
+                canonical_source="tvdb",
                 title=show_fmt["title"] or body.show_title,
                 original_title=show_fmt.get("original_title"),
                 overview=show_fmt.get("overview"),
@@ -7742,9 +7843,10 @@ async def match_unmatched_show(
             media.show_id = target_show.id
             if ep:
                 tvdb_ep_id = ep.get("id")
-                # Store TVDB episode ID in tmdb_id column for ActionBar compatibility
+                # TVDB episode id lives in its own column (migration tvdb1st);
+                # tmdb_id stays NULL for an episode TMDB doesn't have.
                 if tvdb_ep_id:
-                    media.tmdb_id = tvdb_ep_id
+                    media.tvdb_id = int(tvdb_ep_id)
                 # TVDB sometimes has an episode with no name at all (see #173) -
                 # media.title is NOT NULL, so a brand-new row needs a fallback.
                 # Episode 0 is a real episode number, not "missing", hence the
@@ -7776,7 +7878,7 @@ async def match_unmatched_show(
                 continue
             for media in season_episodes:
                 ep = ep_map.get(media.episode_number)
-                await apply_media_change_safely(db, media, lambda media=media, ep=ep: apply_tvdb_episode(media, ep))
+                await _apply_episode(media, lambda media=media, ep=ep: apply_tvdb_episode(media, ep))
                 if ep:
                     matched += 1
                 else:
@@ -7826,15 +7928,27 @@ async def match_unmatched_show(
                     await db.execute(
                         update(Media).where(Media.show_id == displaced_show.id).values(show_id=target_show.id)
                     )
+                    # Release the unique tmdb_id on the displaced row *in the database*
+                    # before target_show claims it. Both writes otherwise stay pending
+                    # until the first episode flush, which emits them in primary-key
+                    # order - and when target_show.id sorts first it hits
+                    # shows_tmdb_id_key while the displaced row still holds the value.
+                    await db.execute(
+                        update(Show).where(Show.id == displaced_show.id).values(tmdb_id=None)
+                    )
                     displaced_show.tmdb_id = None
             target_show.tmdb_id = body.tmdb_id
+            await db.flush()
         else:
             tmdb_show_result = await db.execute(select(Show).where(Show.tmdb_id == body.tmdb_id))
             target_show = tmdb_show_result.scalar_one_or_none()
 
         if not target_show:
+            # No show holds tmdb_tvdb_id (the cross-reference lookup above came
+            # back empty), so it is safe to claim it on the new row.
             target_show = Show(
                 tmdb_id=body.tmdb_id,
+                tvdb_id=coerce_id(tmdb_tvdb_id),
                 title=show_data.get("name") or show_data.get("original_name"),
                 original_title=show_data.get("original_name"),
                 overview=show_data.get("overview"),
@@ -7862,6 +7976,7 @@ async def match_unmatched_show(
             target_show.first_air_date = show_data.get("first_air_date") or target_show.first_air_date
             target_show.last_air_date = show_data.get("last_air_date") or target_show.last_air_date
             target_show.tmdb_data = {**show_data, "seasons": seasons_meta}
+            await link_show_ids(db, target_show, tvdb_id=tmdb_tvdb_id)
 
         async def _fetch_season(season_number: int) -> dict | None:
             async with sem:
@@ -7894,7 +8009,7 @@ async def match_unmatched_show(
                 continue
             for media in season_episodes:
                 ep = ep_map.get(media.episode_number)
-                await apply_media_change_safely(db, media, lambda media=media, ep=ep: apply_tmdb_episode(media, ep))
+                await _apply_episode(media, lambda media=media, ep=ep: apply_tmdb_episode(media, ep))
                 if ep:
                     matched += 1
                 else:
@@ -8057,6 +8172,79 @@ async def heal_push_echo_duplicates(
         burst.append(row)
         prev_at = row.watched_at
     _flush_burst()
+
+    if not to_delete:
+        return {"status": "ok", "healed": 0}
+
+    await db.execute(delete(WatchEvent).where(WatchEvent.id.in_(to_delete)))
+    await db.commit()
+    return {"status": "ok", "healed": len(to_delete)}
+
+
+class HealDuplicateHistoryBody(BaseModel):
+    window_minutes: int
+
+
+@router.post("/heal-duplicate-history")
+async def heal_duplicate_history(
+    body: HealDuplicateHistoryBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Manually collapse this user's WatchEvent rows that are within
+    window_minutes of another watch of the same movie/episode, regardless of
+    which source produced either one - e.g. the same play recorded once by a
+    Plex webhook and again hours later by a daily Trakt import (#390). Unlike
+    the live prevention check (Settings > duplicate_watch_window_minutes),
+    this is a one-off retroactive sweep the user runs on demand with their
+    own window, for history that already has duplicates in it.
+
+    Adjacent watches within the window chain into one cluster (A-B close and
+    B-C close merges all three, even if A-C alone would exceed the window) -
+    within a cluster, keeps the row most likely to be the real one: completed
+    over provisional, then earliest.
+    """
+    if body.window_minutes < 1:
+        raise HTTPException(status_code=422, detail="window_minutes must be at least 1")
+
+    result = await db.execute(
+        select(WatchEvent)
+        .where(WatchEvent.user_id == current_user.id)
+        .order_by(WatchEvent.media_id, WatchEvent.id)
+    )
+    events = result.scalars().all()
+
+    def _effective_time(event: WatchEvent) -> datetime:
+        return event.watched_at or event.created_at
+
+    def _rank(event: WatchEvent) -> tuple[int, datetime]:
+        if event.completed and not event.provisional:
+            tier = 0
+        elif event.completed:
+            tier = 1
+        else:
+            tier = 2
+        return (tier, _effective_time(event))
+
+    by_media: dict[int, list[WatchEvent]] = {}
+    for event in events:
+        by_media.setdefault(event.media_id, []).append(event)
+
+    tolerance = timedelta(minutes=body.window_minutes).total_seconds()
+    to_delete: list[int] = []
+    for media_events in by_media.values():
+        media_events.sort(key=_effective_time)
+        cluster: list[WatchEvent] = []
+        for event in media_events:
+            if cluster and (_effective_time(event) - _effective_time(cluster[-1])).total_seconds() > tolerance:
+                if len(cluster) > 1:
+                    keeper = min(cluster, key=_rank)
+                    to_delete.extend(e.id for e in cluster if e is not keeper)
+                cluster = []
+            cluster.append(event)
+        if len(cluster) > 1:
+            keeper = min(cluster, key=_rank)
+            to_delete.extend(e.id for e in cluster if e is not keeper)
 
     if not to_delete:
         return {"status": "ok", "healed": 0}

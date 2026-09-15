@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from core import mdblist as mdblist_client
 from core.enrichment import enrich_media, is_unmapped_tvdb_episode, create_media_safely
 from core.rewatch import record_rewatch_progress
+from core.watch_dedup import get_dedup_window_minutes
 from db import engine, get_db
 from dependencies import get_current_user
 from models.base import CollectionSource, MediaType
@@ -454,6 +455,10 @@ async def _import_watched(
         existing[media_id].append(watched_at)
     changed: set[int] = set()
 
+    # The user's configured duplicate-watch window (#390) only ever widens
+    # this beyond its tuned default, never narrows it - see WATCH_DEDUP_WINDOW.
+    dedup_window = max(WATCH_DEDUP_WINDOW, timedelta(minutes=await get_dedup_window_minutes(db, user_id)))
+
     # MDBList's /sync/watched "shows" entries are rollup wrappers (a show's
     # own last_watched_at just mirrors its most recently watched episode) —
     # they carry no per-episode data of their own. Importing them as watch
@@ -469,7 +474,7 @@ async def _import_watched(
                         continue
                     watched_at = _utc_naive(entry.get("watched_at") or entry.get("last_watched_at"))
                     if any(
-                        existing_at is not None and abs(watched_at - existing_at) <= WATCH_DEDUP_WINDOW
+                        existing_at is not None and abs(watched_at - existing_at) <= dedup_window
                         for existing_at in existing.get(media.id, [])
                     ):
                         stats["skipped"] += 1
