@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 import httpx
@@ -18,7 +19,19 @@ async def _get(url: str, token: str, params: Optional[Dict] = None) -> Dict:
         }
         res = await client.get(url, headers=headers, params=params)
         res.raise_for_status()
-        return res.json()
+        try:
+            return res.json()
+        except UnicodeDecodeError:
+            # Some Plex Media Server setups emit a genuinely non-UTF-8 byte
+            # somewhere in a scraped field (title/summary/etc, likely a
+            # mis-transcoded legacy agent result) despite claiming a JSON
+            # response - one bad byte anywhere in the payload used to fail
+            # decoding of the *entire* response, taking the whole request
+            # (e.g. an entire page of watch history) down with it (#388).
+            # Decode leniently instead: a mangled character in that one field
+            # beats losing every item the response actually carried.
+            logger.warning("Plex response from %s was not valid UTF-8 - decoding leniently", url)
+            return json.loads(res.content.decode("utf-8", errors="replace"))
 
 def get_guids(item: Dict) -> List[Dict]:
     """Return a normalised Guid list for a Plex item.
@@ -283,10 +296,15 @@ async def get_history(url: str, token: str, since: Optional[datetime] = None) ->
             start += len(batch)
             if not batch or start >= total:
                 break
-        return items
     except Exception:
-        logger.warning("Could not fetch Plex play history from %s", url)
-        return []
+        # Whatever pages already succeeded are still worth keeping - losing
+        # every prior page over one later failure (#388) meant a single bad
+        # page silently discarded an entire account's watch history instead
+        # of importing everything up to that point. The next sync's full
+        # re-scan (see _backfill_plex_watch_history) still dedupes safely
+        # against whatever this run did manage to save.
+        logger.warning("Could not fetch all Plex play history from %s (got %d item(s) before failing)", url, len(items))
+    return items
 
 
 async def get_account_id(url: str, token: str, username: str) -> Optional[int]:

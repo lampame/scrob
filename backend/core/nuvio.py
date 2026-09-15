@@ -10,6 +10,14 @@ DEFAULT_URL = "https://api.nuvio.tv"
 DEFAULT_APP_ANON_KEY = "sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN"
 _PAGE_SIZE = 500
 
+# _rpc retries a transient network/timeout failure this many times (so up to
+# 1 + _RPC_MAX_RETRIES attempts total) before giving up, with a short delay
+# between each - Nuvio's cloud API occasionally times out under load (#389),
+# and previously that turned into an immediate, hard sync-job failure.
+_RPC_MAX_RETRIES = 2
+_RPC_RETRY_DELAYS = (0.5, 1.5)
+_RPC_RETRYABLE_EXCEPTIONS = (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError)
+
 
 class NuvioAPIError(RuntimeError):
     pass
@@ -149,11 +157,29 @@ async def _rpc(
     function_name: str,
     payload: dict[str, Any] | None = None,
 ) -> Any:
-    response = await client.post(
-        f"{_base_url(url)}/rest/v1/rpc/{function_name}",
-        headers=_auth_headers(access_token),
-        json=payload,
-    )
+    """POST to one Supabase RPC function, retrying a transient network/
+    timeout failure a couple of times before giving up (#389).
+
+    Only retries when no response came back at all - an actual response
+    (checked by _raise_api_error below) is definitive and never retried,
+    since these RPC calls include writes (sync_push_*) that must not be
+    blindly resent once the server has actually answered. Safe to retry the
+    request itself: unlike sign_in/refresh_session's single-use refresh
+    token, this endpoint has no such one-shot state to lose on a resend.
+    """
+    for attempt in range(_RPC_MAX_RETRIES + 1):
+        try:
+            response = await client.post(
+                f"{_base_url(url)}/rest/v1/rpc/{function_name}",
+                headers=_auth_headers(access_token),
+                json=payload,
+            )
+            break
+        except _RPC_RETRYABLE_EXCEPTIONS as exc:
+            if attempt == _RPC_MAX_RETRIES:
+                raise
+            print(f"  Nuvio RPC {function_name} failed ({exc.__class__.__name__}), retrying ({attempt + 1}/{_RPC_MAX_RETRIES})...")
+            await asyncio.sleep(_RPC_RETRY_DELAYS[attempt])
     await _raise_api_error(response, function_name)
     if response.status_code == 204 or not response.content:
         return None

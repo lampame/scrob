@@ -885,11 +885,13 @@ const adminCount = users.filter((u: AdminUser) => u.is_admin).length;
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
-  // Floating toast, top-right, kept below the nav (mirrors settings.astro).
+  // Floating toast, top-right, kept below the nav (mirrors settings.astro) -
+  // floored by the iOS safe-area inset (notch/status bar), not just a flat
+  // 16px, or it renders underneath it once the nav is out of view (#402).
   function positionMessage(msg: HTMLElement) {
     const nav = document.querySelector('nav');
     const navBottom = nav ? nav.getBoundingClientRect().bottom : 0;
-    msg.style.top = `${Math.max(16, navBottom + 12)}px`;
+    msg.style.top = `max(16px, calc(env(safe-area-inset-top, 0px) + 8px), ${navBottom + 12}px)`;
   }
 
   function showMessage(text: string, type: 'success' | 'error' = 'success') {
