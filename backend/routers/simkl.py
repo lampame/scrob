@@ -284,7 +284,7 @@ def _simkl_rating_value(item: dict) -> float | None:
 # ── Background sync job ───────────────────────────────────────────────────────
 
 async def run_simkl_sync(user_id: int, job_id: int) -> None:
-    from routers.sync import SyncCancelled, _raise_if_cancelled
+    from routers.sync import SyncCancelled, _raise_if_cancelled, _short_error
     print(f"Starting Simkl sync for user {user_id}, job {job_id}")
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
@@ -594,7 +594,7 @@ async def run_simkl_sync(user_id: int, job_id: int) -> None:
             print(f"Simkl sync job {job_id} failed: {exc}")
             await db.execute(
                 update(SyncJob).where(SyncJob.id == job_id).values(
-                    status=SyncStatus.failed, error_message=str(exc)
+                    status=SyncStatus.failed, error_message=_short_error(exc)
                 )
             )
             await db.commit()
@@ -634,7 +634,7 @@ async def sync_simkl(
 # ── Push (Scrob → Simkl) ──────────────────────────────────────────────────────
 
 async def _run_simkl_push(user_id: int, job_id: int) -> None:
-    from routers.sync import SyncCancelled, _raise_if_cancelled, _select_in_chunks
+    from routers.sync import SyncCancelled, _raise_if_cancelled, _select_in_chunks, _short_error
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
         try:
@@ -860,7 +860,7 @@ async def _run_simkl_push(user_id: int, job_id: int) -> None:
 
         except Exception as exc:
             print(f"Simkl push job {job_id} failed: {exc}")
-            await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.failed, error_message=str(exc)))
+            await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.failed, error_message=_short_error(exc)))
             await db.commit()
 
 

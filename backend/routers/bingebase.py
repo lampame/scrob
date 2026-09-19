@@ -19,7 +19,7 @@ router = APIRouter()
 async def run_bingebase_push(user_id: int, job_id: int) -> None:
     """Push all historical watched events from Scrob DB to Bingebase Webhook URL."""
     from db import AsyncSessionLocal
-    from routers.sync import SyncCancelled, _raise_if_cancelled
+    from routers.sync import SyncCancelled, _raise_if_cancelled, _short_error
     from routers.webhooks import _maybe_bingebase_scrobble
 
     processed_so_far = 0
@@ -91,7 +91,7 @@ async def run_bingebase_push(user_id: int, job_id: int) -> None:
             await db.execute(
                 update(SyncJob).where(SyncJob.id == job_id).values(
                     status=SyncStatus.failed,
-                    error_message=str(exc),
+                    error_message=_short_error(exc),
                 )
             )
             await db.commit()

@@ -111,6 +111,24 @@ BATCH_SIZE = 500
 TMDB_CONCURRENCY = 5  # Max concurrent TMDB requests
 # asyncpg hard limit is 32767 parameters per query; stay well under it
 _MAX_IN_PARAMS = 30_000
+
+# sync_jobs.error_message is varchar(1000).
+_MAX_ERROR_MESSAGE = 1000
+
+
+def _short_error(exc: BaseException | str) -> str:
+    """Fit a failure into sync_jobs.error_message so recording it cannot itself fail.
+
+    An over-long value makes the UPDATE that marks the job failed raise
+    StringDataRightTruncationError, which leaves the row in 'running' forever - the job
+    shows in the UI as a sync that started and then hung, with no error to explain it.
+    asyncpg's parameter-limit error is the one that triggers this in practice: its
+    message embeds the entire bind list, so it runs to tens of kilobytes.
+    """
+    text = str(exc)
+    if len(text) <= _MAX_ERROR_MESSAGE:
+        return text
+    return text[: _MAX_ERROR_MESSAGE - 1] + "\u2026"
 _MEDIA_BROWSER_ITEM_SOURCES = (
     CollectionSource.jellyfin,
     CollectionSource.emby,
