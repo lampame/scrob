@@ -78,3 +78,6 @@ test.http
 vuln.md
 vuln.env
 test.py
+
+# --- Planning files ---
+docs/tvdb-first-class-plan.md
