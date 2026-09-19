@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 MDBLIST_BASE = "https://api.mdblist.com"
 PAGE_SIZE = 1000
@@ -16,9 +20,32 @@ PAGE_SIZE = 1000
 # intend it to be (see #176).
 PUSH_BATCH_SIZE = 200
 
+# MDBList answers both of its throttles with 429, distinguished only by the body.
+# "API rate limit exceeded!" is the short-window throttle and clears on its own, so it
+# is worth waiting out; "Daily API limit exceeded!" does not clear until the quota
+# resets, so retrying it just burns the rest of the job against a wall.
+_RATE_LIMIT_RETRIES = 4
+_RATE_LIMIT_BACKOFF = 2.0
+_DAILY_LIMIT_MARKER = "daily api limit"
+
 
 class MDBListAPIError(RuntimeError):
     """Raised when MDBList rejects or cannot complete a request."""
+
+
+class MDBListDailyLimitError(MDBListAPIError):
+    """Raised when MDBList's daily quota is spent - not retryable within the run."""
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Seconds to wait from a Retry-After header, when MDBList sends a usable one."""
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None
 
 
 async def _request(
@@ -32,25 +59,41 @@ async def _request(
 ) -> dict[str, Any]:
     query = dict(params or {})
     query["apikey"] = api_key
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.request(
-                method,
-                f"{MDBLIST_BASE}{path}",
-                params=query,
-                json=payload,
-            )
-        if ignore_statuses and response.status_code in ignore_statuses:
-            return {}
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        detail = exc.response.text.strip()[:500]
-        suffix = f": {detail}" if detail else ""
-        raise MDBListAPIError(
-            f"MDBList {method} {path} failed ({exc.response.status_code}){suffix}"
-        ) from exc
-    except httpx.HTTPError as exc:
-        raise MDBListAPIError(f"MDBList {method} {path} failed: {exc}") from exc
+    for attempt in range(_RATE_LIMIT_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.request(
+                    method,
+                    f"{MDBLIST_BASE}{path}",
+                    params=query,
+                    json=payload,
+                )
+            if ignore_statuses and response.status_code in ignore_statuses:
+                return {}
+            if response.status_code == 429:
+                body = response.text.strip()
+                if _DAILY_LIMIT_MARKER in body.lower():
+                    raise MDBListDailyLimitError(
+                        f"MDBList {method} {path} failed (429): {body[:500]}"
+                    )
+                if attempt < _RATE_LIMIT_RETRIES:
+                    delay = _retry_after(response) or _RATE_LIMIT_BACKOFF * (2**attempt)
+                    logger.info(
+                        "MDBList rate-limited on %s %s; waiting %.1fs (attempt %d/%d)",
+                        method, path, delay, attempt + 1, _RATE_LIMIT_RETRIES,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text.strip()[:500]
+            suffix = f": {detail}" if detail else ""
+            raise MDBListAPIError(
+                f"MDBList {method} {path} failed ({exc.response.status_code}){suffix}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise MDBListAPIError(f"MDBList {method} {path} failed: {exc}") from exc
+        break
 
     if response.status_code == 204 or not response.content:
         return {}
