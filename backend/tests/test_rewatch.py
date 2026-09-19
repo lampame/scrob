@@ -1,6 +1,6 @@
 import os
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -70,6 +70,79 @@ class CappedSeasonEpisodeCountsTests(unittest.TestCase):
     def test_no_tmdb_data_gives_zero_total(self):
         show = SimpleNamespace(tmdb_data=None)
         self.assertEqual(total_aired_episodes(show), 0)
+
+    def test_excludes_a_whole_season_with_a_future_premiere(self):
+        # #385: Silo's next season airs next July - no last_episode_to_air on
+        # a TVDB-sourced show, so the future season must be dropped by its date.
+        show = SimpleNamespace(tmdb_data={
+            "seasons": [
+                {"season_number": 1, "episode_count": 10, "air_date": "2023-05-05"},
+                {"season_number": 2, "episode_count": 10, "air_date": "2024-11-15"},
+                {"season_number": 3, "episode_count": 10, "air_date": "2026-01-01"},
+                {"season_number": 4, "episode_count": 10, "air_date": "2027-07-01"},
+            ],
+        })
+        counts = capped_season_episode_counts(show, today=date(2026, 9, 9))
+        self.assertEqual(counts[3], 10)
+        self.assertEqual(counts[4], 0)
+
+    def test_ignores_last_episode_to_air_that_has_not_aired_yet(self):
+        show = SimpleNamespace(tmdb_data={
+            "seasons": [{"season_number": 1, "episode_count": 10}],
+            "last_episode_to_air": {
+                "season_number": 1, "episode_number": 6, "air_date": "2026-09-20",
+            },
+        })
+        counts = capped_season_episode_counts(show, today=date(2026, 9, 9))
+        self.assertEqual(counts[1], 5)
+
+    def test_next_episode_to_air_caps_the_current_season(self):
+        show = SimpleNamespace(tmdb_data={
+            "seasons": [
+                {"season_number": 1, "episode_count": 10},
+                {"season_number": 2, "episode_count": 10},
+            ],
+            "next_episode_to_air": {"season_number": 2, "episode_number": 5},
+        })
+        counts = capped_season_episode_counts(show, today=date(2026, 9, 9))
+        self.assertEqual(counts[1], 10)
+        self.assertEqual(counts[2], 4)
+
+    def test_excludes_an_unscheduled_placeholder_season_on_a_still_airing_show(self):
+        # #385 follow-up: a still-airing show (status="Returning Series")
+        # with neither last_episode_to_air nor next_episode_to_air set (both
+        # already-aired seasons are fully accounted for, nothing new is
+        # scheduled yet) can still have a placeholder next season on TMDB -
+        # a nonzero episode_count with NO air_date at all, not a future one.
+        # Reproduces the live TMDB shape for "One Piece" (tmdb_id 111110)
+        # from the issue: season 3 pre-created with episode_count=1 and no
+        # air_date while the show waits between seasons.
+        show = SimpleNamespace(
+            status="Returning Series",
+            tmdb_data={
+                "seasons": [
+                    {"season_number": 1, "episode_count": 8, "air_date": "2023-08-31"},
+                    {"season_number": 2, "episode_count": 8, "air_date": "2026-03-10"},
+                    {"season_number": 3, "episode_count": 1},
+                ],
+            },
+        )
+        counts = capped_season_episode_counts(show, today=date(2026, 9, 13))
+        self.assertEqual(counts[1], 8)
+        self.assertEqual(counts[2], 8)
+        self.assertEqual(counts[3], 0)
+
+    def test_missing_air_date_still_assumed_fine_once_a_show_has_ended(self):
+        # A concluded show has nothing left to announce - a season with no
+        # air_date recorded there is an ordinary metadata gap, not a sign of
+        # unaired content, so the stricter #385-follow-up check must not
+        # apply to it.
+        show = SimpleNamespace(
+            status="Ended",
+            tmdb_data={"seasons": [{"season_number": 1, "episode_count": 10}]},
+        )
+        counts = capped_season_episode_counts(show, today=date(2026, 9, 9))
+        self.assertEqual(counts[1], 10)
 
 
 class _Result:
