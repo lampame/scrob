@@ -634,7 +634,7 @@ async def sync_simkl(
 # ── Push (Scrob → Simkl) ──────────────────────────────────────────────────────
 
 async def _run_simkl_push(user_id: int, job_id: int) -> None:
-    from routers.sync import SyncCancelled, _raise_if_cancelled
+    from routers.sync import SyncCancelled, _raise_if_cancelled, _select_in_chunks
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
         try:
@@ -684,14 +684,22 @@ async def _run_simkl_push(user_id: int, job_id: int) -> None:
             await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(total_items=len(all_media_ids)))
             await db.commit()
 
-            media_result = await db.execute(select(Media).where(Media.id.in_(all_media_ids)))
-            media_by_id: dict[int, Media] = {m.id: m for m in media_result.scalars().all()}
+            media_rows = await _select_in_chunks(
+                db,
+                lambda chunk: select(Media).where(Media.id.in_(chunk)),
+                list(all_media_ids),
+            )
+            media_by_id: dict[int, Media] = {m.id: m for m in media_rows}
 
             show_ids = {m.show_id for m in media_by_id.values() if m.show_id}
             shows_by_id: dict[int, Show] = {}
             if show_ids:
-                shows_result = await db.execute(select(Show).where(Show.id.in_(show_ids)))
-                shows_by_id = {s.id: s for s in shows_result.scalars().all()}
+                show_rows = await _select_in_chunks(
+                    db,
+                    lambda chunk: select(Show).where(Show.id.in_(chunk)),
+                    list(show_ids),
+                )
+                shows_by_id = {s.id: s for s in show_rows}
 
             movie_candidates: list[tuple[int, datetime]] = []
             episode_candidates: list[tuple[int, int, int, datetime]] = []
@@ -730,13 +738,16 @@ async def _run_simkl_push(user_id: int, job_id: int) -> None:
                 # can have local watch history even when the user chose not to push
                 # watched history to Simkl this run.
                 rating_media_ids = list(ratings_map.keys())
-                watch_check_result = await db.execute(
-                    select(WatchEvent.media_id).where(
-                        WatchEvent.user_id == user_id,
-                        WatchEvent.media_id.in_(rating_media_ids),
-                    ).distinct()
+                media_ids_with_watch_event = set(
+                    await _select_in_chunks(
+                        db,
+                        lambda chunk: select(WatchEvent.media_id).where(
+                            WatchEvent.user_id == user_id,
+                            WatchEvent.media_id.in_(chunk),
+                        ).distinct(),
+                        rating_media_ids,
+                    )
                 )
-                media_ids_with_watch_event = {row[0] for row in watch_check_result.all()}
 
                 rated_show_tmdb_ids = {
                     media_by_id[mid].tmdb_id
@@ -745,14 +756,17 @@ async def _run_simkl_push(user_id: int, job_id: int) -> None:
                 }
                 shows_with_watched_episode: set[int] = set()
                 if rated_show_tmdb_ids:
-                    watched_show_result = await db.execute(
-                        select(Show.tmdb_id)
-                        .join(Media, Media.show_id == Show.id)
-                        .join(WatchEvent, WatchEvent.media_id == Media.id)
-                        .where(WatchEvent.user_id == user_id, Show.tmdb_id.in_(rated_show_tmdb_ids))
-                        .distinct()
+                    shows_with_watched_episode = set(
+                        await _select_in_chunks(
+                            db,
+                            lambda chunk: select(Show.tmdb_id)
+                            .join(Media, Media.show_id == Show.id)
+                            .join(WatchEvent, WatchEvent.media_id == Media.id)
+                            .where(WatchEvent.user_id == user_id, Show.tmdb_id.in_(chunk))
+                            .distinct(),
+                            list(rated_show_tmdb_ids),
+                        )
                     )
-                    shows_with_watched_episode = {row[0] for row in watched_show_result.all()}
 
                 for mid, rating in ratings_map.items():
                     media = media_by_id.get(mid)
