@@ -1088,6 +1088,109 @@ class SyncItemsPartialWatchFanOutTests(_PartialWatchDB):
         self.assertEqual(new_watched_ids, {event.media_id})
 
 
+class SyncItemsPushBackTests(_PartialWatchDB):
+    """#420: a title marked watched in Scrob before it was collected shows up
+    on the server unwatched - sync_items hands it back for a push there."""
+
+    async def _sync_movie(self, *, watched_in_scrob: bool, user_data: dict, file_known: bool = False) -> tuple[dict, int]:
+        from models.collection import Collection, CollectionFile, CollectionSource
+        from models.events import WatchEvent
+        from models.media import Media, MediaType
+
+        async with self.Session() as db:
+            media = Media(tmdb_id=603, media_type=MediaType.movie, title="The Matrix")
+            db.add(media)
+            await db.flush()
+            if watched_in_scrob:
+                db.add(WatchEvent(
+                    user_id=1, media_id=media.id, completed=True, play_count=1,
+                    watched_at=datetime(2024, 5, 1, 12, 0, 0),
+                ))
+            if file_known:
+                coll = Collection(user_id=1, media_id=media.id)
+                db.add(coll)
+                await db.flush()
+                db.add(CollectionFile(
+                    collection_id=coll.id, connection_id=7,
+                    source=CollectionSource.jellyfin, source_id="jf-1",
+                ))
+            await db.commit()
+
+            push_back: dict[int, str] = {}
+            await sync.sync_items(
+                items=[{
+                    "Id": "jf-1", "Name": "The Matrix",
+                    "ProviderIds": {"Tmdb": "603"}, "UserData": user_data,
+                }],
+                media_type=MediaType.movie,
+                source=CollectionSource.jellyfin,
+                db=db,
+                stats={"movies": 0, "episodes": 0, "skipped": 0, "errors": 0},
+                user_id=1,
+                connection_id=7,
+                push_back=push_back,
+            )
+            return push_back, media.id
+
+    async def test_newly_collected_watched_item_is_handed_back(self):
+        push_back, media_id = await self._sync_movie(watched_in_scrob=True, user_data={"Played": False})
+        self.assertEqual(push_back, {media_id: "jf-1"})
+
+    async def test_already_watched_on_the_server_is_not(self):
+        push_back, _ = await self._sync_movie(
+            watched_in_scrob=True,
+            user_data={"Played": True, "PlayCount": 1, "LastPlayedDate": "2026-01-02T20:00:00.000Z"},
+        )
+        self.assertEqual(push_back, {})
+
+    async def test_unwatched_in_scrob_is_not(self):
+        push_back, _ = await self._sync_movie(watched_in_scrob=False, user_data={"Played": False})
+        self.assertEqual(push_back, {})
+
+    async def test_an_already_collected_file_is_not(self):
+        push_back, _ = await self._sync_movie(
+            watched_in_scrob=True, user_data={"Played": False}, file_known=True,
+        )
+        self.assertEqual(push_back, {})
+
+
+class PushWatchedBackToSourceTests(_PartialWatchDB):
+    def _conn(self, type_="jellyfin", push_watched=True):
+        return SimpleNamespace(
+            type=type_, push_watched=push_watched, url="http://srv", token="t", server_user_id="u1",
+        )
+
+    async def _run(self, conn, push_back):
+        with (
+            patch.object(sync, "_latest_watched_at", AsyncMock(return_value={1: datetime(2024, 5, 1, 12, 0, 0)})),
+            patch("core.jellyfin.mark_watched", AsyncMock(return_value=True)) as mark,
+            patch.object(sync, "_push_plex_watched_and_record", AsyncMock(return_value=True)) as plex_push,
+        ):
+            count = await sync._push_watched_back_to_source(None, 1, conn, push_back)
+        return count, mark, plex_push
+
+    async def test_jellyfin_gets_the_original_date(self):
+        count, mark, _ = await self._run(self._conn(), {1: "jf-1"})
+        self.assertEqual(count, 1)
+        self.assertEqual(mark.await_args.kwargs["played_at"], datetime(2024, 5, 1, 12, 0, 0))
+
+    async def test_plex_goes_through_the_pending_push_recorder(self):
+        count, _, plex_push = await self._run(self._conn("plex"), {1: "rk-1"})
+        self.assertEqual(count, 1)
+        plex_push.assert_awaited_once()
+
+    async def test_push_watched_off_pushes_nothing(self):
+        count, mark, plex_push = await self._run(self._conn(push_watched=False), {1: "jf-1"})
+        self.assertEqual(count, 0)
+        mark.assert_not_awaited()
+        plex_push.assert_not_awaited()
+
+    async def test_multi_episode_file_is_pushed_once(self):
+        count, mark, _ = await self._run(self._conn(), {1: "jf-1", 2: "jf-1"})
+        self.assertEqual(count, 1)
+        mark.assert_awaited_once()
+
+
 class FullPushPartialWatchTests(_PartialWatchDB):
     """Same bug on the manual push path, which read every WatchEvent as
     watched regardless of completed."""

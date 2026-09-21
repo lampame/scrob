@@ -1372,8 +1372,9 @@ async def _handle_jellyfin_webhook(request: Request, db: AsyncSession, api_key: 
                     allow_collection = library_id in selected_ids if library_id else True
 
             if allow_collection:
+                created_file = False
                 for m in media_list:
-                    await _ensure_collection_entry(
+                    created_file |= await _ensure_collection_entry(
                         db, user.id, m.id, CollectionSource.jellyfin, data["jellyfin_id"], data.get("quality"),
                         connection_id=conn.id if conn else None,
                     )
@@ -1382,6 +1383,8 @@ async def _handle_jellyfin_webhook(request: Request, db: AsyncSession, api_key: 
                 # without this, the insert is silently rolled back when the
                 # request's session closes (see #129 followup).
                 await db.commit()
+                if created_file and notification_type == "ItemAdded":
+                    await _push_watched_for_new_item(db, user.id, conn, data["jellyfin_id"], media_list)
 
     # See #129 — the counterpart to ItemAdded above: a title removed from the
     # Jellyfin library should leave the user's collection too, rather than
@@ -1634,13 +1637,16 @@ async def _handle_emby_webhook(request: Request, db: AsyncSession, api_key: str,
                     allow_collection = library_id in selected_ids if library_id else True
 
             if allow_collection:
+                created_file = False
                 for m in media_list:
-                    await _ensure_collection_entry(
+                    created_file |= await _ensure_collection_entry(
                         db, user.id, m.id, CollectionSource.emby, data["jellyfin_id"], data.get("quality"),
                         connection_id=conn.id if conn else None,
                     )
                 # See the matching comment in _handle_jellyfin_webhook (#129).
                 await db.commit()
+                if created_file and notification_type in ("ItemAdded", "library.new"):
+                    await _push_watched_for_new_item(db, user.id, conn, data["jellyfin_id"], media_list)
 
     # See the matching comment in _handle_jellyfin_webhook (#129). "library.deleted"
     # is Emby's dotted-lowercase equivalent of "ItemDeleted" (confirmed live, #295).
@@ -2085,8 +2091,11 @@ async def _ensure_collection_entry(
     source_id: str,
     quality: dict = None,
     connection_id: int | None = None,
-) -> None:
-    """Ensures a Collection + CollectionFile entry exists for the user, creating or updating as needed."""
+) -> bool:
+    """Ensures a Collection + CollectionFile entry exists for the user, creating or updating as needed.
+
+    Returns True when this call created the CollectionFile (the item is new to
+    that source), False when it already existed."""
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     if not quality:
@@ -2120,6 +2129,13 @@ async def _ensure_collection_entry(
     collection_id = coll_result.scalar_one()
 
     # 2. Upsert the CollectionFile row (one per collection+source+source_id)
+    file_existed = (await db.execute(
+        select(CollectionFile.id).where(
+            CollectionFile.collection_id == collection_id,
+            CollectionFile.source == source,
+            CollectionFile.source_id == source_id,
+        )
+    )).first() is not None
     update_dict: dict = {}
     if connection_id is not None:          update_dict["connection_id"]       = connection_id
     if quality.get("resolution"):         update_dict["resolution"]         = quality["resolution"]
@@ -2153,6 +2169,59 @@ async def _ensure_collection_entry(
 
     await db.execute(file_stmt)
     await db.flush()
+    return not file_existed
+
+
+async def _push_watched_for_new_item(
+    db: AsyncSession,
+    user_id: int,
+    conn: MediaServerConnection | None,
+    source_id: str,
+    media_list: list[Media],
+) -> bool:
+    """A title just landed in ``conn``'s library (library.new / ItemAdded) that
+    Scrob already has finished watches of - marked watched before it was
+    collected (#420) - so mark it watched on that server too, instead of
+    leaving it unwatched until a full push. The server-side counterpart of the
+    same fix in the pull sync (see routers.sync._push_watched_back_to_source).
+
+    Gated on the connection's own push_watched flag. A multi-episode file
+    only qualifies when every episode in it is watched, since the server call
+    marks the whole file. Checks the server's own state first - marking an
+    already-watched item again mints a fresh dated play (#302). Jellyfin/Emby
+    get the original watch date; Plex can't be backdated.
+    """
+    if not conn or not conn.push_watched or conn.type not in ("plex", "jellyfin", "emby") or not media_list:
+        return False
+
+    from routers.sync import _latest_watched_at, _push_plex_watched_and_record
+
+    media_ids = [m.id for m in media_list]
+    watched_at_by_media = await _latest_watched_at(db, user_id, media_ids)
+    if len(watched_at_by_media) != len(set(media_ids)):
+        return False
+
+    if conn.type == "plex":
+        import core.plex as plex_client
+        item = await plex_client.get_item(conn.url, conn.token, source_id)
+        if item is None or int(item.get("viewCount") or 0) > 0:
+            return False
+        return await _push_plex_watched_and_record(conn, source_id, user_id, media_ids[0])
+
+    from core import emby as emby_client
+    from core import jellyfin as jellyfin_client
+    client = emby_client if conn.type == "emby" else jellyfin_client
+    item = await client.get_item(conn.url, conn.token, source_id, user_id=conn.server_user_id)
+    if item is None or (item.get("UserData") or {}).get("Played"):
+        return False
+    dates = [d for d in watched_at_by_media.values() if d is not None]
+    # Registered before the call so the server's echo can't beat it (#247/#251).
+    for media_id in media_ids:
+        mark_pushed_watched(user_id, media_id)
+    return await client.mark_watched(
+        conn.url, conn.token, conn.server_user_id, source_id,
+        played_at=max(dates) if dates else None,
+    )
 
 
 async def _remove_collection_entry(
@@ -2803,6 +2872,7 @@ async def _handle_plex_webhook(request: Request, db: AsyncSession, api_key: str,
                 elif str(payload_key) not in recent_keys:
                     recent_items = []
 
+            new_plex_items: list[tuple[str, Media]] = []
             if recent_items:
                 for plex_item in recent_items:
                     item_guids = plex_client.get_guids(plex_item)
@@ -2842,11 +2912,13 @@ async def _handle_plex_webhook(request: Request, db: AsyncSession, api_key: str,
                             item_data, db, api_key=tmdb_key, conn=conn, user_id=user.id
                         )
                         if item_media:
-                            await _ensure_collection_entry(
+                            created_file = await _ensure_collection_entry(
                                 db, user.id, item_media.id, CollectionSource.plex,
                                 item_rating_key, item_quality,
                                 connection_id=conn.id if conn else None,
                             )
+                            if created_file:
+                                new_plex_items.append((item_rating_key, item_media))
                     except Exception as e:
                         print(f"  library.new batch: failed to process item {item_rating_key}: {e}")
             else:
@@ -2857,11 +2929,18 @@ async def _handle_plex_webhook(request: Request, db: AsyncSession, api_key: str,
                     if item:
                         quality = plex_client.extract_quality(item.get("Media", []))
                 if media:
-                    await _ensure_collection_entry(
+                    created_file = await _ensure_collection_entry(
                         db, user.id, media.id, CollectionSource.plex, data["plex_rating_key"], quality,
                         connection_id=conn.id if conn else None,
                     )
+                    if created_file:
+                        new_plex_items.append((data["plex_rating_key"], media))
             await db.commit()
+            for rating_key, new_media in new_plex_items:
+                try:
+                    await _push_watched_for_new_item(db, user.id, conn, rating_key, [new_media])
+                except Exception as e:
+                    print(f"  library.new: watched push-back failed for {rating_key}: {e}")
 
     elif event == "library.update":
         if not conn or conn.sync_collection:

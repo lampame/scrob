@@ -1872,6 +1872,7 @@ async def sync_items(
     connection_id: int | None = None,
     ratingkey_to_media_id: dict[str, int] | None = None,  # accumulated across calls; mutated in-place
     seen_source_ids: set[str] | None = None,  # accumulated across calls; every source_id encountered this run, used to prune deletions afterward
+    push_back: dict[int, str] | None = None,  # accumulated across calls; media_id → source_id of newly collected items Scrob has watched but the server reports unwatched (#420)
 ) -> list[dict]:  # returns warnings
     items = _expand_multi_episode_items(items, media_type, source)
     print(f"  Syncing {len(items)} {media_type.value}s from {source.value}...")
@@ -2053,6 +2054,7 @@ async def sync_items(
                 file_entry = existing_files.get((source_id, episode_num))
                 media_id_for_watch: int | None = None
                 heal_collection_id: int | None = None
+                new_file_media_id: int | None = None
                 show_id: int | None = None  # (re)assigned below for episodes; stays None for movies
 
                 # Detect re-match: same Plex ratingKey but TMDB ID changed.
@@ -2335,6 +2337,7 @@ async def sync_items(
                                 subtitle_languages=quality.get("subtitle_languages"),
                             ))
                             heal_collection_id = coll_id
+                            new_file_media_id = media.id
                         media_id_for_watch = media.id
 
                 if ratingkey_to_media_id is not None and media_id_for_watch is not None:
@@ -2387,6 +2390,18 @@ async def sync_items(
                             # (#253) marks it fully watched on the other side.
                             if new_watched_ids is not None and watch_state["completed"]:
                                 new_watched_ids.add(media_id_for_watch)
+
+                    # A file that just appeared on this server for something Scrob
+                    # already has a finished watch of (marked watched before it was
+                    # collected) - the server has no idea, so hand it back to the
+                    # caller to push there (#420).
+                    if (
+                        push_back is not None
+                        and new_file_media_id == media_id_for_watch
+                        and not watch_state["completed"]
+                        and media_id_for_watch in existing_completed
+                    ):
+                        push_back[media_id_for_watch] = source_id
 
                     if sync_ratings and watch_state["user_rating"] is not None:
                         existing_r = existing_ratings.get(media_id_for_watch)
@@ -2537,6 +2552,7 @@ async def _run_jellyfin_sync(user_id: int, job_id: int, movie_limit: int, show_l
             _new_watched: set[int] = set()
             _new_ratings: RatingChanges = {}
             _new_collected: set[int] = set()
+            _push_back: dict[int, str] = {}
             _seen_collection_source_ids: set[str] = set()
 
             for lib in libraries:
@@ -2594,7 +2610,7 @@ async def _run_jellyfin_sync(user_id: int, job_id: int, movie_limit: int, show_l
 
                     w = await sync_items(items, MediaType.movie, CollectionSource.jellyfin, db, stats, user_id, job_id, api_key=tmdb_api_key,
                         sync_collection=conn.sync_collection, sync_watched=conn.sync_watched, sync_ratings=conn.sync_ratings,
-                        new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id,
+                        new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id, push_back=_push_back,
                         seen_source_ids=_seen_collection_source_ids)
                     all_warnings.extend(w)
 
@@ -2637,7 +2653,7 @@ async def _run_jellyfin_sync(user_id: int, job_id: int, movie_limit: int, show_l
                         db, stats, user_id, job_id, show_map,
                         api_key=tmdb_api_key, show_id_to_tmdb=show_id_to_tmdb,
                         sync_collection=conn.sync_collection, sync_watched=conn.sync_watched, sync_ratings=conn.sync_ratings,
-                        new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id,
+                        new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id, push_back=_push_back,
                         seen_source_ids=_seen_collection_source_ids,
                     )
                     all_warnings.extend(w)
@@ -2648,7 +2664,7 @@ async def _run_jellyfin_sync(user_id: int, job_id: int, movie_limit: int, show_l
                             db, stats, user_id, job_id, {},
                             api_key=tmdb_api_key, show_id_to_tmdb={},
                             sync_collection=conn.sync_collection, sync_watched=conn.sync_watched, sync_ratings=conn.sync_ratings,
-                            new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id,
+                            new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id, push_back=_push_back,
                             seen_source_ids=_seen_collection_source_ids,
                         )
                         all_warnings.extend(w)
@@ -2661,6 +2677,10 @@ async def _run_jellyfin_sync(user_id: int, job_id: int, movie_limit: int, show_l
                     stats["removed"] = len(removed_media_ids)
                     await db.commit()
                     print(f"Jellyfin sync job {job_id}: removed {len(removed_media_ids)} item(s) no longer in Jellyfin.")
+
+            pushed_back = await _push_watched_back_to_source(db, user_id, conn, _push_back)
+            if pushed_back:
+                print(f"Jellyfin sync job {job_id}: pushed watched state for {pushed_back} newly collected item(s).")
 
             print(f"Jellyfin sync job {job_id} completed. Stats: {stats}")
             # A pull only populates scrob's own data — it never automatically pushes to
@@ -2745,6 +2765,7 @@ async def _run_emby_sync(user_id: int, job_id: int, movie_limit: int, show_limit
             _new_watched: set[int] = set()
             _new_ratings: RatingChanges = {}
             _new_collected: set[int] = set()
+            _push_back: dict[int, str] = {}
             _seen_collection_source_ids: set[str] = set()
 
             for lib in libraries:
@@ -2802,7 +2823,7 @@ async def _run_emby_sync(user_id: int, job_id: int, movie_limit: int, show_limit
 
                     w = await sync_items(items, MediaType.movie, CollectionSource.emby, db, stats, user_id, job_id, api_key=tmdb_api_key,
                         sync_collection=conn.sync_collection, sync_watched=conn.sync_watched, sync_ratings=conn.sync_ratings,
-                        new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id,
+                        new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id, push_back=_push_back,
                         seen_source_ids=_seen_collection_source_ids)
                     all_warnings.extend(w)
 
@@ -2847,7 +2868,7 @@ async def _run_emby_sync(user_id: int, job_id: int, movie_limit: int, show_limit
                         db, stats, user_id, job_id, show_map,
                         api_key=tmdb_api_key, show_id_to_tmdb=show_id_to_tmdb,
                         sync_collection=conn.sync_collection, sync_watched=conn.sync_watched, sync_ratings=conn.sync_ratings,
-                        new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id,
+                        new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id, push_back=_push_back,
                         seen_source_ids=_seen_collection_source_ids,
                     )
                     all_warnings.extend(w)
@@ -2858,7 +2879,7 @@ async def _run_emby_sync(user_id: int, job_id: int, movie_limit: int, show_limit
                             db, stats, user_id, job_id, {},
                             api_key=tmdb_api_key, show_id_to_tmdb={},
                             sync_collection=conn.sync_collection, sync_watched=conn.sync_watched, sync_ratings=conn.sync_ratings,
-                            new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id,
+                            new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id, push_back=_push_back,
                             seen_source_ids=_seen_collection_source_ids,
                         )
                         all_warnings.extend(w)
@@ -2871,6 +2892,10 @@ async def _run_emby_sync(user_id: int, job_id: int, movie_limit: int, show_limit
                     stats["removed"] = len(removed_media_ids)
                     await db.commit()
                     print(f"Emby sync job {job_id}: removed {len(removed_media_ids)} item(s) no longer in Emby.")
+
+            pushed_back = await _push_watched_back_to_source(db, user_id, conn, _push_back)
+            if pushed_back:
+                print(f"Emby sync job {job_id}: pushed watched state for {pushed_back} newly collected item(s).")
 
             print(f"Emby sync job {job_id} completed. Stats: {stats}")
             # A pull only populates scrob's own data — it never automatically pushes to
@@ -3006,6 +3031,60 @@ async def _push_plex_watched_and_record(conn: MediaServerConnection, sid: str, u
     if ok:
         await _record_plex_pending_push(user_id, media_id)
     return ok
+
+
+async def _push_watched_back_to_source(
+    db: AsyncSession,
+    user_id: int,
+    conn: MediaServerConnection,
+    push_back: dict[int, str],
+) -> int:
+    """Push Scrob's existing watched state to ``conn`` for items that just
+    appeared in its library (#420): something marked watched in Scrob before it
+    was collected would otherwise stay unwatched on the server until a full push.
+
+    Gated on the connection's own push_watched flag, and unlike the rest of a
+    pull this is the one thing it pushes back - to the very server it just
+    read, and only for items that server had no watch state for. Jellyfin/Emby
+    get the original watch date; Plex's /:/scrobble has no timestamp parameter,
+    so it stamps its own receipt time (see PlexPendingPush). Returns how many
+    pushes succeeded.
+    """
+    if not push_back or not conn.push_watched or conn.type not in ("plex", "jellyfin", "emby"):
+        return 0
+
+    from routers.webhooks import mark_pushed_watched
+
+    # One push per server item - a multi-episode file maps several media rows to one source_id.
+    by_source_id: dict[str, int] = {}
+    for media_id, source_id in push_back.items():
+        by_source_id.setdefault(source_id, media_id)
+
+    watched_at_by_media = (
+        await _latest_watched_at(db, user_id, list(by_source_id.values()))
+        if conn.type != "plex"
+        else {}
+    )
+    sem = asyncio.Semaphore(20)
+
+    async def _push_one(source_id: str, media_id: int) -> bool:
+        async with sem:
+            try:
+                if conn.type == "plex":
+                    return await _push_plex_watched_and_record(conn, source_id, user_id, media_id)
+                # Registered before the call so the server's UserDataSaved echo
+                # can't beat it (#247/#251).
+                mark_pushed_watched(user_id, media_id)
+                push = jellyfin.mark_watched if conn.type == "jellyfin" else emby.mark_watched
+                return await push(
+                    conn.url, conn.token, conn.server_user_id, source_id,
+                    played_at=watched_at_by_media.get(media_id),
+                )
+            except Exception:
+                return False
+
+    results = await asyncio.gather(*[_push_one(sid, mid) for sid, mid in by_source_id.items()])
+    return sum(1 for ok in results if ok)
 
 
 # How long a webhook-created (provisional) WatchEvent's watched_at — this
@@ -3656,6 +3735,7 @@ async def _run_plex_sync(user_id: int, job_id: int, movie_limit: int, show_limit
             _new_watched: set[int] = set()
             _new_ratings: RatingChanges = {}
             _new_collected: set[int] = set()
+            _push_back: dict[int, str] = {}
             _seen_collection_source_ids: set[str] = set()
             # ratingKey -> media_id, accumulated across every movie/show library this
             # run so _backfill_plex_watch_history can resolve play history afterward —
@@ -3727,7 +3807,7 @@ async def _run_plex_sync(user_id: int, job_id: int, movie_limit: int, show_limit
 
                     w = await sync_items(items, MediaType.movie, CollectionSource.plex, db, stats, user_id, job_id, api_key=tmdb_api_key,
                         sync_collection=conn.sync_collection, sync_watched=plex_watched_state_is_reliable, sync_ratings=conn.sync_ratings,
-                        new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id,
+                        new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id, push_back=_push_back,
                         ratingkey_to_media_id=_plex_ratingkey_to_media, seen_source_ids=_seen_collection_source_ids)
                     all_warnings.extend(w)
 
@@ -3918,7 +3998,7 @@ async def _run_plex_sync(user_id: int, job_id: int, movie_limit: int, show_limit
                         db, stats, user_id, job_id, show_map,
                         api_key=tmdb_api_key, show_id_to_tmdb=show_id_to_tmdb,
                         sync_collection=conn.sync_collection, sync_watched=plex_watched_state_is_reliable, sync_ratings=conn.sync_ratings,
-                        new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id,
+                        new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id, push_back=_push_back,
                         ratingkey_to_media_id=_plex_ratingkey_to_media, seen_source_ids=_seen_collection_source_ids,
                     )
                     all_warnings.extend(w)
@@ -3929,7 +4009,7 @@ async def _run_plex_sync(user_id: int, job_id: int, movie_limit: int, show_limit
                             db, stats, user_id, job_id, {},
                             api_key=tmdb_api_key, show_id_to_tmdb={},
                             sync_collection=conn.sync_collection, sync_watched=plex_watched_state_is_reliable, sync_ratings=conn.sync_ratings,
-                            new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id,
+                            new_watched_ids=_new_watched, new_ratings=_new_ratings, new_collected_ids=_new_collected, connection_id=conn.id, push_back=_push_back,
                             ratingkey_to_media_id=_plex_ratingkey_to_media, seen_source_ids=_seen_collection_source_ids,
                         )
                         all_warnings.extend(w)
@@ -3952,6 +4032,12 @@ async def _run_plex_sync(user_id: int, job_id: int, movie_limit: int, show_limit
                         f"Plex sync job {job_id}: backfilled {new_events} historical play(s), "
                         f"reconciled {reconciled} webhook estimate(s) ({unmatched} unmatched)."
                     )
+
+            # After the history backfill above, so it never sees this push's echo
+            # in the same run - the pending-push record it leaves handles the next.
+            pushed_back = await _push_watched_back_to_source(db, user_id, conn, _push_back)
+            if pushed_back:
+                print(f"Plex sync job {job_id}: pushed watched state for {pushed_back} newly collected item(s).")
 
             if conn.sync_collection and did_library_scan and not movie_limit and not show_limit:
                 removed_media_ids = await _remove_stale_collection_files(

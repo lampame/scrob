@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
@@ -367,12 +368,21 @@ class _CollectionIdResult:
         return self._value
 
 
+class _FirstResult:
+    def __init__(self, row):
+        self._row = row
+
+    def first(self):
+        return self._row
+
+
 class _EnsureCollectionFakeDB:
     """Routes _ensure_collection_entry's queries by SQL text and captures the
     collection_files insert so tests can inspect its bound connection_id."""
 
-    def __init__(self, *, connection_exists: bool):
+    def __init__(self, *, connection_exists: bool, file_exists: bool = False):
         self._connection_exists = connection_exists
+        self._file_exists = file_exists
         self.collection_file_insert = None
 
     async def execute(self, stmt):
@@ -381,6 +391,8 @@ class _EnsureCollectionFakeDB:
             return _ScalarResult(1 if self._connection_exists else None)
         if sql.startswith("SELECT") and "FROM collections" in sql:
             return _CollectionIdResult(7)
+        if sql.startswith("SELECT") and "FROM collection_files" in sql:
+            return _FirstResult((1,) if self._file_exists else None)
         if "collection_files" in sql:
             self.collection_file_insert = stmt
         return _ScalarResult(None)
@@ -426,6 +438,96 @@ class EnsureCollectionEntryConnectionGuardTests(IsolatedAsyncioTestCase):
             source_id="521136", quality=None, connection_id=None,
         )
         self.assertIsNone(self._bound_connection_id(db.collection_file_insert))
+
+
+class EnsureCollectionEntryCreatedFlagTests(IsolatedAsyncioTestCase):
+    """#420: the return value tells library.new handlers whether the item is new to the source."""
+
+    async def _call(self, *, file_exists: bool) -> bool:
+        from models.base import CollectionSource
+        db = _EnsureCollectionFakeDB(connection_exists=True, file_exists=file_exists)
+        return await _ensure_collection_entry(
+            db, user_id=1, media_id=2, source=CollectionSource.plex,
+            source_id="521136", quality=None, connection_id=5,
+        )
+
+    async def test_new_file_returns_true(self):
+        self.assertTrue(await self._call(file_exists=False))
+
+    async def test_existing_file_returns_false(self):
+        self.assertFalse(await self._call(file_exists=True))
+
+
+class PushWatchedForNewItemTests(IsolatedAsyncioTestCase):
+    """#420: an item added to a server that Scrob already has watched gets pushed there."""
+
+    def _conn(self, type_="jellyfin", push_watched=True):
+        return SimpleNamespace(
+            type=type_, push_watched=push_watched, url="http://srv", token="t", server_user_id="u1",
+        )
+
+    async def _push(self, conn, *, watched, item, media_ids=(11,)):
+        from routers import sync as sync_router
+        media_list = [SimpleNamespace(id=i) for i in media_ids]
+        with (
+            patch.object(sync_router, "_latest_watched_at", AsyncMock(return_value=watched)),
+            patch("core.jellyfin.get_item", AsyncMock(return_value=item)) as get_item,
+            patch("core.jellyfin.mark_watched", AsyncMock(return_value=True)) as mark,
+            patch("core.plex.get_item", AsyncMock(return_value=item)),
+            patch.object(sync_router, "_push_plex_watched_and_record", AsyncMock(return_value=True)) as plex_push,
+        ):
+            result = await webhooks._push_watched_for_new_item(None, 1, conn, "sid", media_list)
+        return result, mark, plex_push
+
+    async def test_jellyfin_pushes_with_original_watch_date(self):
+        when = datetime(2024, 5, 1, 12, 0, 0)
+        result, mark, _ = await self._push(
+            self._conn(), watched={11: when}, item={"UserData": {"Played": False}},
+        )
+        self.assertTrue(result)
+        self.assertEqual(mark.await_args.kwargs["played_at"], when)
+
+    async def test_jellyfin_already_played_is_left_alone(self):
+        result, mark, _ = await self._push(
+            self._conn(), watched={11: None}, item={"UserData": {"Played": True}},
+        )
+        self.assertFalse(result)
+        mark.assert_not_awaited()
+
+    async def test_plex_already_viewed_is_left_alone(self):
+        result, _, plex_push = await self._push(
+            self._conn("plex"), watched={11: None}, item={"viewCount": 2},
+        )
+        self.assertFalse(result)
+        plex_push.assert_not_awaited()
+
+    async def test_plex_unviewed_is_pushed(self):
+        result, _, plex_push = await self._push(
+            self._conn("plex"), watched={11: None}, item={"viewCount": 0},
+        )
+        self.assertTrue(result)
+        plex_push.assert_awaited_once()
+
+    async def test_unwatched_in_scrob_is_not_pushed(self):
+        result, mark, _ = await self._push(
+            self._conn(), watched={}, item={"UserData": {"Played": False}},
+        )
+        self.assertFalse(result)
+        mark.assert_not_awaited()
+
+    async def test_multi_episode_file_needs_every_episode_watched(self):
+        result, mark, _ = await self._push(
+            self._conn(), watched={11: None}, item={"UserData": {"Played": False}}, media_ids=(11, 12),
+        )
+        self.assertFalse(result)
+        mark.assert_not_awaited()
+
+    async def test_push_watched_off_does_nothing(self):
+        result, mark, _ = await self._push(
+            self._conn(push_watched=False), watched={11: None}, item={"UserData": {"Played": False}},
+        )
+        self.assertFalse(result)
+        mark.assert_not_awaited()
 
 
 class ConsumeRecentlyPushedWatchedTests(unittest.TestCase):
