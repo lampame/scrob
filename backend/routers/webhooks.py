@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.orm.exc import StaleDataError
 
 from db import get_db
@@ -579,7 +579,7 @@ async def _close_session(db: AsyncSession, session_key: str) -> Optional[Playbac
     return session
 
 
-async def _commit_playback_session_update(db: AsyncSession) -> bool:
+async def _commit_playback_session_update(db: AsyncSession, *keep) -> bool:
     """Commits a pending PlaybackSession update, tolerating a concurrent
     PlaybackStop having already deleted that same row. Jellyfin/Emby send no
     dedup protection on webhook deliveries (unlike Plex), so an
@@ -587,12 +587,24 @@ async def _commit_playback_session_update(db: AsyncSession) -> bool:
     session_key and try to UPDATE a row that's already gone - SQLAlchemy
     surfaces that as a StaleDataError (0 rows matched) instead of a silent
     no-op, which otherwise crashes the whole request with a 500. Returns
-    False (after rolling back) if that happened, True on a normal commit."""
+    False (after rolling back) if that happened, True on a normal commit.
+
+    A rollback expires every ORM object in the session, and the callers go
+    on to read `settings`/`media` in the scrobble forwarders - a lazy-load
+    outside a greenlet, i.e. MissingGreenlet (#410). Pass those objects as
+    `keep` and they are reloaded here, while we can still await."""
     try:
         await db.commit()
         return True
     except StaleDataError:
         await db.rollback()
+        for obj in keep:
+            if obj is None:
+                continue
+            try:
+                await db.refresh(obj)
+            except InvalidRequestError:
+                pass  # row is gone too; nothing to reload
         return False
 
 
@@ -1390,7 +1402,7 @@ async def _handle_jellyfin_webhook(request: Request, db: AsyncSession, api_key: 
             session = await _get_or_open_session(db, session_key, "jellyfin", user.id, current_episode.id)
             session.media_id = current_episode.id
             session.state = "playing"
-            await _commit_playback_session_update(db)
+            await _commit_playback_session_update(db, settings, *media_list)
         await _maybe_trakt_scrobble(settings, media, "start", data["progress_percent"], db=db)
         await _maybe_mdblist_scrobble(settings, media, "start", data["progress_percent"], db=db)
         await _maybe_simkl_scrobble(settings, media, "start", data["progress_percent"], db=db)
@@ -1407,7 +1419,7 @@ async def _handle_jellyfin_webhook(request: Request, db: AsyncSession, api_key: 
             session.progress_percent = segment_pct
             session.progress_seconds = segment_seconds
             session.updated_at = datetime.utcnow()
-            await _commit_playback_session_update(db)
+            await _commit_playback_session_update(db, settings, *media_list)
         if data["is_paused"]:
             await _maybe_trakt_scrobble(settings, media, "pause", data["progress_percent"], db=db)
             await _maybe_mdblist_scrobble(settings, media, "pause", data["progress_percent"], db=db)
@@ -1644,7 +1656,7 @@ async def _handle_emby_webhook(request: Request, db: AsyncSession, api_key: str,
         if not conn or conn.sync_playback:
             session = await _get_or_open_session(db, session_key, "emby", user.id, media.id)
             session.state = "playing"
-            await _commit_playback_session_update(db)
+            await _commit_playback_session_update(db, settings, media)
         await _maybe_trakt_scrobble(settings, media, "start", data["progress_percent"], db=db)
         await _maybe_mdblist_scrobble(settings, media, "start", data["progress_percent"], db=db)
         await _maybe_simkl_scrobble(settings, media, "start", data["progress_percent"], db=db)
@@ -1657,7 +1669,7 @@ async def _handle_emby_webhook(request: Request, db: AsyncSession, api_key: str,
             session.progress_percent = data["progress_percent"]
             session.progress_seconds = data["progress_seconds"]
             session.updated_at = datetime.utcnow()
-            await _commit_playback_session_update(db)
+            await _commit_playback_session_update(db, settings, media)
         if data["is_paused"]:
             await _maybe_trakt_scrobble(settings, media, "pause", data["progress_percent"], db=db)
             await _maybe_mdblist_scrobble(settings, media, "pause", data["progress_percent"], db=db)
@@ -1816,7 +1828,7 @@ async def _handle_jellyfin_scrobble_webhook(
         if conn.sync_playback:
             session = await _get_or_open_session(db, session_key, source, user.id, media.id)
             session.state = "playing"
-            await _commit_playback_session_update(db)
+            await _commit_playback_session_update(db, settings, media)
         if not is_duplicate:
             await _maybe_trakt_scrobble(settings, media, "start", data["progress_percent"], db=db)
             await _maybe_mdblist_scrobble(settings, media, "start", data["progress_percent"], db=db)
@@ -1830,7 +1842,7 @@ async def _handle_jellyfin_scrobble_webhook(
             session.progress_percent = data["progress_percent"]
             session.progress_seconds = data["progress_seconds"]
             session.updated_at = datetime.utcnow()
-            await _commit_playback_session_update(db)
+            await _commit_playback_session_update(db, settings, media)
         if data["is_paused"] and not is_duplicate:
             await _maybe_trakt_scrobble(settings, media, "pause", data["progress_percent"], db=db)
             await _maybe_mdblist_scrobble(settings, media, "pause", data["progress_percent"], db=db)

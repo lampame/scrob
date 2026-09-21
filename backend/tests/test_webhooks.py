@@ -8,6 +8,7 @@ os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
 
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.orm.exc import StaleDataError
 
 from models.base import MediaType
@@ -1231,6 +1232,7 @@ class _FakeSessionCommitDB:
     def __init__(self, commit_side_effect=None):
         self._commit_side_effect = commit_side_effect
         self.rollback_called = False
+        self.refreshed = []
 
     async def commit(self):
         if self._commit_side_effect:
@@ -1238,6 +1240,11 @@ class _FakeSessionCommitDB:
 
     async def rollback(self):
         self.rollback_called = True
+
+    async def refresh(self, obj):
+        if isinstance(obj, Exception):
+            raise obj
+        self.refreshed.append(obj)
 
 
 class CommitPlaybackSessionUpdateTests(IsolatedAsyncioTestCase):
@@ -1260,6 +1267,26 @@ class CommitPlaybackSessionUpdateTests(IsolatedAsyncioTestCase):
         result = await _commit_playback_session_update(db)
         self.assertFalse(result)
         self.assertTrue(db.rollback_called)
+
+    async def test_kept_objects_are_reloaded_after_rollback(self):
+        # #410: the rollback expires settings/media, and the scrobble
+        # forwarders that run next would lazy-load them (MissingGreenlet).
+        db = _FakeSessionCommitDB(commit_side_effect=StaleDataError("0 were matched"))
+        settings, media = object(), object()
+        await _commit_playback_session_update(db, settings, None, media)
+        self.assertEqual(db.refreshed, [settings, media])
+
+    async def test_kept_objects_are_not_touched_on_normal_commit(self):
+        db = _FakeSessionCommitDB()
+        await _commit_playback_session_update(db, object())
+        self.assertEqual(db.refreshed, [])
+
+    async def test_kept_object_whose_row_is_gone_is_skipped(self):
+        db = _FakeSessionCommitDB(commit_side_effect=StaleDataError("0 were matched"))
+        gone, alive = InvalidRequestError("Could not refresh instance"), object()
+        result = await _commit_playback_session_update(db, gone, alive)
+        self.assertFalse(result)
+        self.assertEqual(db.refreshed, [alive])
 
     async def test_other_exceptions_still_propagate(self):
         db = _FakeSessionCommitDB(commit_side_effect=RuntimeError("unrelated failure"))
