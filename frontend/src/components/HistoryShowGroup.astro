@@ -9,6 +9,7 @@ import { tmdbImageUrl } from "../lib/api";
 import { ratingPosterUrl } from "../lib/posters";
 import { episodeHref } from "../lib/episodeHref";
 import { episodeCode } from "../lib/media-format";
+import { getViewerTimeZone } from "../lib/viewerTimeZone";
 
 interface Props {
   events: WatchEvent[];
@@ -21,9 +22,11 @@ const showTitle = first.show_title || first.title;
 const rawPoster = first.show_poster_path || first.poster_path;
 const posterPath = ratingPosterUrl(tmdbImageUrl(rawPoster, "w500"), first, Astro.locals.hasRpdbKey);
 
+const timeZone = getViewerTimeZone(Astro.cookies);
+
 function fmtTime(watchedAt: string | null): string | null {
   return watchedAt
-    ? new Date(watchedAt + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: !use24h })
+    ? new Date(watchedAt + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: !use24h, timeZone })
     : null;
 }
 

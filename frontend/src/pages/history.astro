@@ -4,6 +4,7 @@ import HistoryCard from "../components/HistoryCard.astro";
 import HistoryShowGroup from "../components/HistoryShowGroup.astro";
 import Pagination from "../components/Pagination.astro";
 import { api, type WatchEvent } from "../lib/api";
+import { getViewerTimeZone } from "../lib/viewerTimeZone";
 
 const { token } = Astro.locals;
 Astro.response.headers.set("Cache-Control", "no-store");
@@ -11,6 +12,7 @@ const page = Number(Astro.url.searchParams.get("page") || 1);
 const type = Astro.url.searchParams.get("type") || undefined;
 const q = Astro.url.searchParams.get("q") || "";
 const use24h = Astro.cookies.get("time_format_24h")?.value === "true";
+const timeZone = getViewerTimeZone(Astro.cookies);
 const condenseByShow = Astro.locals.settings?.condense_history_by_show === true;
 
 const history = await api.history.list({ page, page_size: 40, type, q: q || undefined }, token);
@@ -22,7 +24,8 @@ const groupedHistory = history.results.reduce<Record<string, WatchEvent[]>>((acc
         weekday: 'long',
         month: 'long',
         day: 'numeric',
-        year: 'numeric'
+        year: 'numeric',
+        timeZone,
       })
     : 'Date unknown';
 

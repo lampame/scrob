@@ -672,6 +672,14 @@ const bottomNavItem = (active: boolean) =>
     // Expose the server-side token for the card action script (httpOnly cookie is not JS-readable)
     window.__AUTH_TOKEN__ = __layoutAuthToken;
     window.__USE_24H__ = __use24h;
+    // Tell the SSR side the viewer's timezone so history times render in it,
+    // not the container's (#411). Applies from the next page load.
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tz && !document.cookie.split('; ').includes('viewer_tz=' + encodeURIComponent(tz))) {
+        document.cookie = 'viewer_tz=' + encodeURIComponent(tz) + '; path=/; SameSite=Lax; Max-Age=31536000';
+      }
+    } catch {}
     window.__IS_ADMIN__ = __isAdmin;
     window.__RADARR_CUSTOMIZE_ON_ADD__ = __radarrCustomizeOnAdd;
     window.__SONARR_CUSTOMIZE_ON_ADD__ = __sonarrCustomizeOnAdd;
