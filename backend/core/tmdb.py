@@ -523,6 +523,26 @@ async def get_movie_videos(tmdb_id: int, api_key: str = None) -> dict:
     return await _get(f"{TMDB_BASE}/movie/{tmdb_id}/videos", headers=get_headers(api_key))
 
 
+async def get_videos(kind: str, tmdb_id: int, api_key: str = None, language: str | None = None) -> dict:
+    """Videos for a movie ("movie") or show ("tv"). With `language`, TMDB returns
+    only videos tagged with that language - no English fallback."""
+    params = {"language": language} if language else None
+    return await _get(f"{TMDB_BASE}/{kind}/{tmdb_id}/videos", headers=get_headers(api_key), params=params)
+
+
+def pick_trailer(videos: list[dict], language: str | None = None) -> dict | None:
+    """Best YouTube trailer: official first, then any. With `language` (e.g.
+    "pt-BR"), only videos tagged with that language qualify, so a localized
+    request never quietly returns the English trailer (#413)."""
+    lang = language.split("-")[0].lower() if language else None
+    trailers = [
+        v for v in videos
+        if v.get("site") == "YouTube" and v.get("type") == "Trailer" and v.get("key")
+        and (not lang or (v.get("iso_639_1") or "").lower() == lang)
+    ]
+    return next((v for v in trailers if v.get("official")), trailers[0] if trailers else None)
+
+
 async def find_by_external_id(external_id: str, source: str, api_key: str = None) -> dict:
     """Find a movie or TV show by an external ID (imdb_id, tvdb_id, etc.)."""
     return await _get(f"{TMDB_BASE}/find/{external_id}", headers=get_headers(api_key), params={"external_source": source})

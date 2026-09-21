@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 MDBLIST_BASE = "https://api.mdblist.com"
 PAGE_SIZE = 1000
@@ -16,9 +20,41 @@ PAGE_SIZE = 1000
 # intend it to be (see #176).
 PUSH_BATCH_SIZE = 200
 
+# MDBList answers both of its throttles with 429, distinguished only by the body.
+# "API rate limit exceeded!" is the short-window throttle and clears on its own, so it
+# is worth waiting out; "Daily API limit exceeded!" does not clear until the quota
+# resets, so retrying it just burns the rest of the job against a wall.
+_RATE_LIMIT_RETRIES = 4
+_RATE_LIMIT_BACKOFF = 2.0
+# A server-sent Retry-After is honoured only up to this many seconds, so a large
+# value can't park a sync job for minutes per request.
+_RATE_LIMIT_MAX_WAIT = 30.0
+# Live scrobbles are sent from inside a webhook request, which holds a DB
+# connection while it waits (see #412 for what that does to the pool) - and a
+# scrobble that arrives late is stale anyway. So they get one short retry, not
+# the full backoff.
+_SCROBBLE_RETRIES = 1
+_SCROBBLE_MAX_WAIT = 3.0
+_DAILY_LIMIT_MARKER = "daily api limit"
+
 
 class MDBListAPIError(RuntimeError):
     """Raised when MDBList rejects or cannot complete a request."""
+
+
+class MDBListDailyLimitError(MDBListAPIError):
+    """Raised when MDBList's daily quota is spent - not retryable within the run."""
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Seconds to wait from a Retry-After header, when MDBList sends a usable one."""
+    raw = response.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None
 
 
 async def _request(
@@ -29,28 +65,46 @@ async def _request(
     params: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
     ignore_statuses: set[int] | None = None,
+    rate_limit_retries: int = _RATE_LIMIT_RETRIES,
+    max_wait: float = _RATE_LIMIT_MAX_WAIT,
 ) -> dict[str, Any]:
     query = dict(params or {})
     query["apikey"] = api_key
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.request(
-                method,
-                f"{MDBLIST_BASE}{path}",
-                params=query,
-                json=payload,
-            )
-        if ignore_statuses and response.status_code in ignore_statuses:
-            return {}
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        detail = exc.response.text.strip()[:500]
-        suffix = f": {detail}" if detail else ""
-        raise MDBListAPIError(
-            f"MDBList {method} {path} failed ({exc.response.status_code}){suffix}"
-        ) from exc
-    except httpx.HTTPError as exc:
-        raise MDBListAPIError(f"MDBList {method} {path} failed: {exc}") from exc
+    for attempt in range(rate_limit_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.request(
+                    method,
+                    f"{MDBLIST_BASE}{path}",
+                    params=query,
+                    json=payload,
+                )
+            if ignore_statuses and response.status_code in ignore_statuses:
+                return {}
+            if response.status_code == 429:
+                body = response.text.strip()
+                if _DAILY_LIMIT_MARKER in body.lower():
+                    raise MDBListDailyLimitError(
+                        f"MDBList {method} {path} failed (429): {body[:500]}"
+                    )
+                if attempt < rate_limit_retries:
+                    delay = min(max_wait, _retry_after(response) or _RATE_LIMIT_BACKOFF * (2**attempt))
+                    logger.info(
+                        "MDBList rate-limited on %s %s; waiting %.1fs (attempt %d/%d)",
+                        method, path, delay, attempt + 1, rate_limit_retries,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text.strip()[:500]
+            suffix = f": {detail}" if detail else ""
+            raise MDBListAPIError(
+                f"MDBList {method} {path} failed ({exc.response.status_code}){suffix}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise MDBListAPIError(f"MDBList {method} {path} failed: {exc}") from exc
+        break
 
     if response.status_code == 204 or not response.content:
         return {}
@@ -291,7 +345,10 @@ async def scrobble_movie(api_key: str, action: str, tmdb_id: int, progress: floa
     if progress is not None:
         body["progress"] = round(min(100.0, max(0.0, progress)), 1)
     ignore_statuses = {404} if action == "clear" else None
-    return await _request("POST", f"/scrobble/{action}", api_key, payload=body, ignore_statuses=ignore_statuses)
+    return await _request(
+        "POST", f"/scrobble/{action}", api_key, payload=body, ignore_statuses=ignore_statuses,
+        rate_limit_retries=_SCROBBLE_RETRIES, max_wait=_SCROBBLE_MAX_WAIT,
+    )
 
 
 async def scrobble_episode(
@@ -312,7 +369,10 @@ async def scrobble_episode(
     if progress is not None:
         body["progress"] = round(min(100.0, max(0.0, progress)), 1)
     ignore_statuses = {404} if action == "clear" else None
-    return await _request("POST", f"/scrobble/{action}", api_key, payload=body, ignore_statuses=ignore_statuses)
+    return await _request(
+        "POST", f"/scrobble/{action}", api_key, payload=body, ignore_statuses=ignore_statuses,
+        rate_limit_retries=_SCROBBLE_RETRIES, max_wait=_SCROBBLE_MAX_WAIT,
+    )
 
 
 async def push_ratings(
