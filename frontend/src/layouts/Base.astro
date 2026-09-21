@@ -17,7 +17,7 @@ if (user?.is_admin && token) {
     pendingRequestCount = data.pending;
   } catch {}
   try {
-    const settings = await api.auth.getSettings(token);
+    const settings = Astro.locals.settings ?? await api.auth.getSettings(token);
     radarrCustomizeOnAdd = settings.radarr_customize_on_add === true;
     sonarrCustomizeOnAdd = settings.sonarr_customize_on_add === true;
   } catch {}
@@ -106,11 +106,11 @@ const bottomNavItem = (active: boolean) =>
     // Poster/backdrop image fallback — registered here (head, inline) so the
     // capture-phase listener is active before any <img> tags are parsed and
     // start loading. Covers TMDB/TheTVDB images loaded directly and via the
-    // backend image proxy/cache.
+    // backend image / rating-poster proxy.
     (function () {
       var svgIcon = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.25"><rect width="20" height="20" x="2" y="2" rx="2.18" ry="2.18"/><line x1="7" x2="7" y1="2" y2="22"/><line x1="17" x2="17" y1="2" y2="22"/><line x1="2" x2="22" y1="7" y2="7"/><line x1="2" x2="22" y1="12" y2="12"/><line x1="2" x2="22" y1="17" y2="17"/></svg>';
       function applyFallback(img) {
-        if (!img.src.includes('image.tmdb.org') && !img.src.includes('artworks.thetvdb.com') && !img.src.includes('/api/proxy/media/image/')) return;
+        if (!img.src.includes('image.tmdb.org') && !img.src.includes('artworks.thetvdb.com') && !img.src.includes('/api/proxy/media/')) return;
         img.style.display = 'none';
         // Decorative images (alt="") — just hide, no placeholder needed
         if (!img.alt) return;
@@ -133,6 +133,40 @@ const bottomNavItem = (active: boolean) =>
         });
       });
     })();
+  </script>
+
+  <script define:vars={{ __hasRpdb: Astro.locals.hasRpdbKey === true }}>
+    // Whether this viewer has an RPDB key - a plain flag, never the key. The
+    // key stays server-side; rating posters go through /api/proxy/media/rating-poster.
+    window.__HAS_RPDB__ = __hasRpdb;
+
+    // Inline counterpart of lib/posters.ts, for define:vars scripts that can't import.
+    window.ratingPosterUrl = function (fallback, item, enabled) {
+      var fb = fallback ?? null;
+      if (!enabled || !fb || fb.indexOf('/api/proxy/media/image/') !== 0) return fb;
+      var type = item.type ?? item.media_type;
+      var isEpisode = type === 'episode';
+      if (type !== 'movie' && type !== 'series' && !isEpisode) return fb;
+      if (type === 'series' && item.season_number != null) return fb;
+      var tmdbId = isEpisode ? item.show_tmdb_id : item.tmdb_id;
+      var tvdbId = isEpisode ? item.show_tvdb_id : item.tvdb_id;
+      var mediaType = type === 'movie' ? 'movie' : 'series';
+      var provider;
+      var id;
+      if (Number.isInteger(tmdbId) && tmdbId > 0) {
+        provider = 'tmdb';
+        id = mediaType + '-' + tmdbId;
+      } else if (Number.isInteger(tvdbId) && tvdbId > 0) {
+        provider = 'tvdb';
+        id = mediaType + '-' + tvdbId;
+      } else if (!isEpisode && /^tt\d+$/.test(item.imdb_id || '')) {
+        provider = 'imdb';
+        id = item.imdb_id;
+      } else {
+        return fb;
+      }
+      return '/api/proxy/media/rating-poster/' + provider + '/' + id + '?fallback=' + encodeURIComponent(fb);
+    };
   </script>
 </head>
 <body class="bg-zinc-950 text-zinc-100 min-h-screen overflow-x-hidden">
@@ -220,6 +254,10 @@ const bottomNavItem = (active: boolean) =>
                   <a href={`/stats/${user.id}`} class="flex items-center gap-2.5 px-3 py-2 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 active:opacity-70 rounded-lg transition">
                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 opacity-70"><line x1="18" x2="18" y1="20" y2="10"/><line x1="12" x2="12" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/></svg>
                     Statistics
+                  </a>
+                  <a href="/progress" class="flex items-center gap-2.5 px-3 py-2 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 active:opacity-70 rounded-lg transition">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 opacity-70"><line x1="4" x2="20" y1="7" y2="7"/><line x1="4" x2="14" y1="12" y2="12"/><line x1="4" x2="9" y1="17" y2="17"/></svg>
+                    Progress
                   </a>
                   <a href="/dropped" class="flex items-center gap-2.5 px-3 py-2 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 active:opacity-70 rounded-lg transition">
                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 opacity-70"><circle cx="12" cy="12" r="10"/><line x1="8" x2="16" y1="12" y2="12"/></svg>
@@ -481,10 +519,11 @@ const bottomNavItem = (active: boolean) =>
           Mark as unwatched
         </button>
         <p id="watch-history-add-play-label" class="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Add a play</p>
-        <div class="flex gap-2">
-          <button id="watch-history-now-btn" class="flex-1 px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-blue-600 text-white">Just now</button>
-          <button id="watch-history-custom-btn" class="flex-1 px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-zinc-800 text-zinc-400 border border-zinc-700 hover:text-zinc-200">Custom</button>
-          <button id="watch-history-unknown-btn" class="flex-1 px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-zinc-800 text-zinc-400 border border-zinc-700 hover:text-zinc-200">Unknown</button>
+        <div class="grid grid-cols-2 gap-2">
+          <button id="watch-history-now-btn" class="px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-blue-600 text-white">Just now</button>
+          <button id="watch-history-airdate-btn" class="hidden px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-zinc-800 text-zinc-400 border border-zinc-700 hover:text-zinc-200">Air Date</button>
+          <button id="watch-history-custom-btn" class="px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-zinc-800 text-zinc-400 border border-zinc-700 hover:text-zinc-200">Custom</button>
+          <button id="watch-history-unknown-btn" class="px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-zinc-800 text-zinc-400 border border-zinc-700 hover:text-zinc-200">Unknown</button>
         </div>
         <input type="datetime-local" id="watch-history-date-input" class="hidden w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-xl text-sm text-zinc-200 focus:outline-none focus:border-green-500 [color-scheme:dark]" />
         <button id="watch-history-log-btn" class="w-full px-4 py-2.5 bg-green-600 hover:bg-green-500 text-white font-bold text-sm rounded-xl transition-all cursor-pointer active:scale-95">
@@ -659,15 +698,38 @@ const bottomNavItem = (active: boolean) =>
       return `/api/proxy/media/image/${size}${path.startsWith('/') ? path : '/' + path}`;
     }
 
-    function calcLivePct(progressSeconds, updatedAt, runtime, playing) {
-      if (!runtime || runtime <= 0) return 0;
+    // Live playhead position in seconds: the server's progress_seconds plus
+    // the wall-clock time elapsed since that reading, while playing.
+    function calcLiveSeconds(progressSeconds, updatedAt, runtime, playing) {
       const runtimeSeconds = runtime * 60;
+      if (!updatedAt) return Math.min(progressSeconds, runtimeSeconds);
       const dateStr = updatedAt.includes('Z') || updatedAt.includes('+') ? updatedAt : updatedAt + 'Z';
       const updatedMs = new Date(dateStr).getTime();
-      if (isNaN(updatedMs)) return 0;
+      if (isNaN(updatedMs)) return Math.min(progressSeconds, runtimeSeconds);
       const elapsed = playing ? (Date.now() - updatedMs) / 1000 : 0;
-      const current = Math.max(0, Math.min(progressSeconds + elapsed, runtimeSeconds));
-      return Math.min(100, (current / runtimeSeconds) * 100);
+      return Math.max(0, Math.min(progressSeconds + elapsed, runtimeSeconds));
+    }
+
+    function calcLivePct(progressSeconds, updatedAt, runtime, playing) {
+      if (!runtime || runtime <= 0) return 0;
+      const current = calcLiveSeconds(progressSeconds, updatedAt, runtime, playing);
+      return Math.min(100, (current / (runtime * 60)) * 100);
+    }
+
+    // "38 min left" / "1h 5m left" / "<1 min left"
+    function fmtRemaining(seconds) {
+      const mins = Math.round(seconds / 60);
+      if (mins < 1) return '<1 min left';
+      if (mins < 60) return mins + ' min left';
+      const h = Math.floor(mins / 60), m = mins % 60;
+      return (m ? h + 'h ' + m + 'm' : h + 'h') + ' left';
+    }
+
+    // Local end time in the viewer's own timezone - "ends 22:47".
+    function fmtEta(ms) {
+      return 'ends ' + new Date(ms).toLocaleTimeString([], {
+        hour: '2-digit', minute: '2-digit', hour12: !window.__USE_24H__,
+      });
     }
 
     function renderNowPlaying(sessions) {
@@ -676,18 +738,19 @@ const bottomNavItem = (active: boolean) =>
         const m = session.media;
         const isEpisode = m.type === 'episode';
         const title = isEpisode ? (m.show_title ?? m.title) : m.title;
+        const dispSeason = (m.show_episode_order && m.show_episode_order !== 'tmdb:aired' && m.display_season_number != null) ? m.display_season_number : m.season_number;
+        const dispEpisode = (m.show_episode_order && m.show_episode_order !== 'tmdb:aired' && m.display_episode_number != null) ? m.display_episode_number : m.episode_number;
         const subtitle = isEpisode
-          ? `S${String(m.season_number).padStart(2,'0')}E${String(m.episode_number).padStart(2,'0')} · ${m.title}`
+          ? `S${String(dispSeason).padStart(2,'0')}E${String(dispEpisode).padStart(2,'0')} · ${m.title}`
           : null;
-        // Local copy of lib/episodeHref's episode branch - this
-        // define:vars script can't import (see lib/episodeHref.ts's header
-        // comment for the full list of duplicate sites to keep in sync).
-        // #186: route to /show/tvdb/... using the translated position when
-        // the show is set to TVDB numbering, instead of guessing off
-        // tvdb_sourced alone (which only means "no TMDB counterpart").
+        // Local copy of lib/episodeHref's episode branch - this define:vars
+        // script can't import (see lib/episodeHref.ts's header comment for the
+        // full list of duplicate sites to keep in sync). #174: use the display
+        // position when the show is on a non-aired ordering.
+        const orderedEp = m.show_episode_order && m.show_episode_order !== 'tmdb:aired';
         const href = isEpisode
-          ? (!m.tvdb_sourced && m.show_episode_order === 'tvdb' && m.show_tvdb_id && m.tvdb_season_number != null && m.tvdb_episode_number != null
-              ? `/show/tvdb/${m.show_tvdb_id}/season/${m.tvdb_season_number}/${m.tvdb_episode_number}`
+          ? (!m.tvdb_sourced && orderedEp && m.show_tmdb_id && m.display_season_number != null && m.display_episode_number != null
+              ? `/show/${m.show_tmdb_id}/season/${m.display_season_number}/${m.display_episode_number}`
               : !m.tvdb_sourced && m.show_tmdb_id && m.season_number && m.episode_number
               ? `/show/${m.show_tmdb_id}/season/${m.season_number}/${m.episode_number}`
               : m.show_tvdb_id && m.season_number && m.episode_number
@@ -705,6 +768,17 @@ const bottomNavItem = (active: boolean) =>
         const pctDisplay = Math.floor(pct);
         const sessionKey = esc(session.session_key);
 
+        // #384 - time remaining and, while playing, the local end time.
+        const remainingSeconds = runtime > 0
+          ? runtime * 60 - calcLiveSeconds(progressSeconds, session.updated_at, runtime, !isPaused)
+          : null;
+        const remainingLine = remainingSeconds != null
+          ? `<span data-npremain="${sessionKey}" class="text-[10px] text-zinc-500 tabular-nums leading-tight">${esc(fmtRemaining(remainingSeconds))}</span>`
+          : '';
+        const etaLine = remainingSeconds != null && !isPaused
+          ? `<span data-npeta="${sessionKey}" class="text-[10px] text-zinc-500 tabular-nums leading-tight">${esc(fmtEta(Date.now() + remainingSeconds * 1000))}</span>`
+          : '';
+
         const statusLabel = isPaused ? 'Paused' : 'Now Playing';
         const dotColor = isPaused ? 'bg-yellow-400' : 'bg-green-400';
         const labelColor = isPaused ? 'text-yellow-400' : 'text-green-400';
@@ -714,7 +788,7 @@ const bottomNavItem = (active: boolean) =>
           : `<span class="relative shrink-0 flex w-2 h-2"><span class="animate-ping absolute inline-flex h-full w-full rounded-full ${dotColor} opacity-75"></span><span class="relative inline-flex rounded-full w-2 h-2 ${dotColor}"></span></span>`;
 
         const rawPoster = isEpisode ? (m.show_poster_path ?? m.poster_path) : m.poster_path;
-        const posterUrl = tmdbImageUrl(rawPoster, 'w185');
+        const posterUrl = window.ratingPosterUrl(tmdbImageUrl(rawPoster, 'w185'), m, window.__HAS_RPDB__);
 
         // #319 - movie-only mid/post-credits scene indicator. Movies never
         // use the subtitle line (that's episode-only), so it doubles as a
@@ -751,8 +825,15 @@ const bottomNavItem = (active: boolean) =>
                 ${subtitle ? `<p class="text-[10px] text-zinc-400 truncate leading-tight mt-0.5">${esc(subtitle)}</p>` : ''}
                 ${creditsLine}
               </div>
-              <span data-nppct="${sessionKey}" class="text-xs font-bold text-zinc-300 tabular-nums shrink-0">${esc(String(pctDisplay))}%</span>
+              <div class="flex flex-col items-end shrink-0 gap-0.5">
+                <span data-nppct="${sessionKey}" class="text-xs font-bold text-zinc-300 tabular-nums">${esc(String(pctDisplay))}%</span>
+                ${remainingLine}
+                ${etaLine}
+              </div>
             ${href ? '</a>' : '</div>'}
+            <button type="button" data-npdismiss="${sessionKey}" title="Remove from Now Playing" aria-label="Remove from Now Playing" class="absolute top-1 right-1 md:right-2 p-1.5 rounded-full text-zinc-600 hover:text-zinc-200 hover:bg-zinc-800/80 transition-colors z-10 cursor-pointer">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+            </button>
             <div class="absolute bottom-0 left-0 right-0" style="height:2px;background:rgba(0,0,0,0.12)">
               <div data-npbar="${sessionKey}"
                 data-ps="${progressSeconds}"
@@ -771,10 +852,17 @@ const bottomNavItem = (active: boolean) =>
         if (bar.dataset.playing !== '1') return;
         const rt = parseFloat(bar.dataset.rt);
         if (!rt || rt <= 0) return;
-        const pct = calcLivePct(parseFloat(bar.dataset.ps), bar.dataset.ua, rt, true);
+        const key = bar.dataset.npbar;
+        const ps = parseFloat(bar.dataset.ps);
+        const pct = calcLivePct(ps, bar.dataset.ua, rt, true);
         bar.style.width = pct + '%';
-        const pctEl = document.querySelector(`[data-nppct="${bar.dataset.npbar}"]`);
+        const pctEl = document.querySelector(`[data-nppct="${key}"]`);
         if (pctEl) pctEl.textContent = Math.floor(pct) + '%';
+        const remainingSeconds = rt * 60 - calcLiveSeconds(ps, bar.dataset.ua, rt, true);
+        const remainEl = document.querySelector(`[data-npremain="${key}"]`);
+        if (remainEl) remainEl.textContent = fmtRemaining(remainingSeconds);
+        const etaEl = document.querySelector(`[data-npeta="${key}"]`);
+        if (etaEl) etaEl.textContent = fmtEta(Date.now() + remainingSeconds * 1000);
       });
     }
 
@@ -807,9 +895,28 @@ const bottomNavItem = (active: boolean) =>
       } catch { /* ignore */ }
     }
 
+    // #382: per-item dismiss on the Now Playing bar, for a stray session a
+    // client never sent a stop event for (seen on Fire TV autoplay
+    // transitions) - clears just that one instead of forcing "Clear" to wipe
+    // every active session for the user.
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-npdismiss]');
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      btn.disabled = true;
+      try {
+        await fetch(`/api/proxy/history/session/${encodeURIComponent(btn.dataset.npdismiss)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${window.__AUTH_TOKEN__}` },
+        });
+      } catch { /* ignore, next poll reconciles either way */ }
+      pollNowPlaying();
+    });
+
     if (window.__AUTH_TOKEN__) {
       const isHome = () => window.location.pathname === '/';
-      
+
       const runPoll = () => {
         if (isHome()) pollNowPlaying();
       };
@@ -826,6 +933,12 @@ const bottomNavItem = (active: boolean) =>
     // ── Card action bar ────────────────────────────────────────────────────────
     const API = '/api/proxy';
     const TOKEN = () => (window as any).__AUTH_TOKEN__ ?? '';
+
+    // #174: an "aired" order needs no translation; any other key is forwarded to
+    // the season/show bulk endpoints so they map the display season to the real
+    // canonical episodes. Returns the key to send, or null.
+    const nonAiredOrder = (o: string | null | undefined): string | null =>
+      (o && o !== 'tmdb' && o !== 'tmdb:aired') ? o : null;
 
     function esc(s: unknown): string {
       if (s == null) return '';
@@ -972,6 +1085,8 @@ const bottomNavItem = (active: boolean) =>
       }
     }
 
+    // Local media id - the only handle a TVDB-only episode has (no tmdb_id).
+    let _ratingMediaId = '';
     function openRatingPopover(
       btn: HTMLElement | null,
       tmdbId: string,
@@ -980,8 +1095,10 @@ const bottomNavItem = (active: boolean) =>
       seasonNumber: number | null = null,
       episodeOrder: string = 'tmdb',
       itemInfo: { title?: string; subtitle?: string; posterUrl?: string; landscape?: boolean } | null = null,
+      mediaId: string = '',
     ) {
       _activeRatingBtn = btn;
+      _ratingMediaId = mediaId;
       const popover = document.getElementById('rating-popover')!;
       const starsEl = document.getElementById('rating-stars')!;
       const removeBtn = document.getElementById('rating-remove')!;
@@ -1032,9 +1149,11 @@ const bottomNavItem = (active: boolean) =>
         });
         half.addEventListener('click', async () => {
           try {
-            const ratingBody: Record<string, unknown> = { tmdb_id: Number(tmdbId), media_type: mediaType, rating: i };
+            const ratingBody: Record<string, unknown> = { media_type: mediaType, rating: i };
+            if (tmdbId) ratingBody.tmdb_id = Number(tmdbId);
+            if (_ratingMediaId) ratingBody.media_id = Number(_ratingMediaId);
             if (seasonNumber !== null) ratingBody.season_number = seasonNumber;
-            if (seasonNumber !== null && episodeOrder === 'tvdb') ratingBody.episode_order = 'tvdb';
+            if (seasonNumber !== null && nonAiredOrder(episodeOrder)) ratingBody.episode_order = episodeOrder;
             await apiFetch('/ratings', 'POST', ratingBody);
             if (btn) {
               btn.dataset.userRating = String(i);
@@ -1065,8 +1184,9 @@ const bottomNavItem = (active: boolean) =>
       removeBtn.onclick = async () => {
         try {
           const seasonQuery = seasonNumber !== null ? `&season_number=${seasonNumber}` : '';
-          const orderQuery = seasonNumber !== null && episodeOrder === 'tvdb' ? '&episode_order=tvdb' : '';
-          await apiFetch(`/ratings?tmdb_id=${tmdbId}&media_type=${mediaType}${seasonQuery}${orderQuery}`, 'DELETE');
+          const orderQuery = seasonNumber !== null && nonAiredOrder(episodeOrder) ? '&episode_order=' + encodeURIComponent(episodeOrder) : '';
+          const idQuery = tmdbId ? `tmdb_id=${tmdbId}` : `media_id=${_ratingMediaId}`;
+          await apiFetch(`/ratings?${idQuery}&media_type=${mediaType}${seasonQuery}${orderQuery}`, 'DELETE');
           if (btn) {
             btn.dataset.userRating = '';
             btn.dataset.state = 'inactive';
@@ -1113,7 +1233,9 @@ const bottomNavItem = (active: boolean) =>
       openRatingPopover(null, String(m.tmdb_id), m.type, null, null, 'tmdb', {
         title: isEpisode ? (m.show_title ?? m.title) : m.title,
         subtitle: isEpisode ? [sxe, m.title].filter(Boolean).join(' · ') : undefined,
-        posterUrl: ratingPosterUrl(m.poster_path),
+        posterUrl: isEpisode
+          ? ratingPosterUrl(m.poster_path)
+          : window.ratingPosterUrl(ratingPosterUrl(m.poster_path), m, window.__HAS_RPDB__) ?? undefined,
         landscape: isEpisode,
       });
     }
@@ -1144,6 +1266,8 @@ const bottomNavItem = (active: boolean) =>
     // ── List popover ───────────────────────────────────────────────────────────
     let _activeListBtn: HTMLElement | null = null;
     let _listTmdbId = '';
+    // Local media id - the only handle a TVDB-only episode has (no tmdb_id).
+    let _listMediaId = '';
     let _listMediaType = '';
     let _listSeasonNumber = '';
 
@@ -1152,9 +1276,10 @@ const bottomNavItem = (active: boolean) =>
       _activeListBtn = null;
     }
 
-    async function openListPopover(btn: HTMLElement, tmdbId: string, mediaType: string, seasonNumber = '') {
+    async function openListPopover(btn: HTMLElement, tmdbId: string, mediaType: string, seasonNumber = '', mediaId = '') {
       _activeListBtn = btn;
       _listTmdbId = tmdbId;
+      _listMediaId = mediaId;
       _listMediaType = mediaType;
       _listSeasonNumber = seasonNumber;
       const popover = document.getElementById('list-popover')!;
@@ -1193,14 +1318,19 @@ const bottomNavItem = (active: boolean) =>
             // dataset also has a season number for display purposes.
             const seasonNumber = _listMediaType === 'series' && _listSeasonNumber ? Number(_listSeasonNumber) : null;
             if (cb.checked) {
-              const body: Record<string, unknown> = { tmdb_id: Number(_listTmdbId), media_type: _listMediaType };
+              const body: Record<string, unknown> = { media_type: _listMediaType };
+              if (_listTmdbId) body.tmdb_id = Number(_listTmdbId);
+              if (_listMediaId) body.media_id = Number(_listMediaId);
               if (seasonNumber != null) body.season_number = seasonNumber;
               await apiFetch(`/lists/${listId}/items`, 'POST', body);
             } else {
               // Find the list_item id — need to fetch list detail
               const detail = await apiFetch(`/lists/${listId}`);
-              const item = detail.items?.find((i: { media: { tmdb_id: number; season_number: number | null } }) => {
-                if (i.media?.tmdb_id !== Number(_listTmdbId)) return false;
+              const item = detail.items?.find((i: { media: { id?: number; tmdb_id: number | null; season_number: number | null } }) => {
+                const sameItem = _listTmdbId
+                  ? i.media?.tmdb_id === Number(_listTmdbId)
+                  : !!_listMediaId && i.media?.id === Number(_listMediaId);
+                if (!sameItem) return false;
                 // Only a whole-season list entry (media_type=series) needs
                 // season_number to disambiguate one season from another on
                 // the same show. For everything else (movies, episodes,
@@ -1498,7 +1628,7 @@ const bottomNavItem = (active: boolean) =>
         // Re-open popover if we had an active card
         if (_activeListBtn) {
           const card = _activeListBtn.closest('[data-card]') as HTMLElement;
-          if (card) openListPopover(_activeListBtn, card.dataset.tmdbId!, card.dataset.mediaType!);
+          if (card) openListPopover(_activeListBtn, card.dataset.tmdbId || '', card.dataset.mediaType!, '', card.dataset.mediaId || card.dataset.id || '');
         }
       } catch { /* ignore */ }
     });
@@ -1628,12 +1758,18 @@ const bottomNavItem = (active: boolean) =>
 
     // ── Watch history modal ────────────────────────────────────────────────────
     let _watchHistoryTmdbId = '';
+    // Local media id - the only handle a TVDB-only episode has (no tmdb_id).
+    let _watchHistoryMediaId = '';
     let _watchHistoryMediaType = '';
-    let _watchHistoryDateMode: 'now' | 'custom' | 'unknown' = 'now';
+    let _watchHistoryDateMode: 'now' | 'airdate' | 'custom' | 'unknown' = 'now';
     let _watchHistoryShowTmdbId = '';
     let _watchHistoryShowTvdbId = '';
     let _watchHistorySeasonNumber = '';
     let _watchHistoryEpisodeNumber = '';
+    // The item's own air/release date (YYYY-MM-DD), if known - lets "Air Date"
+    // offer it as a one-click alternative to "Just now" (#395). Empty in bulk
+    // season/show mode, where no single date applies.
+    let _watchHistoryAirDate = '';
     // Set when the modal is being used to mark a whole season/show watched
     // (no single item's history applies) rather than logging one item's play.
     let _watchHistoryBulkMode: { kind: 'season' | 'show'; seriesId: string; season: string; episodeOrder: string; btn: HTMLElement; tvdbId: string } | null = null;
@@ -1652,27 +1788,37 @@ const bottomNavItem = (active: boolean) =>
     function resetWatchHistoryDateUI() {
       _watchHistoryDateMode = 'now';
       const nowBtn = document.getElementById('watch-history-now-btn')!;
+      const airDateBtn = document.getElementById('watch-history-airdate-btn')!;
       const customBtn = document.getElementById('watch-history-custom-btn')!;
       const unknownBtn = document.getElementById('watch-history-unknown-btn')!;
       const dateInput = document.getElementById('watch-history-date-input') as HTMLInputElement;
-      const activeClass = 'flex-1 px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-blue-600 text-white';
-      const inactiveClass = 'flex-1 px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-zinc-800 text-zinc-400 border border-zinc-700 hover:text-zinc-200';
+      const activeClass = 'px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-blue-600 text-white';
+      const inactiveClass = 'px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-zinc-800 text-zinc-400 border border-zinc-700 hover:text-zinc-200';
       nowBtn.className = activeClass;
       customBtn.className = inactiveClass;
       unknownBtn.className = inactiveClass;
+      // Air Date only makes sense for a single item with a known, already-
+      // aired date - hidden entirely in bulk season/show mode, or when the
+      // date isn't known or hasn't happened yet (#395).
+      const today = new Date().toISOString().slice(0, 10);
+      const airDateAvailable = !!_watchHistoryAirDate && _watchHistoryAirDate <= today;
+      airDateBtn.className = inactiveClass;
+      airDateBtn.classList.toggle('hidden', !airDateAvailable);
       dateInput.classList.add('hidden');
       dateInput.value = toLocal(new Date());
       dateInput.max = toLocal(new Date());
     }
 
-    async function openWatchHistoryModal(_btn: HTMLElement, tmdbId: string, mediaType: string, showTmdbId = '', seasonNumber = '', episodeNumber = '', showTvdbId = '') {
+    async function openWatchHistoryModal(_btn: HTMLElement, tmdbId: string, mediaType: string, showTmdbId = '', seasonNumber = '', episodeNumber = '', showTvdbId = '', mediaId = '', airDate = '') {
       _watchHistoryBulkMode = null;
       _watchHistoryTmdbId = tmdbId;
+      _watchHistoryMediaId = mediaId;
       _watchHistoryMediaType = mediaType;
       _watchHistoryShowTmdbId = showTmdbId;
       _watchHistoryShowTvdbId = showTvdbId;
       _watchHistorySeasonNumber = seasonNumber;
       _watchHistoryEpisodeNumber = episodeNumber;
+      _watchHistoryAirDate = airDate;
 
       document.getElementById('watch-history-modal-title')!.textContent = 'Watch History';
       document.getElementById('watch-history-modal-events')!.classList.remove('hidden');
@@ -1686,6 +1832,8 @@ const bottomNavItem = (active: boolean) =>
 
     function openBulkWatchModal(btn: HTMLElement, kind: 'season' | 'show', seriesId: string, season = '', episodeOrder = '', tvdbId = '') {
       _watchHistoryBulkMode = { kind, seriesId, season, episodeOrder, btn, tvdbId };
+      // No single date applies across a whole season/show - never offer it here.
+      _watchHistoryAirDate = '';
 
       document.getElementById('watch-history-modal-title')!.textContent = kind === 'season' ? 'Mark Season Watched' : 'Mark Show Watched';
       document.getElementById('watch-history-modal-events')!.classList.add('hidden');
@@ -1720,9 +1868,12 @@ const bottomNavItem = (active: boolean) =>
         });
       }
 
-      // If marking a season as watched/unwatched, update all episodes for that season on the page
+      // If marking a season as watched/unwatched, update all episodes for that season on the page.
+      // Under a non-aired order (#174) an episode card's `data-season` is the *canonical* season
+      // (what its tracking calls need) while `data-display-season` is what the user sees - match
+      // on the latter, since `season` here is the display season from the season control.
       if (mediaType === 'series' && season) {
-        const seasonAttribute = episodeOrder === 'tvdb' ? 'data-display-season' : 'data-season';
+        const seasonAttribute = nonAiredOrder(episodeOrder) ? 'data-display-season' : 'data-season';
         const allEpCards = document.querySelectorAll(`[data-card][data-media-type="episode"][data-show-tmdb-id="${seriesId}"][${seasonAttribute}="${season}"]`);
         allEpCards.forEach(c => {
           const eBtn = c.querySelector('[data-action="watched"]');
@@ -1737,11 +1888,13 @@ const bottomNavItem = (active: boolean) =>
       const unwatchBtn = document.getElementById('watch-history-unwatch-btn') as HTMLButtonElement;
       unwatchBtn.classList.add('hidden');
       try {
-        const seriesQuery = _watchHistoryMediaType === 'episode' && _watchHistoryShowTmdbId
-          ? `&series_tmdb_id=${_watchHistoryShowTmdbId}`
+        const seriesQuery = _watchHistoryMediaType === 'episode'
+          ? (_watchHistoryShowTmdbId ? `&series_tmdb_id=${_watchHistoryShowTmdbId}` : '')
+            + (_watchHistoryShowTvdbId ? `&series_tvdb_id=${_watchHistoryShowTvdbId}` : '')
           : '';
+        const itemIdQuery = _watchHistoryTmdbId ? `tmdb_id=${_watchHistoryTmdbId}` : `media_id=${_watchHistoryMediaId}`;
         const { watched, events }: { watched: boolean; events: Array<{ id: number; watched_at: string | null }> } = await apiFetch(
-          `/history/item-events?tmdb_id=${_watchHistoryTmdbId}&media_type=${_watchHistoryMediaType}${seriesQuery}`
+          `/history/item-events?${itemIdQuery}&media_type=${_watchHistoryMediaType}${seriesQuery}`
         );
         if (events.length === 0) {
           eventsEl.innerHTML = '<div class="px-4 py-3 text-sm text-zinc-500 italic">No plays recorded yet</div>';
@@ -1765,8 +1918,11 @@ const bottomNavItem = (active: boolean) =>
         const hasEvents = events.length > 0;
         unwatchBtn.classList.toggle('hidden', !hasEvents);
         document.getElementById('watch-history-log-btn')!.textContent = hasEvents ? 'Log a rewatch' : 'Mark as watched';
+        const cardSelector = _watchHistoryTmdbId
+          ? `[data-card][data-tmdb-id="${_watchHistoryTmdbId}"][data-media-type="${_watchHistoryMediaType}"]`
+          : `[data-card][data-media-id="${_watchHistoryMediaId}"][data-media-type="${_watchHistoryMediaType}"]`;
         document.querySelectorAll<HTMLElement>(
-          `[data-card][data-tmdb-id="${_watchHistoryTmdbId}"][data-media-type="${_watchHistoryMediaType}"] [data-action="watched"]`
+          `${cardSelector} [data-action="watched"]`
         ).forEach(b => updateWatchedButtonUI(b, watched));
       } catch {
         eventsEl.innerHTML = '<div class="px-4 py-2 text-xs text-red-400">Failed to load</div>';
@@ -1807,8 +1963,11 @@ const bottomNavItem = (active: boolean) =>
       unwatchBtn.disabled = true;
       unwatchBtn.textContent = 'Removing…';
       try {
+        const unwatchIdQuery = _watchHistoryTmdbId
+          ? `tmdb_id=${encodeURIComponent(_watchHistoryTmdbId)}`
+          : `id=${encodeURIComponent(_watchHistoryMediaId)}`;
         await apiFetch(
-          `/history/item?tmdb_id=${encodeURIComponent(_watchHistoryTmdbId)}&media_type=${encodeURIComponent(_watchHistoryMediaType)}`,
+          `/history/item?${unwatchIdQuery}&media_type=${encodeURIComponent(_watchHistoryMediaType)}`,
           'DELETE'
         );
         await loadWatchHistoryEvents();
@@ -1819,22 +1978,36 @@ const bottomNavItem = (active: boolean) =>
     });
 
     (() => {
-      const activeClass = 'flex-1 px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-blue-600 text-white';
-      const inactiveClass = 'flex-1 px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-zinc-800 text-zinc-400 border border-zinc-700 hover:text-zinc-200';
+      const activeClass = 'px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-blue-600 text-white';
+      const inactiveClass = 'px-3 py-2 rounded-xl text-sm font-bold transition-all cursor-pointer bg-zinc-800 text-zinc-400 border border-zinc-700 hover:text-zinc-200';
+      // Air Date's own "active"/"inactive" classes never touch its "hidden"
+      // state - that's set once, separately, by resetWatchHistoryDateUI based
+      // on whether an air date is actually available (#395).
+      const setDateModeButtons = (mode) => {
+        (document.getElementById('watch-history-now-btn') as HTMLElement).className = mode === 'now' ? activeClass : inactiveClass;
+        const airDateBtn = document.getElementById('watch-history-airdate-btn') as HTMLElement;
+        const airDateWasHidden = airDateBtn.classList.contains('hidden');
+        airDateBtn.className = mode === 'airdate' ? activeClass : inactiveClass;
+        airDateBtn.classList.toggle('hidden', airDateWasHidden);
+        (document.getElementById('watch-history-custom-btn') as HTMLElement).className = mode === 'custom' ? activeClass : inactiveClass;
+        (document.getElementById('watch-history-unknown-btn') as HTMLElement).className = mode === 'unknown' ? activeClass : inactiveClass;
+      };
 
       document.getElementById('watch-history-now-btn')!.addEventListener('click', () => {
         _watchHistoryDateMode = 'now';
-        (document.getElementById('watch-history-now-btn') as HTMLElement).className = activeClass;
-        (document.getElementById('watch-history-custom-btn') as HTMLElement).className = inactiveClass;
-        (document.getElementById('watch-history-unknown-btn') as HTMLElement).className = inactiveClass;
+        setDateModeButtons('now');
+        document.getElementById('watch-history-date-input')!.classList.add('hidden');
+      });
+
+      document.getElementById('watch-history-airdate-btn')!.addEventListener('click', () => {
+        _watchHistoryDateMode = 'airdate';
+        setDateModeButtons('airdate');
         document.getElementById('watch-history-date-input')!.classList.add('hidden');
       });
 
       document.getElementById('watch-history-custom-btn')!.addEventListener('click', () => {
         _watchHistoryDateMode = 'custom';
-        (document.getElementById('watch-history-now-btn') as HTMLElement).className = inactiveClass;
-        (document.getElementById('watch-history-custom-btn') as HTMLElement).className = activeClass;
-        (document.getElementById('watch-history-unknown-btn') as HTMLElement).className = inactiveClass;
+        setDateModeButtons('custom');
         const input = document.getElementById('watch-history-date-input') as HTMLInputElement;
         input.max = toLocal(new Date());
         input.classList.remove('hidden');
@@ -1843,9 +2016,7 @@ const bottomNavItem = (active: boolean) =>
 
       document.getElementById('watch-history-unknown-btn')!.addEventListener('click', () => {
         _watchHistoryDateMode = 'unknown';
-        (document.getElementById('watch-history-now-btn') as HTMLElement).className = inactiveClass;
-        (document.getElementById('watch-history-custom-btn') as HTMLElement).className = inactiveClass;
-        (document.getElementById('watch-history-unknown-btn') as HTMLElement).className = activeClass;
+        setDateModeButtons('unknown');
         document.getElementById('watch-history-date-input')!.classList.add('hidden');
       });
 
@@ -1855,7 +2026,12 @@ const bottomNavItem = (active: boolean) =>
           ? null
           : _watchHistoryDateMode === 'now'
             ? toUTC(new Date())
-            : toUTC(new Date(input.value || toLocal(new Date())));
+            : _watchHistoryDateMode === 'airdate'
+              // Date-only string (YYYY-MM-DD) - midday, not midnight, so this
+              // can never shift a day backward in a timezone east of UTC
+              // (see AGENTS.md's date-only string guidance).
+              ? toUTC(new Date(_watchHistoryAirDate + 'T12:00:00'))
+              : toUTC(new Date(input.value || toLocal(new Date())));
         const logBtn = document.getElementById('watch-history-log-btn') as HTMLButtonElement;
         const idleLabel = logBtn.textContent || 'Mark as watched';
         logBtn.disabled = true;
@@ -1870,7 +2046,7 @@ const bottomNavItem = (active: boolean) =>
                 season_number: Number(season),
                 watched_at: watchedAt,
               };
-              if (episodeOrder === 'tvdb') body.episode_order = 'tvdb';
+              if (nonAiredOrder(episodeOrder)) body.episode_order = episodeOrder;
               if (bulkTvdbId) body.series_tvdb_id = Number(bulkTvdbId);
               await apiFetch('/history/season', 'POST', body);
               cascadeWatchedUI(sourceBtn, 'series', seriesId, seriesId, season, episodeOrder, true);
@@ -1890,31 +2066,63 @@ const bottomNavItem = (active: boolean) =>
           return;
         }
 
-        try {
-          const watchBody: Record<string, unknown> = {
-            tmdb_id: Number(_watchHistoryTmdbId),
-            media_type: _watchHistoryMediaType,
-            completed: true,
-            watched_at: watchedAt,
-          };
-          if (_watchHistoryMediaType === 'episode' && _watchHistoryShowTmdbId) {
-            watchBody.series_tmdb_id = Number(_watchHistoryShowTmdbId);
-            if (_watchHistoryShowTvdbId) watchBody.series_tvdb_id = Number(_watchHistoryShowTvdbId);
-            if (_watchHistorySeasonNumber) watchBody.season_number = Number(_watchHistorySeasonNumber);
-            if (_watchHistoryEpisodeNumber) watchBody.episode_number = Number(_watchHistoryEpisodeNumber);
-          }
+        const watchBody: Record<string, unknown> = {
+          media_type: _watchHistoryMediaType,
+          completed: true,
+          watched_at: watchedAt,
+        };
+        if (_watchHistoryTmdbId) watchBody.tmdb_id = Number(_watchHistoryTmdbId);
+        if (_watchHistoryMediaId) watchBody.media_id = Number(_watchHistoryMediaId);
+        if (_watchHistoryMediaType === 'episode' && (_watchHistoryShowTmdbId || _watchHistoryShowTvdbId)) {
+          if (_watchHistoryShowTmdbId) watchBody.series_tmdb_id = Number(_watchHistoryShowTmdbId);
+          if (_watchHistoryShowTvdbId) watchBody.series_tvdb_id = Number(_watchHistoryShowTvdbId);
+          if (_watchHistorySeasonNumber) watchBody.season_number = Number(_watchHistorySeasonNumber);
+          if (_watchHistoryEpisodeNumber) watchBody.episode_number = Number(_watchHistoryEpisodeNumber);
+        }
+
+        const submitWatch = async () => {
           await apiFetch('/history', 'POST', watchBody);
           await loadWatchHistoryEvents();
           syncSeasonWatchPctFromDOM(_watchHistoryShowTmdbId, _watchHistorySeasonNumber);
           // Reset to "Just now" after logging
           _watchHistoryDateMode = 'now';
-          (document.getElementById('watch-history-now-btn') as HTMLElement).className = activeClass;
-          (document.getElementById('watch-history-custom-btn') as HTMLElement).className = inactiveClass;
-          (document.getElementById('watch-history-unknown-btn') as HTMLElement).className = inactiveClass;
+          setDateModeButtons('now');
           input.classList.add('hidden');
+        };
+
+        try {
+          await submitWatch();
         } catch (err) {
-          logBtn.textContent = idleLabel;
-          alertFromError(err, 'Failed to mark as watched');
+          // A 409 {detail: {error: "duplicate_watch", message, ...}} means this
+          // looks like a duplicate of an existing watch within the configured
+          // window (#390) - only the manual entry point gets to override that
+          // with a confirmation, everything else (webhooks, imports) just skips
+          // silently.
+          let duplicateDetail: any = null;
+          try {
+            const data = JSON.parse((err as Error).message);
+            if (data?.detail?.error === 'duplicate_watch') duplicateDetail = data.detail;
+          } catch {}
+
+          let forcedSuccess = false;
+          if (duplicateDetail) {
+            const proceed = await showConfirm(
+              'Possible duplicate',
+              duplicateDetail.message || 'This looks like a duplicate of an existing watch. Add anyway?',
+            );
+            if (proceed) {
+              try {
+                watchBody.force = true;
+                await submitWatch();
+                forcedSuccess = true;
+              } catch (err2) {
+                alertFromError(err2, 'Failed to mark as watched');
+              }
+            }
+          } else {
+            alertFromError(err, 'Failed to mark as watched');
+          }
+          if (!forcedSuccess) logBtn.textContent = idleLabel;
         }
         logBtn.disabled = false;
       });
@@ -1954,7 +2162,7 @@ const bottomNavItem = (active: boolean) =>
         const seriesId = showTmdbId || tmdbId;
 
         if (mediaType === 'movie' || mediaType === 'episode') {
-          await openWatchHistoryModal(btn, tmdbId, mediaType, card.dataset.showTmdbId || '', card.dataset.season || '', card.dataset.episodeNumber || '', card.dataset.showTvdbId || '');
+          await openWatchHistoryModal(btn, tmdbId, mediaType, card.dataset.showTmdbId || '', card.dataset.season || '', card.dataset.episodeNumber || '', card.dataset.showTvdbId || '', mediaId, card.dataset.airDate || '');
           return;
         }
 
@@ -1981,7 +2189,7 @@ const bottomNavItem = (active: boolean) =>
 
         try {
           if (mediaType === 'series' && season) {
-            const orderQuery = episodeOrder === 'tvdb' ? '&episode_order=tvdb' : '';
+            const orderQuery = nonAiredOrder(episodeOrder) ? '&episode_order=' + encodeURIComponent(episodeOrder) : '';
             await apiFetch(`/history/season?series_tmdb_id=${seriesId}&season_number=${season}${orderQuery}`, 'DELETE');
           } else if (mediaType === 'series') {
             await apiFetch(`/history/show-all?series_tmdb_id=${tmdbId}`, 'DELETE');
@@ -1993,9 +2201,9 @@ const bottomNavItem = (active: boolean) =>
         } catch { /* ignore */ }
 
       } else if (action === 'list') {
-        if (!tmdbId) { alert('Cannot add unmatched item to lists'); return; }
+        if (!tmdbId && !mediaId) { alert('Cannot add unmatched item to lists'); return; }
         if (document.getElementById('list-popover')!.classList.contains('hidden') || _activeListBtn !== btn) {
-          openListPopover(btn, tmdbId, mediaType, card.dataset.season || '');
+          openListPopover(btn, tmdbId, mediaType, card.dataset.season || '', mediaId);
         } else {
           closeListPopover();
         }
@@ -2020,14 +2228,14 @@ const bottomNavItem = (active: boolean) =>
             if (inLibrary) {
               const ok = await showConfirm('Remove season from collection?', 'This will remove all collection entries for this season.');
               if (!ok) return;
-              const orderQuery = episodeOrder === 'tvdb' ? '&episode_order=tvdb' : '';
+              const orderQuery = nonAiredOrder(episodeOrder) ? '&episode_order=' + encodeURIComponent(episodeOrder) : '';
               await apiFetch(`/media/collect-season?series_tmdb_id=${seriesId}&season_number=${season}${orderQuery}`, 'DELETE');
             } else {
               const collectSeasonBody: Record<string, number | string> = {
                 series_tmdb_id: Number(seriesId),
                 season_number: Number(season),
               };
-              if (episodeOrder === 'tvdb') collectSeasonBody.episode_order = 'tvdb';
+              if (nonAiredOrder(episodeOrder)) collectSeasonBody.episode_order = episodeOrder;
               await apiFetch('/media/collect-season', 'POST', collectSeasonBody);
             }
           } else {
@@ -2037,8 +2245,10 @@ const bottomNavItem = (active: boolean) =>
               const query = tmdbId ? `tmdb_id=${tmdbId}` : `id=${mediaId}`;
               await apiFetch(`/media/collect?${query}&media_type=${mediaType}`, 'DELETE');
             } else {
-              if (!tmdbId) { alert('Cannot manually collect unmatched items'); return; }
-              const collectBody: Record<string, number | string> = { tmdb_id: Number(tmdbId), media_type: mediaType };
+              if (!tmdbId && !mediaId) { alert('Cannot manually collect unmatched items'); return; }
+              const collectBody: Record<string, number | string> = { media_type: mediaType };
+              if (tmdbId) collectBody.tmdb_id = Number(tmdbId);
+              if (mediaId) collectBody.media_id = Number(mediaId);
               if (mediaType === 'episode') {
                 const epNum = card.dataset.episodeNumber;
                 if (showTmdbId) collectBody.series_tmdb_id = Number(showTmdbId);
@@ -2081,7 +2291,7 @@ const bottomNavItem = (active: boolean) =>
             }
           : null;
         if (document.getElementById('rating-popover')!.classList.contains('hidden') || _activeRatingBtn !== btn) {
-          openRatingPopover(btn, tmdbId, mediaType, currentRating, ratingSeason, episodeOrder, rateInfo);
+          openRatingPopover(btn, tmdbId, mediaType, currentRating, ratingSeason, episodeOrder, rateInfo, mediaId);
         } else {
           closeRatingPopover();
         }

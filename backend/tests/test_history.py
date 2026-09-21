@@ -10,7 +10,7 @@ os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/
 from fastapi import HTTPException
 
 from models.base import MediaType, CollectionSource
-from models.episode_order import EpisodeOrderMapping, UserShowEpisodeOrder
+from models.episode_order import EpisodeOrderMapping, UserShowEpisodeOrder, ShowEpisodePosition
 from models.events import WatchEvent
 from models.media import Media
 from models.playback_progress import PlaybackProgress
@@ -44,6 +44,11 @@ class _Result:
         return _Scalars(self.item)
 
     def scalar_one_or_none(self):
+        return self.item
+
+    def first(self):
+        if isinstance(self.item, list):
+            return self.item[0] if self.item else None
         return self.item
 
     def all(self):
@@ -80,7 +85,7 @@ class _FakeSession:
 class ManualEpisodeWatchTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.user = SimpleNamespace(id=7)
-        self.show = SimpleNamespace(id=55, tvdb_id=None)
+        self.show = SimpleNamespace(id=55, tmdb_id=277439, tvdb_id=None, canonical_source="tmdb")
         self.event = WatchEventCreate(
             tmdb_id=5767197,
             media_type=MediaType.episode,
@@ -113,7 +118,10 @@ class ManualEpisodeWatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_episode_creates_parent_show_before_media(self):
         # Trailing None: record_rewatch_progress's own Media lookup (no
         # active rewatch involved in this test, so it no-ops from there).
-        db = _FakeSession([None, None, None, None])
+        # Two extra Nones before the PlaybackProgress delete: the new
+        # duplicate-watch check (get_dedup_window_minutes + find_duplicate_
+        # watch_event, #390) - no configured window, no existing duplicate.
+        db = _FakeSession([None, None, None, None, None, None])
         patches, get_key, find_show, get_episode, enrich, push_state = self._patch_dependencies()
 
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
@@ -147,7 +155,9 @@ class ManualEpisodeWatchTests(unittest.IsolatedAsyncioTestCase):
             show_id=None,
             poster_path=None,
         )
-        db = _FakeSession([None, orphan, None, None])  # trailing None: record_rewatch_progress's Media lookup
+        # Trailing two Nones: the new duplicate-watch check (#390), then
+        # record_rewatch_progress's own Media lookup.
+        db = _FakeSession([None, orphan, None, None, None, None])
         patches, _, _, get_episode, enrich, _ = self._patch_dependencies()
 
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
@@ -178,7 +188,9 @@ class ManualEpisodeWatchTests(unittest.IsolatedAsyncioTestCase):
             season_number=2,
             episode_number=3,
         )
-        db = _FakeSession([mapped_media, None, None])  # trailing None: record_rewatch_progress's Media lookup
+        # Two extra Nones before the PlaybackProgress delete: the new
+        # duplicate-watch check (#390); trailing None: record_rewatch_progress's Media lookup
+        db = _FakeSession([mapped_media, None, None, None, None])
         patches, _, _, get_episode, enrich, push_state = self._patch_dependencies()
 
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
@@ -199,10 +211,12 @@ class ManualEpisodeWatchTests(unittest.IsolatedAsyncioTestCase):
 class UnknownWatchDateTests(unittest.IsolatedAsyncioTestCase):
     async def _mark(self, payload: dict):
         media = Media(id=10, tmdb_id=550, media_type=MediaType.movie, title="Fight Club")
-        # Three execute() calls: the media lookup, the PlaybackProgress delete,
-        # then record_rewatch_progress's own Media lookup (movies always no-op
-        # there, but the query still runs before that type check).
-        db = _FakeSession([media, None, None])
+        # Five execute() calls: the media lookup, the new duplicate-watch check
+        # (get_dedup_window_minutes + find_duplicate_watch_event, #390), the
+        # PlaybackProgress delete, then record_rewatch_progress's own Media
+        # lookup (movies always no-op there, but the query still runs before
+        # that type check).
+        db = _FakeSession([media, None, None, None, None])
         with patch("routers.history._push_watch_state", new_callable=AsyncMock) as push:
             response = await history.mark_as_watched(
                 WatchEventCreate(**payload), db, SimpleNamespace(id=7)
@@ -414,13 +428,42 @@ class PushWatchStateExcludeConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("http://other.local", calls)
 
 
-class GetNowPlayingEpisodeOrderTests(unittest.IsolatedAsyncioTestCase):
-    """Regression test for #186: get_now_playing builds its media dict
-    inline rather than going through enrich_with_state, so it needs its own
-    wiring for the episode-order preference / TVDB position translation used
-    by the Now Playing bar's link building."""
+class DismissSessionTests(unittest.IsolatedAsyncioTestCase):
+    """#382: the per-item Now Playing dismiss button reuses this endpoint,
+    which predates it as a manual-session-only "stop" action - confirm it
+    isn't source-restricted and works for a webhook-sourced (plex) session."""
 
-    async def test_tvdb_preference_session_gets_translated_position(self) -> None:
+    async def test_dismisses_a_plex_sourced_session(self) -> None:
+        session = PlaybackSession(
+            id=1, user_id=7, media_id=10, session_key="plex:7:abc", source="plex",
+            state="playing", progress_percent=0.5, progress_seconds=600,
+            started_at=datetime(2026, 1, 1), updated_at=datetime(2026, 1, 1),
+        )
+        db = _FakeSession([session, None, None])
+
+        result = await history.dismiss_session(
+            session_key="plex:7:abc", db=db, current_user=SimpleNamespace(id=7)
+        )
+
+        self.assertEqual(result, {"status": "ok"})
+        db.commit.assert_awaited_once()
+
+    async def test_missing_session_returns_404(self) -> None:
+        db = _FakeSession([None])
+
+        with self.assertRaises(HTTPException) as ctx:
+            await history.dismiss_session(
+                session_key="plex:7:missing", db=db, current_user=SimpleNamespace(id=7)
+            )
+        self.assertEqual(ctx.exception.status_code, 404)
+
+
+class GetNowPlayingEpisodeOrderTests(unittest.IsolatedAsyncioTestCase):
+    """#174: get_now_playing builds its media dict inline rather than through
+    enrich_with_state, so it needs its own wiring for the episode-order
+    preference / display-position translation the Now Playing bar renders."""
+
+    async def test_non_aired_order_session_gets_display_position(self) -> None:
         media = Media(
             id=10, tmdb_id=550, media_type=MediaType.episode,
             title="Ep", season_number=4, episode_number=12, show_id=1,
@@ -431,27 +474,28 @@ class GetNowPlayingEpisodeOrderTests(unittest.IsolatedAsyncioTestCase):
             state="playing", progress_percent=0.1, progress_seconds=60,
             started_at=datetime(2026, 1, 1), updated_at=datetime(2026, 1, 1),
         )
-        preference = UserShowEpisodeOrder(user_id=7, series_tmdb_id=550, episode_order="tvdb")
-        mapping = EpisodeOrderMapping(
-            series_tmdb_id=550, tmdb_season_number=4, tmdb_episode_number=12,
-            tmdb_episode_id=1, tvdb_id=1, tvdb_season_number=3, tvdb_episode_number=8,
-            match_method="external_id",
+        preference = UserShowEpisodeOrder(user_id=7, series_tmdb_id=550, episode_order="tvdb:dvd")
+        pos = ShowEpisodePosition(
+            series_tmdb_id=550, order_key="tvdb:dvd",
+            display_season=3, display_episode=8,
+            tmdb_episode_id=1, tmdb_season_number=4, tmdb_episode_number=12,
         )
         db = _FakeSession([
             [(session, media)],  # main PlaybackSession+Media query
             show,                # per-session Show lookup
-            [preference],        # get_episode_orders_for_series
-            [mapping],           # get_tmdb_to_tvdb_positions
+            None,                # get_user_metadata_language - none set
+            [preference],        # get_order_keys_for_series
+            [pos],               # get_positions_for_series
         ])
 
         result = await history.get_now_playing(db=db, current_user=SimpleNamespace(id=7))
 
         item = result["now_playing"][0]["media"]
-        self.assertEqual(item["show_episode_order"], "tvdb")
-        self.assertEqual(item["tvdb_season_number"], 3)
-        self.assertEqual(item["tvdb_episode_number"], 8)
+        self.assertEqual(item["show_episode_order"], "tvdb:dvd")
+        self.assertEqual(item["display_season_number"], 3)
+        self.assertEqual(item["display_episode_number"], 8)
 
-    async def test_tmdb_preference_session_is_untouched(self) -> None:
+    async def test_aired_preference_session_is_untouched(self) -> None:
         media = Media(
             id=10, tmdb_id=550, media_type=MediaType.episode,
             title="Ep", season_number=4, episode_number=12, show_id=1,
@@ -465,14 +509,54 @@ class GetNowPlayingEpisodeOrderTests(unittest.IsolatedAsyncioTestCase):
         db = _FakeSession([
             [(session, media)],  # main PlaybackSession+Media query
             show,                # per-session Show lookup
-            [],                  # get_episode_orders_for_series - no preference row
+            None,                # get_user_metadata_language - none set
+            [],                  # get_order_keys_for_series - no non-aired pref
         ])
 
         result = await history.get_now_playing(db=db, current_user=SimpleNamespace(id=7))
 
         item = result["now_playing"][0]["media"]
         self.assertNotIn("show_episode_order", item)
-        self.assertNotIn("tvdb_season_number", item)
+        self.assertNotIn("display_season_number", item)
+
+
+class GetNowPlayingTranslationTests(unittest.IsolatedAsyncioTestCase):
+    """#404 follow-up: get_now_playing builds its dict inline rather than
+    through the usual translation pass every other listing gets - it must
+    apply both MediaTranslation (this episode's own title) and
+    ShowTranslation (the show name shown alongside it) itself."""
+
+    async def test_metadata_language_translates_episode_and_show_title(self) -> None:
+        media = Media(
+            id=10, tmdb_id=550, media_type=MediaType.episode,
+            title="Episode EN", season_number=1, episode_number=1, show_id=1,
+        )
+        show = Show(id=1, tmdb_id=550, title="Show EN")
+        session = PlaybackSession(
+            id=1, user_id=7, media_id=10, session_key="k", source="plex",
+            state="playing", progress_percent=0.1, progress_seconds=60,
+            started_at=datetime(2026, 1, 1), updated_at=datetime(2026, 1, 1),
+        )
+        media_translation = SimpleNamespace(
+            media_id=10, title="Episode FR", overview=None, tagline=None, poster_path=None,
+        )
+        show_translation = SimpleNamespace(
+            show_id=1, title="Show FR", overview=None, tagline=None, poster_path=None,
+        )
+        db = _FakeSession([
+            [(session, media)],   # main PlaybackSession+Media query
+            show,                 # per-session Show lookup
+            ("fr",),              # get_user_metadata_language
+            [media_translation],  # get_media_translations
+            [show_translation],   # get_show_translations
+            [],                   # get_order_keys_for_series - no non-aired pref
+        ])
+
+        result = await history.get_now_playing(db=db, current_user=SimpleNamespace(id=7))
+
+        item = result["now_playing"][0]["media"]
+        self.assertEqual(item["title"], "Episode FR")
+        self.assertEqual(item["show_title"], "Show FR")
 
 
 class GetNowPlayingCreditsStingerTests(unittest.IsolatedAsyncioTestCase):
@@ -489,7 +573,7 @@ class GetNowPlayingCreditsStingerTests(unittest.IsolatedAsyncioTestCase):
             state="playing", progress_percent=0.1, progress_seconds=60,
             started_at=datetime(2026, 1, 1), updated_at=datetime(2026, 1, 1),
         )
-        db = _FakeSession([[(session, media)]])
+        db = _FakeSession([[(session, media)], None])  # trailing None: get_user_metadata_language
 
         result = await history.get_now_playing(db=db, current_user=SimpleNamespace(id=7))
 
@@ -504,7 +588,7 @@ class GetNowPlayingCreditsStingerTests(unittest.IsolatedAsyncioTestCase):
             state="playing", progress_percent=0.1, progress_seconds=60,
             started_at=datetime(2026, 1, 1), updated_at=datetime(2026, 1, 1),
         )
-        db = _FakeSession([[(session, media)]])
+        db = _FakeSession([[(session, media)], None])  # trailing None: get_user_metadata_language
 
         result = await history.get_now_playing(db=db, current_user=SimpleNamespace(id=7))
 
@@ -737,7 +821,7 @@ class RatePromptTests(unittest.IsolatedAsyncioTestCase):
 
     def _movie(self):
         return SimpleNamespace(
-            id=10, tmdb_id=550, media_type=MediaType.movie, title="Fight Club",
+            id=10, tmdb_id=550, tvdb_id=None, imdb_id=None, media_type=MediaType.movie, title="Fight Club",
             season_number=None, episode_number=None, poster_path="/fc.jpg", show=None,
         )
 
@@ -768,7 +852,7 @@ class RatePromptTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_episode_uses_show_title_and_still_then_show_poster(self):
         episode = SimpleNamespace(
-            id=10, tmdb_id=42, media_type=MediaType.episode, title="Pilot",
+            id=10, tmdb_id=42, tvdb_id=None, imdb_id=None, media_type=MediaType.episode, title="Pilot",
             season_number=1, episode_number=1, poster_path="/ep-still.jpg",
             show=SimpleNamespace(title="The Show", poster_path="/show.jpg"),
         )
@@ -780,7 +864,7 @@ class RatePromptTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_episode_falls_back_to_show_poster_without_still(self):
         episode = SimpleNamespace(
-            id=10, tmdb_id=42, media_type=MediaType.episode, title="Pilot",
+            id=10, tmdb_id=42, tvdb_id=None, imdb_id=None, media_type=MediaType.episode, title="Pilot",
             season_number=1, episode_number=1, poster_path=None,
             show=SimpleNamespace(title="The Show", poster_path="/show.jpg"),
         )
@@ -858,6 +942,29 @@ class ManualSessionEpisodeShowLinkTests(unittest.IsolatedAsyncioTestCase):
         find_or_create.assert_not_awaited()
         self.assertIsNone(create_media.await_args.kwargs["show_id"])
         self.assertIsNone(media.show_id)
+
+
+class EffectiveRuntimeTests(unittest.TestCase):
+    """#383: a NULL Media.runtime freezes the Now Playing bar - fall back to
+    the cached tmdb_data.runtime for rows enriched before #169."""
+
+    def _media(self, runtime, tmdb_runtime):
+        return SimpleNamespace(runtime=runtime, tmdb_data={"runtime": tmdb_runtime} if tmdb_runtime is not None else {})
+
+    def test_column_value_wins(self):
+        self.assertEqual(history._effective_runtime(self._media(45, 50)), 45)
+
+    def test_falls_back_to_tmdb_data(self):
+        self.assertEqual(history._effective_runtime(self._media(None, 53)), 53)
+
+    def test_tmdb_data_runtime_as_string_is_coerced(self):
+        self.assertEqual(history._effective_runtime(self._media(None, "22")), 22)
+
+    def test_zero_or_missing_or_junk_is_none(self):
+        self.assertIsNone(history._effective_runtime(self._media(None, 0)))
+        self.assertIsNone(history._effective_runtime(self._media(None, None)))
+        self.assertIsNone(history._effective_runtime(self._media(None, "n/a")))
+        self.assertIsNone(history._effective_runtime(SimpleNamespace(runtime=None, tmdb_data=None)))
 
 
 if __name__ == "__main__":
