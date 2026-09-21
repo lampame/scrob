@@ -1161,7 +1161,7 @@ class FullPushPartialWatchTests(_PartialWatchDB):
         job = await self._job(job_id)
         self.assertEqual(job.status.value, "completed")
         self.assertEqual(job.total_items, 1)
-        self.assertEqual(job.stats, {"succeeded": 1, "failed": 0})
+        self.assertEqual(job.stats, {"succeeded": 1, "failed": 0, "skipped": 0, "mode": "full"})
 
     async def test_no_echo_token_is_armed_for_the_started_item(self):
         # An armed token swallows the item's next webhook as a push echo
