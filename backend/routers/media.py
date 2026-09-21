@@ -1090,6 +1090,16 @@ async def search_tvdb(
     return results
 
 
+async def _apply_search_translations(db: AsyncSession, user_id: int, items: list[dict], lang: str | None) -> None:
+    """Overlay the user's stored metadata-language translations onto library
+    rows in search results, so a French profile doesn't see English titles (#417)."""
+    if not lang:
+        return
+    media_ids = [i["id"] for i in items if i.get("id")]
+    if media_ids:
+        apply_media_translations(items, await get_media_translations(db, media_ids, lang))
+
+
 @router.get("/search")
 async def search_media(
     q: str = Query(..., min_length=2),
@@ -1103,6 +1113,7 @@ async def search_media(
     if current_user is None:
         await require_anon_nav_allowed(db)
     effective_user_id = current_user.id if current_user else ANON_USER_ID
+    lang = await get_user_metadata_language(db, effective_user_id)
 
     valid_types = {m.value for m in MediaType} | {"person", "collection", "network", "studio"}
     if type is not None and type not in valid_types:
@@ -1272,6 +1283,7 @@ async def search_media(
         formatted = [format_media(m) for m in items]
         for item in formatted:
             item["in_library"] = True
+        await _apply_search_translations(db, effective_user_id, formatted, lang)
         return {"page": 1, "total_pages": 1, "total_results": len(formatted), "results": formatted}
 
     # Collection-only filter: search local DB, skip TMDB entirely
@@ -1298,6 +1310,7 @@ async def search_media(
         formatted = [format_media(m) for m in items]
         for item in formatted:
             item["in_library"] = True
+        await _apply_search_translations(db, effective_user_id, formatted, lang)
         return {
             "page": page,
             "total_pages": max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE),
@@ -1324,6 +1337,7 @@ async def search_media(
         formatted = [format_media(m) for m in items]
         for item in formatted:
             item["in_library"] = True
+        await _apply_search_translations(db, effective_user_id, formatted, lang)
         return {"page": 1, "total_pages": 1, "total_results": len(formatted), "results": formatted}
 
     # 1. Search TMDB (primary source for ordering)
@@ -1332,14 +1346,14 @@ async def search_media(
     total_results = 0
     try:
         if type == MediaType.movie:
-            data = await tmdb.search_movies(q, page=page, year=year, api_key=tmdb_key)
+            data = await tmdb.search_movies(q, page=page, year=year, api_key=tmdb_key, language=lang)
             raw_results = data.get("results", [])
             for res in raw_results:
                 res["media_type"] = "movie"
             total_pages = data.get("total_pages", 1)
             total_results = data.get("total_results", 0)
         elif type == MediaType.series:
-            data = await tmdb.search_shows(q, page=page, year=year, api_key=tmdb_key)
+            data = await tmdb.search_shows(q, page=page, year=year, api_key=tmdb_key, language=lang)
             raw_results = data.get("results", [])
             for res in raw_results:
                 res["media_type"] = "tv"
@@ -1348,8 +1362,8 @@ async def search_media(
         else:
             # "All": movies + shows + people, interleaved by TMDB popularity score
             movie_data, show_data, people_data = await asyncio.gather(
-                tmdb.search_movies(q, page=page, api_key=tmdb_key),
-                tmdb.search_shows(q, page=page, api_key=tmdb_key),
+                tmdb.search_movies(q, page=page, api_key=tmdb_key, language=lang),
+                tmdb.search_shows(q, page=page, api_key=tmdb_key, language=lang),
                 tmdb.search_people(q, page=page, api_key=tmdb_key),
             )
             movie_results = movie_data.get("results", [])
@@ -1431,6 +1445,12 @@ async def search_media(
             item = format_media(local)
             item["type"] = media_type  # TMDB source of truth; local row may differ
             item["in_library"] = True
+            if lang:
+                # Library rows carry the default-language title; the search result
+                # is already in the user's language (#417). A stored translation
+                # still wins - it's overlaid below.
+                item["title"] = res.get("title") or res.get("name") or item.get("title")
+                item["overview"] = res.get("overview") or item.get("overview")
             # Fill in missing display fields from TMDB search result
             if not item.get("poster_path"):
                 item["poster_path"] = tmdb.poster_url(res.get("poster_path"))
@@ -1475,6 +1495,7 @@ async def search_media(
             enriched.append(item)
 
     await enrich_with_state(db, effective_user_id, enriched)
+    await _apply_search_translations(db, effective_user_id, enriched, lang)
     return {
         "page": page,
         "total_pages": total_pages,
