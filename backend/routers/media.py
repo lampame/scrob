@@ -5570,6 +5570,43 @@ async def get_media_recommendations(
         return {"results": []}
 
 
+@router.get("/{type}/{tmdb_id}/trailer")
+async def get_media_trailer(
+    type: MediaType,
+    tmdb_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user_or_api_key),
+):
+    """YouTube trailer key for a movie/series in the user's metadata language (#413).
+
+    `key` is null when TMDB has none in that language - the caller falls back to
+    a YouTube search rather than an English trailer. `language` is echoed back so
+    the fallback search can name it."""
+    if current_user is None:
+        await require_anon_nav_allowed(db)
+    if type not in (MediaType.movie, MediaType.series):
+        raise HTTPException(status_code=404, detail="Only movies and series have a trailer")
+    effective_user_id = current_user.id if current_user else ANON_USER_ID
+
+    language = await get_user_metadata_language(db, effective_user_id)
+    tmdb_key = await get_user_tmdb_key(db, effective_user_id)
+    if not check_tmdb_key(tmdb_key):
+        return {"key": None, "name": None, "language": language}
+
+    try:
+        data = await tmdb.get_videos(
+            "movie" if type == MediaType.movie else "tv", tmdb_id, api_key=tmdb_key, language=language,
+        )
+        trailer = tmdb.pick_trailer(data.get("results", []), language)
+    except Exception:
+        trailer = None
+    return {
+        "key": trailer["key"] if trailer else None,
+        "name": trailer.get("name") if trailer else None,
+        "language": language,
+    }
+
+
 def _normalize_path(path: str | None, size: str = "w500") -> str | None:
     if not path:
         return None
