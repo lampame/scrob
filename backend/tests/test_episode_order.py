@@ -205,6 +205,39 @@ class EpisodeOrderMappingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(get_tvdb_series.call_args.kwargs["cache_ttl"])
         self.assertIsNone(get_tvdb_episodes.call_args.kwargs["cache_ttl"])
 
+    async def test_tvdb_episodes_are_fetched_in_english_for_title_matching(self) -> None:
+        # #351: TVDB defaults to each episode's original-language title, so an
+        # anime's TVDB titles were Japanese against TMDB's English ones and
+        # nothing matched.
+        db = AsyncMock()
+        db.execute.return_value = _ExistingResult([SimpleNamespace(tvdb_id=10414110)])
+        db.add_all = MagicMock()
+
+        get_tvdb_episodes = AsyncMock(
+            return_value=[{"id": 100, "seasonNumber": 1, "number": 1, "name": "Pilot", "aired": "2025-01-01"}]
+        )
+        with (
+            patch(
+                "core.episode_order.tmdb.get_show",
+                AsyncMock(return_value={"external_ids": {"tvdb_id": 389597}, "seasons": [{"season_number": 1}]}),
+            ),
+            patch(
+                "core.episode_order.tmdb.get_season",
+                AsyncMock(return_value={"episodes": [
+                    {"id": 1, "season_number": 1, "episode_number": 1, "name": "Pilot", "air_date": "2025-01-01"}
+                ]}),
+            ),
+            patch("core.episode_order.tmdb.get_episode_external_ids", AsyncMock(return_value={"tvdb_id": None})),
+            patch(
+                "core.episode_order.tvdb.get_series",
+                AsyncMock(return_value={"seasons": [{"number": 1, "type": {"type": "official"}}]}),
+            ),
+            patch("core.episode_order.tvdb.get_series_episodes", get_tvdb_episodes),
+        ):
+            await ensure_episode_order_mapping(db, 127532, "tmdb-key", "tvdb-key", force=True)
+
+        self.assertEqual(get_tvdb_episodes.call_args.kwargs["language"], "eng")
+
     async def test_without_force_the_shared_tmdb_cache_is_used(self) -> None:
         # An already-mapped show short-circuits before any tvdb.* call, so
         # only tmdb.get_show's cache behavior is observable on this path.

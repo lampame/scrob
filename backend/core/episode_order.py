@@ -671,6 +671,14 @@ async def _get_tvdb_id_for_show(
     return int(tvdb_id), show_data
 
 
+# TVDB returns each episode's original-language title unless a language is
+# requested, while TMDB titles here are English - so an anime's Japanese TVDB
+# titles never matched and the switch failed with "No TMDB episodes could be
+# matched to TVDB" (#351). Matching compares titles, so both sides must be
+# English regardless of the user's display language.
+_MATCH_LANGUAGE = "eng"
+
+
 async def _fetch_show_episodes(
     series_tmdb_id: int,
     tvdb_id: int,
@@ -718,7 +726,9 @@ async def _fetch_show_episodes(
         ),
         asyncio.gather(
             *(
-                tvdb.get_series_episodes(tvdb_id, number, tvdb_api_key, cache_ttl=cache_ttl)
+                tvdb.get_series_episodes(
+                    tvdb_id, number, tvdb_api_key, language=_MATCH_LANGUAGE, cache_ttl=cache_ttl
+                )
                 for number in tvdb_season_numbers
             )
         ),
