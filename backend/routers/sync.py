@@ -111,6 +111,24 @@ BATCH_SIZE = 500
 TMDB_CONCURRENCY = 5  # Max concurrent TMDB requests
 # asyncpg hard limit is 32767 parameters per query; stay well under it
 _MAX_IN_PARAMS = 30_000
+
+# sync_jobs.error_message is varchar(1000).
+_MAX_ERROR_MESSAGE = 1000
+
+
+def _short_error(exc: BaseException | str) -> str:
+    """Fit a failure into sync_jobs.error_message so recording it cannot itself fail.
+
+    An over-long value makes the UPDATE that marks the job failed raise
+    StringDataRightTruncationError, which leaves the row in 'running' forever - the job
+    shows in the UI as a sync that started and then hung, with no error to explain it.
+    asyncpg's parameter-limit error is the one that triggers this in practice: its
+    message embeds the entire bind list, so it runs to tens of kilobytes.
+    """
+    text = str(exc)
+    if len(text) <= _MAX_ERROR_MESSAGE:
+        return text
+    return text[: _MAX_ERROR_MESSAGE - 1] + "\u2026"
 _MEDIA_BROWSER_ITEM_SOURCES = (
     CollectionSource.jellyfin,
     CollectionSource.emby,
@@ -4101,30 +4119,34 @@ async def _apply_nuvio_watch_history(
     }
     standalone_by_key: dict[tuple[MediaType, int], Media] = {}
     if standalone_tmdb_ids:
-        result = await db.execute(
-            select(Media).where(
+        rows_found = await _select_in_chunks(
+            db,
+            lambda chunk: select(Media).where(
                 Media.media_type == MediaType.movie,
-                Media.tmdb_id.in_(standalone_tmdb_ids),
-            )
+                Media.tmdb_id.in_(chunk),
+            ),
+            list(standalone_tmdb_ids),
         )
         standalone_by_key = {
             (media.media_type, media.tmdb_id): media
-            for media in result.scalars().all()
+            for media in rows_found
             if media.tmdb_id is not None
         }
 
     show_ids = set(show_map.values())
     episodes_by_key: dict[tuple[int, int, int], Media] = {}
     if show_ids:
-        result = await db.execute(
-            select(Media).where(
+        rows_found = await _select_in_chunks(
+            db,
+            lambda chunk: select(Media).where(
                 Media.media_type == MediaType.episode,
-                Media.show_id.in_(show_ids),
-            )
+                Media.show_id.in_(chunk),
+            ),
+            list(show_ids),
         )
         episodes_by_key = {
             (media.show_id, media.season_number, media.episode_number): media
-            for media in result.scalars().all()
+            for media in rows_found
             if media.show_id is not None
             and media.season_number is not None
             and media.episode_number is not None
@@ -4161,15 +4183,17 @@ async def _apply_nuvio_watch_history(
     if not candidates:
         return set()
     media_ids = {media.id for media, _ in candidates}
-    existing_result = await db.execute(
-        select(WatchEvent.media_id, WatchEvent.watched_at).where(
-            WatchEvent.user_id == user_id,
-            WatchEvent.media_id.in_(media_ids),
-        )
-    )
     existing_by_media: dict[int, list[datetime | None]] = {}
-    for existing_media_id, existing_watched_at in existing_result.all():
-        existing_by_media.setdefault(existing_media_id, []).append(existing_watched_at)
+    media_id_list = list(media_ids)
+    for i in range(0, len(media_id_list), _MAX_IN_PARAMS):
+        existing_result = await db.execute(
+            select(WatchEvent.media_id, WatchEvent.watched_at).where(
+                WatchEvent.user_id == user_id,
+                WatchEvent.media_id.in_(media_id_list[i : i + _MAX_IN_PARAMS]),
+            )
+        )
+        for existing_media_id, existing_watched_at in existing_result.all():
+            existing_by_media.setdefault(existing_media_id, []).append(existing_watched_at)
 
     window_minutes = await get_dedup_window_minutes(db, user_id)
     added_media_ids: set[int] = set()
@@ -4221,20 +4245,24 @@ async def _apply_nuvio_progress(
     }
     movies_by_tmdb: dict[int, Media] = {}
     if movie_tmdb_ids:
-        result = await db.execute(
-            select(Media).where(Media.media_type == MediaType.movie, Media.tmdb_id.in_(movie_tmdb_ids))
+        rows_found = await _select_in_chunks(
+            db,
+            lambda chunk: select(Media).where(Media.media_type == MediaType.movie, Media.tmdb_id.in_(chunk)),
+            list(movie_tmdb_ids),
         )
-        movies_by_tmdb = {media.tmdb_id: media for media in result.scalars().all() if media.tmdb_id is not None}
+        movies_by_tmdb = {media.tmdb_id: media for media in rows_found if media.tmdb_id is not None}
 
     show_ids = set(show_map.values())
     episodes_by_key: dict[tuple[int, int, int], Media] = {}
     if show_ids:
-        result = await db.execute(
-            select(Media).where(Media.media_type == MediaType.episode, Media.show_id.in_(show_ids))
+        rows_found = await _select_in_chunks(
+            db,
+            lambda chunk: select(Media).where(Media.media_type == MediaType.episode, Media.show_id.in_(chunk)),
+            list(show_ids),
         )
         episodes_by_key = {
             (media.show_id, media.season_number, media.episode_number): media
-            for media in result.scalars().all()
+            for media in rows_found
             if media.show_id is not None and media.season_number is not None and media.episode_number is not None
         }
 
@@ -4262,13 +4290,15 @@ async def _apply_nuvio_progress(
         return
 
     media_ids = {media.id for _, media in media_rows}
-    existing_result = await db.execute(
-        select(PlaybackProgress).where(
+    existing_rows = await _select_in_chunks(
+        db,
+        lambda chunk: select(PlaybackProgress).where(
             PlaybackProgress.user_id == user_id,
-            PlaybackProgress.media_id.in_(media_ids),
-        )
+            PlaybackProgress.media_id.in_(chunk),
+        ),
+        list(media_ids),
     )
-    existing = {progress.media_id: progress for progress in existing_result.scalars().all()}
+    existing = {progress.media_id: progress for progress in existing_rows}
 
     for row, media in media_rows:
         try:
