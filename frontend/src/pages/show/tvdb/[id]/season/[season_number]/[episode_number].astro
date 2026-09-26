@@ -21,6 +21,13 @@ try {
   error = e.message;
 }
 
+// #174: TMDB-matched shows render on /show/{tmdb_id} with the TVDB aired order.
+if (episode?.show?.tmdb_id) {
+  return Astro.redirect(
+    `/show/${episode.show.tmdb_id}/season/${season_number}/${episode_number}`, 301,
+  );
+}
+
 if (!episode && !error) {
   return Astro.redirect("/404");
 }
@@ -184,6 +191,7 @@ const thumbnail = episode?.image_url || show?.poster_path || null;
                   ratingTitle={show?.title}
                   ratingSubtitle={episode.name ?? `Episode ${episode_number}`}
                   ratingPosterPath={episode.image_url || season?.poster_path || show?.poster_path}
+                  airDate={episode.air_date}
                 />
               </div>
             ))}

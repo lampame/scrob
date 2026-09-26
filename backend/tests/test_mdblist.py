@@ -230,6 +230,96 @@ class MDBListClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen[1]["shows"], [{"ids": {"tmdb": 550}, "dropped_at": "2026-08-27T00:00:00Z"}])
 
 
+class MDBListRateLimitTests(unittest.IsolatedAsyncioTestCase):
+    """MDBList answers both its throttles with 429 - only the body tells them
+    apart. Short-window limits are waited out, the daily quota is not."""
+
+    async def _call(self, responses, call, *args, **kwargs):
+        seen = iter(responses)
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return next(seen)
+
+        transport = httpx.MockTransport(handler)
+        sleep = AsyncMock()
+        with (
+            patch.object(
+                mdblist.httpx,
+                "AsyncClient",
+                side_effect=lambda **kw: _REAL_ASYNC_CLIENT(transport=transport, **kw),
+            ),
+            patch.object(mdblist.asyncio, "sleep", sleep),
+        ):
+            try:
+                result = await call(*args, **kwargs)
+                error = None
+            except mdblist.MDBListAPIError as exc:
+                result, error = None, exc
+        return result, error, requests, sleep
+
+    async def test_short_window_limit_is_retried_with_backoff(self) -> None:
+        limited = httpx.Response(429, json={"error": "API rate limit exceeded!"})
+        result, error, requests, sleep = await self._call(
+            [limited, limited, httpx.Response(200, json={"ok": True})],
+            mdblist._request, "GET", "/sync/watched", "key",
+        )
+        self.assertIsNone(error)
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(requests), 3)
+        self.assertEqual([c.args[0] for c in sleep.await_args_list], [2.0, 4.0])
+
+    async def test_retry_after_header_is_honoured_but_capped(self) -> None:
+        limited = httpx.Response(
+            429, json={"error": "API rate limit exceeded!"}, headers={"Retry-After": "3600"}
+        )
+        _, error, _, sleep = await self._call(
+            [limited, httpx.Response(200, json={})], mdblist._request, "GET", "/x", "key",
+        )
+        self.assertIsNone(error)
+        self.assertEqual(sleep.await_args_list[0].args[0], mdblist._RATE_LIMIT_MAX_WAIT)
+
+    async def test_daily_limit_is_not_retried(self) -> None:
+        _, error, requests, sleep = await self._call(
+            [httpx.Response(429, json={"error": "Daily API limit exceeded!"})],
+            mdblist._request, "GET", "/x", "key",
+        )
+        self.assertIsInstance(error, mdblist.MDBListDailyLimitError)
+        self.assertEqual(len(requests), 1)
+        sleep.assert_not_awaited()
+
+    async def test_gives_up_after_the_retry_budget(self) -> None:
+        limited = httpx.Response(429, json={"error": "API rate limit exceeded!"})
+        _, error, requests, _ = await self._call(
+            [limited] * (mdblist._RATE_LIMIT_RETRIES + 1), mdblist._request, "GET", "/x", "key",
+        )
+        self.assertIsInstance(error, mdblist.MDBListAPIError)
+        self.assertNotIsInstance(error, mdblist.MDBListDailyLimitError)
+        self.assertEqual(len(requests), mdblist._RATE_LIMIT_RETRIES + 1)
+
+    async def test_live_scrobble_retries_once_with_a_short_wait(self) -> None:
+        # A scrobble runs inside a webhook request that holds a DB connection,
+        # so it must not sit through the full backoff.
+        limited = httpx.Response(
+            429, json={"error": "API rate limit exceeded!"}, headers={"Retry-After": "120"}
+        )
+        _, error, requests, sleep = await self._call(
+            [limited, limited], mdblist.scrobble_movie, "key", "stop", 550, 95.0,
+        )
+        self.assertIsInstance(error, mdblist.MDBListAPIError)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual([c.args[0] for c in sleep.await_args_list], [mdblist._SCROBBLE_MAX_WAIT])
+
+    async def test_non_rate_limit_errors_are_not_retried(self) -> None:
+        _, error, requests, sleep = await self._call(
+            [httpx.Response(500, text="boom")], mdblist._request, "GET", "/x", "key",
+        )
+        self.assertIsInstance(error, mdblist.MDBListAPIError)
+        self.assertEqual(len(requests), 1)
+        sleep.assert_not_awaited()
+
+
 class MDBListListFanoutTests(unittest.IsolatedAsyncioTestCase):
     async def test_managed_watchlist_edit_pushes_to_mdblist(self) -> None:
         result = MagicMock()

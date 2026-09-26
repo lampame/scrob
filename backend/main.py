@@ -182,7 +182,9 @@ async def _auto_sync_scheduler():
                         f"connection {conn.id} (job {job_id})"
                     )
                     if job_type == "push":
-                        asyncio.create_task(runner(conn.user_id, conn.id, job_id))
+                        # Scheduled pushes skip what an earlier push already sent (#421, #422);
+                        # a manual push still reconciles everything.
+                        asyncio.create_task(runner(conn.user_id, conn.id, job_id, incremental=True))
                     else:
                         asyncio.create_task(runner(conn.user_id, job_id, 0, 0, conn.id))
 

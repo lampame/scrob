@@ -1,0 +1,197 @@
+---
+// Condensed view of several episodes of the same show watched on the same
+// day (#391) - collapses what would otherwise be N individual HistoryCards
+// into one row, expandable to the individual plays. Opt-in via
+// UserSettings.condense_history_by_show; history.astro decides which
+// consecutive same-show runs qualify and only renders this for runs of 2+.
+import type { WatchEvent } from "../lib/api";
+import { tmdbImageUrl } from "../lib/api";
+import { ratingPosterUrl } from "../lib/posters";
+import { episodeHref } from "../lib/episodeHref";
+import { episodeCode } from "../lib/media-format";
+import { getViewerTimeZone } from "../lib/viewerTimeZone";
+
+interface Props {
+  events: WatchEvent[];
+  use24h?: boolean;
+}
+
+const { events, use24h = false } = Astro.props;
+const first = events[0].media;
+const showTitle = first.show_title || first.title;
+const rawPoster = first.show_poster_path || first.poster_path;
+const posterPath = ratingPosterUrl(tmdbImageUrl(rawPoster, "w500"), first, Astro.locals.hasRpdbKey);
+
+const timeZone = getViewerTimeZone(Astro.cookies);
+
+function fmtTime(watchedAt: string | null): string | null {
+  return watchedAt
+    ? new Date(watchedAt + 'Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: !use24h, timeZone })
+    : null;
+}
+
+// events arrive newest-first (matches the page's own ordering); the
+// expanded list and the time range both read oldest -> newest instead,
+// matching watch order.
+const chronological = [...events].reverse();
+const startTime = fmtTime(chronological[0].watched_at);
+const endTime = fmtTime(chronological[chronological.length - 1].watched_at);
+const timeLabel = !startTime || !endTime
+  ? 'Unknown'
+  : startTime === endTime ? startTime : `${startTime} – ${endTime}`;
+
+const codes = chronological.map((e) => episodeCode(e.media)).filter((c): c is string => !!c);
+---
+
+<div class="history-group rounded-2xl border border-zinc-800/50 bg-zinc-900/40 overflow-hidden transition-all duration-300 hover:border-blue-500/30">
+  <button type="button" class="history-group-toggle w-full flex gap-5 p-4 text-left cursor-pointer group/card">
+    <div class="w-20 shrink-0 aspect-[2/3] rounded-xl overflow-hidden bg-zinc-950 shadow-2xl ring-1 ring-white/5 group-hover/card:ring-blue-500/30 transition-all duration-300">
+      {posterPath ? (
+        <img
+          src={posterPath}
+          alt={showTitle}
+          class="w-full h-full object-cover"
+          loading="lazy"
+          decoding="async"
+        />
+      ) : (
+        <div class="w-full h-full flex flex-col items-center justify-center text-xs text-zinc-700 p-2 text-center bg-zinc-900">
+          <span class="text-xl mb-1 opacity-20">🎬</span>
+        </div>
+      )}
+    </div>
+
+    <div class="flex flex-col min-w-0 flex-1 justify-center gap-1.5">
+      <div class="flex items-center justify-between gap-3">
+        <p class="text-lg font-black text-zinc-100 group-hover/card:text-blue-400 transition-colors truncate tracking-tight leading-tight">
+          {showTitle}
+        </p>
+        <svg
+          xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"
+          class="history-group-chevron w-4 h-4 text-zinc-500 shrink-0 transition-transform duration-200"
+        >
+          <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+        </svg>
+      </div>
+      <p class="text-xs font-bold text-zinc-400 truncate">{codes.join(' · ')}</p>
+      <p class="text-xs font-bold text-zinc-500 uppercase tracking-widest">
+        {events.length} episodes · {timeLabel}
+      </p>
+    </div>
+  </button>
+
+  <div class="history-group-list hidden border-t border-zinc-800/50 divide-y divide-zinc-800/50">
+    {chronological.map((event) => {
+      const media = event.media;
+      const href = episodeHref(media);
+      const time = fmtTime(event.watched_at) ?? 'Unknown';
+      const code = episodeCode(media);
+      return (
+        <div class="flex items-center gap-3 px-4 py-3 hover:bg-zinc-800/40 transition-colors" data-event-id={event.id} data-href={href}>
+          <span class="text-xs font-bold text-zinc-400 bg-zinc-950/50 border border-zinc-800 px-2 py-1 rounded-lg uppercase tracking-wider shrink-0">
+            {time}
+          </span>
+          <p class="text-sm font-medium text-zinc-300 truncate flex-1 min-w-0 cursor-pointer">
+            {code && (
+              <span class="text-blue-500 tracking-tighter uppercase bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/20 mr-2">
+                {code}
+              </span>
+            )}
+            {media.title}
+          </p>
+          <button
+            class="delete-history-event w-7 h-7 shrink-0 rounded-lg flex items-center justify-center bg-zinc-950/50 border border-zinc-800 text-zinc-500 hover:text-red-400 hover:border-red-500/40 hover:bg-red-500/10 transition-all duration-200 cursor-pointer"
+            title="Delete this entry"
+            aria-label="Delete history entry"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+            </svg>
+          </button>
+        </div>
+      );
+    })}
+  </div>
+</div>
+
+<script>
+  // Delegated from document (like HistoryCard's own delete handler), not
+  // bound per-card: the /history live search swaps #history-results in
+  // place, and freshly-inserted groups must stay expandable without this
+  // script re-running.
+  if (!(window as any).__historyGroupToggleBound) {
+    (window as any).__historyGroupToggleBound = true;
+
+    document.addEventListener('click', (e) => {
+      const toggle = (e.target as HTMLElement).closest<HTMLElement>('.history-group-toggle');
+      if (!toggle) return;
+      const group = toggle.closest<HTMLElement>('.history-group');
+      const list = group?.querySelector<HTMLElement>('.history-group-list');
+      const chevron = toggle.querySelector<HTMLElement>('.history-group-chevron');
+      if (!list) return;
+      list.classList.toggle('hidden');
+      chevron?.classList.toggle('rotate-180');
+    });
+  }
+
+  // Same delegated delete/navigate handler as HistoryCard.astro, guarded by
+  // the same flag - a history page whose results are ALL groups never
+  // renders a single HistoryCard, so its own copy of this script would
+  // never ship. Whichever of the two components renders first on a given
+  // page wins the race to bind; the logic is identical either way, so
+  // nothing double-binds when both are present.
+  if (!(window as any).__historyCardBound) {
+    (window as any).__historyCardBound = true;
+
+    const TRASH_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
+
+    document.addEventListener('click', async (e) => {
+      const card = (e.target as HTMLElement).closest<HTMLElement>('[data-event-id]');
+      if (!card) return;
+
+      const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.delete-history-event');
+      if (!btn) {
+        const href = card.dataset.href;
+        if (href) window.location.href = href;
+        return;
+      }
+
+      e.stopPropagation();
+      const title = card.querySelector('p.text-lg')?.textContent?.trim() || 'this entry';
+      const ok = await (window as any).showConfirm(`Delete "${title}"?`, 'This removes it from your watch history. This cannot be undone.');
+      if (!ok) return;
+
+      const eventId = card.dataset.eventId;
+      const token = (window as any).__AUTH_TOKEN__ ?? '';
+
+      btn.disabled = true;
+      btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="animate-spin"><circle cx="12" cy="12" r="10" stroke-opacity="0.25"/><path d="M12 2a10 10 0 0 1 10 10" /></svg>`;
+
+      try {
+        const res = await fetch(`/api/proxy/history/event/${eventId}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        if (!res.ok) throw new Error('Failed');
+        card.style.transition = 'opacity 0.25s, transform 0.25s';
+        card.style.opacity = '0';
+        card.style.transform = 'scale(0.97)';
+        setTimeout(() => {
+          const grid = card.parentElement;
+          const dateGroup = grid?.parentElement;
+          card.remove();
+          if (grid && dateGroup && grid.querySelectorAll('[data-event-id]').length === 0) {
+            dateGroup.style.transition = 'opacity 0.2s';
+            dateGroup.style.opacity = '0';
+            setTimeout(() => dateGroup.remove(), 200);
+          }
+        }, 250);
+      } catch {
+        btn.disabled = false;
+        btn.innerHTML = TRASH_SVG;
+        btn.classList.add('text-red-400', 'border-red-500/40');
+        setTimeout(() => btn.classList.remove('text-red-400', 'border-red-500/40'), 1500);
+      }
+    });
+  }
+</script>

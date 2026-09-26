@@ -21,6 +21,7 @@ from core import trakt as trakt_client
 from core.enrichment import enrich_media, is_unmapped_tvdb_episode, create_media_safely
 from core.trakt_export import MAX_TOTAL_SIZE, TraktExportData, parse_trakt_export
 from core.rewatch import record_rewatch_progress
+from core.watch_dedup import DEFAULT_DEDUP_WINDOW_MINUTES, dedup_window_from_settings, is_duplicate_watch_time, load_existing_watch_times
 from db import get_db, engine
 from dependencies import get_current_user
 from models.base import CollectionSource, MediaType
@@ -618,6 +619,7 @@ async def _apply_trakt_import(
     split_watchlist: bool,
     history_start: datetime | None,
     history_end: datetime,
+    window_minutes: int = DEFAULT_DEDUP_WINDOW_MINUTES,
 ) -> tuple[dict, int, bool, set[int], RatingChanges]:
     """Fetches (from `source`) and applies watched history, ratings, and lists.
 
@@ -643,6 +645,15 @@ async def _apply_trakt_import(
     # season from TMDB instead of once.
     season_cache: dict[tuple[int, int], dict] = {}
 
+    def _is_duplicate_play(existing_times: dict[int, list[datetime]], media_id: int, watched_at: datetime | None) -> bool:
+        # An unknown-dated play matches any existing play of the same item,
+        # dated or not - there's nothing to compare a window against, and this
+        # matches the identity-only convention used elsewhere for unknown
+        # dates (see _history_play_seen).
+        if watched_at is None:
+            return bool(existing_times.get(media_id))
+        return is_duplicate_watch_time(existing_times, media_id, watched_at, window_minutes)
+
     # ── Watched Movies ────────────────────────────────────────────────
     # Uses /sync/history (one row per play) rather than /sync/watched
     # (one aggregated row per title) so every distinct play of a movie
@@ -657,14 +668,11 @@ async def _apply_trakt_import(
         await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(total_items=len(history_movies), current_step="Pulling watched movies"))
         await db.commit()
 
-        # Pre-load existing watch events for this user, keyed by the
-        # exact play (media_id, watched_at) so re-syncing doesn't
-        # duplicate plays already imported, while still allowing
-        # multiple distinct plays of the same title.
-        we_res = await db.execute(
-            select(WatchEvent.media_id, WatchEvent.watched_at).where(WatchEvent.user_id == user_id)
-        )
-        existing_watched: set[tuple[int, datetime]] = {(row[0], row[1]) for row in we_res}
+        # Pre-load every existing watch's effective time for this user, keyed
+        # by media_id, so re-syncing doesn't duplicate a play that's already
+        # been imported (from Trakt or anywhere else, within the dedup
+        # window - #390) while still allowing genuinely distinct rewatches.
+        existing_times = await load_existing_watch_times(db, user_id)
 
         for movie_index, item in enumerate(history_movies, start=1):
             movie_data = item.get("movie", {})
@@ -684,8 +692,7 @@ async def _apply_trakt_import(
                         # _TRAKT_UNKNOWN_DATE_EPOCH) is stored as unknown locally too,
                         # rather than fabricating a "now" timestamp or importing 1970-01-01.
                         watched_at = _parse_trakt_datetime(item.get("watched_at"))
-                        key = (media.id, watched_at)
-                        if key not in existing_watched:
+                        if not _is_duplicate_play(existing_times, media.id, watched_at):
                             db.add(WatchEvent(
                                 user_id=user_id,
                                 media_id=media.id,
@@ -693,7 +700,7 @@ async def _apply_trakt_import(
                                 completed=True,
                                 play_count=1,
                             ))
-                            existing_watched.add(key)
+                            existing_times.setdefault(media.id, []).append(watched_at or datetime.utcnow())
                             _new_watched.add(media.id)
                             stats["movies"] += 1
                         else:
@@ -732,11 +739,8 @@ async def _apply_trakt_import(
         ))
         await db.commit()
 
-        # Re-fetch watched set (may have grown from movie sync)
-        we_res = await db.execute(
-            select(WatchEvent.media_id, WatchEvent.watched_at).where(WatchEvent.user_id == user_id)
-        )
-        existing_watched = {(row[0], row[1]) for row in we_res}
+        # Re-fetch watch times (may have grown from movie sync)
+        existing_times = await load_existing_watch_times(db, user_id)
 
         # Group plays by show so _get_or_create_show only runs once per show
         plays_by_show: dict[int, list[dict]] = {}
@@ -775,8 +779,7 @@ async def _apply_trakt_import(
                             # See the movie-import branch above: preserve an unknown
                             # date as unknown rather than fabricating "now".
                             watched_at = _parse_trakt_datetime(entry.get("watched_at"))
-                            key = (media.id, watched_at)
-                            if key not in existing_watched:
+                            if not _is_duplicate_play(existing_times, media.id, watched_at):
                                 event = WatchEvent(
                                     user_id=user_id,
                                     media_id=media.id,
@@ -787,7 +790,7 @@ async def _apply_trakt_import(
                                 db.add(event)
                                 await db.flush()
                                 await record_rewatch_progress(db, user_id, media.id, event.id)
-                                existing_watched.add(key)
+                                existing_times.setdefault(media.id, []).append(watched_at or datetime.utcnow())
                                 _new_watched.add(media.id)
                                 stats["episodes"] += 1
                             else:
@@ -1252,7 +1255,7 @@ async def _local_dropped_show_tmdb_ids(
 
 
 async def run_trakt_sync(user_id: int, job_id: int, full_resync: bool = False):
-    from routers.sync import SyncCancelled, _raise_if_cancelled
+    from routers.sync import SyncCancelled, _raise_if_cancelled, _short_error
     print(f"Starting Trakt sync for user {user_id}, job {job_id}")
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
@@ -1283,7 +1286,7 @@ async def run_trakt_sync(user_id: int, job_id: int, full_resync: bool = False):
             try:
                 access_token = await ensure_valid_trakt_token(db, settings)
             except TraktTokenError as exc:
-                await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.failed, error_message=str(exc)))
+                await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.failed, error_message=_short_error(exc)))
                 await db.commit()
                 return
 
@@ -1308,6 +1311,7 @@ async def run_trakt_sync(user_id: int, job_id: int, full_resync: bool = False):
                 getattr(settings, "trakt_watchlist_split", False),
                 history_start,
                 history_end,
+                dedup_window_from_settings(settings),
             )
 
             if settings.trakt_sync_watched and not history_had_errors:
@@ -1340,7 +1344,7 @@ async def run_trakt_sync(user_id: int, job_id: int, full_resync: bool = False):
             print(f"Trakt sync job {job_id} failed: {exc}")
             await db.execute(
                 update(SyncJob).where(SyncJob.id == job_id).values(
-                    status=SyncStatus.failed, error_message=str(exc)
+                    status=SyncStatus.failed, error_message=_short_error(exc)
                 )
             )
             await db.commit()
@@ -1424,7 +1428,7 @@ async def run_trakt_export_sync(
     sync_lists: bool = True,
     sync_comments: bool = True,
 ):
-    from routers.sync import SyncCancelled, _raise_if_cancelled
+    from routers.sync import SyncCancelled, _raise_if_cancelled, _short_error
     print(f"Starting Trakt export import for user {user_id}, job {job_id}")
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
@@ -1465,6 +1469,7 @@ async def run_trakt_export_sync(
                 getattr(settings, "trakt_watchlist_split", False),
                 None,
                 history_end,
+                dedup_window_from_settings(settings),
             )
 
             if sync_comments:
@@ -1494,7 +1499,7 @@ async def run_trakt_export_sync(
             print(f"Trakt export import job {job_id} failed: {exc}")
             await db.execute(
                 update(SyncJob).where(SyncJob.id == job_id).values(
-                    status=SyncStatus.failed, error_message=str(exc)
+                    status=SyncStatus.failed, error_message=_short_error(exc)
                 )
             )
             await db.commit()
@@ -1599,7 +1604,7 @@ async def trakt_import_upload(
 
 
 async def _run_trakt_push(user_id: int, job_id: int) -> None:
-    from routers.sync import SyncCancelled, _raise_if_cancelled
+    from routers.sync import SyncCancelled, _raise_if_cancelled, _short_error
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
         try:
@@ -1622,7 +1627,7 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
                 await db.execute(
                     update(SyncJob)
                     .where(SyncJob.id == job_id)
-                    .values(status=SyncStatus.failed, error_message=str(exc))
+                    .values(status=SyncStatus.failed, error_message=_short_error(exc))
                 )
                 await db.commit()
                 return
@@ -2065,7 +2070,7 @@ async def _run_trakt_push(user_id: int, job_id: int) -> None:
             await db.execute(
                 update(SyncJob)
                 .where(SyncJob.id == job_id)
-                .values(status=SyncStatus.failed, error_message=str(exc))
+                .values(status=SyncStatus.failed, error_message=_short_error(exc))
             )
             await db.commit()
 
