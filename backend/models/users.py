@@ -49,6 +49,7 @@ class UserSettings(Base):
     id             : Mapped[int]            = mapped_column(Integer, primary_key=True)
     user_id        : Mapped[int]            = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
     tmdb_api_key   : Mapped[Optional[str]]  = mapped_column(String(255))
+    rpdb_api_key   : Mapped[Optional[str]]  = mapped_column(String(255))
 
     # Radarr integration
     radarr_url             : Mapped[Optional[str]] = mapped_column(String(500))
@@ -150,6 +151,13 @@ class UserSettings(Base):
     # Playing bar drops the session -> star-rating popup), separately per type (#177).
     rate_prompt_movies   : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     rate_prompt_episodes : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+    # Minutes within which a second watch of the same movie/episode is treated
+    # as a duplicate of an existing one and not recorded again, regardless of
+    # which source (webhook, import, manual entry, ...) either one came from
+    # (#390). NULL/0 means "use the built-in minimum only" - see
+    # core.watch_dedup.DEFAULT_DEDUP_WINDOW_MINUTES.
+    duplicate_watch_window_minutes : Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # MDBList — API key authentication
     mdblist_api_key: Mapped[Optional[str]] = mapped_column(String(255))

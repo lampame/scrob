@@ -369,6 +369,7 @@ async def _settings_response(settings: UserSettings, db: AsyncSession) -> schema
     data.bingebase_connected = bool(settings.bingebase_webhook_url or settings.bingebase_api_key)
     gs_result = await db.execute(select(GlobalSettings).where(GlobalSettings.id == 1))
     gs = gs_result.scalar_one_or_none()
+    data.has_rpdb_key = bool(settings.rpdb_api_key)
     data.has_global_tmdb_key = bool(gs and gs.tmdb_api_key)
     data.has_effective_tmdb_key = bool(settings.tmdb_api_key) or data.has_global_tmdb_key
     data.has_global_tvdb_key = bool(gs and gs.tvdb_api_key)
@@ -422,8 +423,14 @@ async def update_user_settings(
         db.add(settings)
 
     # Computed read-only fields; never write them back
-    READ_ONLY_FIELDS = {"trakt_connected", "simkl_connected", "mdblist_connected", "bingebase_connected", "has_global_tmdb_key", "has_effective_tmdb_key", "has_global_tvdb_key", "has_effective_tvdb_key"}
+    READ_ONLY_FIELDS = {"trakt_connected", "simkl_connected", "mdblist_connected", "bingebase_connected", "has_rpdb_key", "has_global_tmdb_key", "has_effective_tmdb_key", "has_global_tvdb_key", "has_effective_tvdb_key"}
     update_data = {k: v for k, v in settings_in.model_dump(exclude_unset=True).items() if k not in READ_ONLY_FIELDS}
+
+    new_rpdb_key = update_data.get("rpdb_api_key")
+    if new_rpdb_key and new_rpdb_key != settings.rpdb_api_key:
+        from core import rpdb
+        if not await rpdb.validate_api_key(new_rpdb_key):
+            raise HTTPException(status_code=400, detail="RPDB could not validate this API key. Check the key and try again.")
 
     if "tmdb_api_key" in update_data and update_data["tmdb_api_key"]:
         success = await tmdb.validate_api_key(update_data["tmdb_api_key"])
@@ -854,6 +861,16 @@ async def test_tmdb(
     if not success:
         raise HTTPException(status_code=400, detail="Invalid TMDB API Key")
     return {"status": "ok", "message": "TMDB API key is valid."}
+
+@router.post("/test-rpdb")
+async def test_rpdb(
+    body: schemas.ApiKeyTestRequest,
+    response: Response,
+    current_user: User = Depends(get_current_user)
+):
+    from core import rpdb
+    _prevent_sensitive_response_caching(response)
+    return {"success": await rpdb.validate_api_key(body.key.get_secret_value())}
 
 @router.post("/test-tvdb")
 async def test_tvdb(

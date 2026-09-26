@@ -323,6 +323,39 @@ class DiscoverStudioParamsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(req.url.path, "/3/search/company")
         self.assertEqual(req.url.params.get("query"), "A24")
 
+    async def test_episode_group_paths(self) -> None:
+        req = await self._run(lambda: tmdb.get_episode_groups(1399, api_key="k"))
+        self.assertEqual(req.url.path, "/3/tv/1399/episode_groups")
+
+        req = await self._run(lambda: tmdb.get_episode_group("5f9abcd", api_key="k"))
+        self.assertEqual(req.url.path, "/3/tv/episode_group/5f9abcd")
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PickTrailerTests(unittest.TestCase):
+    """#413: the Trailer button never falls back to an English trailer for a localized request."""
+
+    def _v(self, key, *, lang="en", type_="Trailer", site="YouTube", official=False):
+        return {"key": key, "iso_639_1": lang, "type": type_, "site": site, "official": official}
+
+    def test_prefers_official_trailer(self):
+        vids = [self._v("a"), self._v("b", official=True)]
+        self.assertEqual(tmdb.pick_trailer(vids)["key"], "b")
+
+    def test_ignores_teasers_and_non_youtube(self):
+        vids = [self._v("a", type_="Teaser"), self._v("b", site="Vimeo")]
+        self.assertIsNone(tmdb.pick_trailer(vids))
+
+    def test_language_filters_out_other_languages(self):
+        vids = [self._v("en-one", lang="en", official=True)]
+        self.assertIsNone(tmdb.pick_trailer(vids, "de"))
+
+    def test_regional_language_matches_on_base_language(self):
+        vids = [self._v("pt-one", lang="pt")]
+        self.assertEqual(tmdb.pick_trailer(vids, "pt-BR")["key"], "pt-one")
+
+    def test_no_language_accepts_any(self):
+        self.assertEqual(tmdb.pick_trailer([self._v("a", lang="fr")])["key"], "a")
