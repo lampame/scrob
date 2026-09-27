@@ -156,12 +156,12 @@ Astro.response.headers.set("Cache-Control", "no-store");
     const isSuppressed = isHidden || isDropped;
     // Local copy of lib/episodeHref's episode branch - this define:vars
     // script can't import (see lib/episodeHref.ts's header comment for the
-    // full list of duplicate sites to keep in sync). #186: route to
-    // /show/tvdb/... using the translated position when the show is set to
-    // TVDB numbering, instead of guessing off tvdb_sourced alone.
-    const href = !item.tvdb_sourced && item.show_episode_order === 'tvdb' && item.show_tvdb_id
-      && item.tvdb_season_number != null && item.tvdb_episode_number != null
-      ? `/show/tvdb/${item.show_tvdb_id}/season/${item.tvdb_season_number}/${item.tvdb_episode_number}`
+    // full list of duplicate sites to keep in sync). #174: use the display
+    // position when the show is on a non-aired ordering.
+    const ordered = item.show_episode_order && item.show_episode_order !== 'tmdb:aired';
+    const href = !item.tvdb_sourced && ordered && item.show_tmdb_id
+      && item.display_season_number != null && item.display_episode_number != null
+      ? `/show/${item.show_tmdb_id}/season/${item.display_season_number}/${item.display_episode_number}`
       : !item.tvdb_sourced && item.show_tmdb_id && item.season_number != null && item.episode_number != null
       ? `/show/${item.show_tmdb_id}/season/${item.season_number}/${item.episode_number}`
       : item.show_tvdb_id && item.season_number != null && item.episode_number != null
@@ -170,7 +170,8 @@ Astro.response.headers.set("Cache-Control", "no-store");
         : item.show_tvdb_id ? `/show/tvdb/${item.show_tvdb_id}`
         : item.tmdb_id ? `/media/${item.type}/${item.tmdb_id}` : '#';
 
-    const posterSrc = tmdbImageUrl(item.show_poster_path || item.poster_path, 'w500');
+    const originalPosterSrc = tmdbImageUrl(item.show_poster_path || item.poster_path, 'w500');
+    const posterSrc = window.ratingPosterUrl(originalPosterSrc, item, window.__HAS_RPDB__);
 
     const rating = item.tmdb_rating ? Number(item.tmdb_rating).toFixed(1) : null;
     const sxe = item.season_number != null && item.episode_number != null

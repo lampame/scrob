@@ -20,6 +20,13 @@ try {
   error = e.message;
 }
 
+// #174: TMDB-matched shows render on /show/{tmdb_id} with the TVDB aired order.
+if (season?.show?.tmdb_id) {
+  return Astro.redirect(
+    `/show/${season.show.tmdb_id}/season/${season_number}`, 301,
+  );
+}
+
 if (!season && !error) {
   return Astro.redirect("/404");
 }
@@ -264,6 +271,7 @@ const seasonTitle = season
                     ) : (
                       <ActionBar
                         tmdbId={ep.tmdb_id}
+                        mediaId={ep.id}
                         mediaType="episode"
                         watched={ep.watched}
                         inLists={ep.in_lists}
@@ -280,6 +288,7 @@ const seasonTitle = season
                         ratingTitle={show?.title}
                         ratingSubtitle={ep.name || `Episode ${ep.episode_number}`}
                         ratingPosterPath={ep.image_url || season?.poster_path || show?.poster_path}
+                        airDate={ep.air_date}
                       />
                     )}
                   </div>

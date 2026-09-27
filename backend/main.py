@@ -41,6 +41,7 @@ async def _auto_sync_scheduler():
     )
     from routers.trakt import run_trakt_sync, _run_trakt_push
     from routers.simkl import run_simkl_sync, _run_simkl_push
+    from routers.wetrakr import run_wetrakr_sync, _run_wetrakr_push
     from routers.mdblist import run_mdblist_sync, run_mdblist_push
 
     # Trakt/Simkl/MDBList are single, user-level cloud connections (no
@@ -64,6 +65,15 @@ async def _auto_sync_scheduler():
             "push_flags": ("simkl_push_watched", "simkl_push_ratings"),
             "pull_runner": run_simkl_sync,
             "push_runner": _run_simkl_push,
+        },
+        {
+            "source": CollectionSource.wetrakr,
+            "connected_field": "wetrakr_access_token",
+            "auto_sync_field": "wetrakr_auto_sync_interval",
+            "auto_push_field": "wetrakr_auto_push_interval",
+            "push_flags": ("wetrakr_push_watched", "wetrakr_push_ratings"),
+            "pull_runner": run_wetrakr_sync,
+            "push_runner": _run_wetrakr_push,
         },
         {
             "source": CollectionSource.mdblist,
@@ -182,7 +192,9 @@ async def _auto_sync_scheduler():
                         f"connection {conn.id} (job {job_id})"
                     )
                     if job_type == "push":
-                        asyncio.create_task(runner(conn.user_id, conn.id, job_id))
+                        # Scheduled pushes skip what an earlier push already sent (#421, #422);
+                        # a manual push still reconciles everything.
+                        asyncio.create_task(runner(conn.user_id, conn.id, job_id, incremental=True))
                     else:
                         asyncio.create_task(runner(conn.user_id, job_id, 0, 0, conn.id))
 
@@ -750,6 +762,7 @@ app.include_router(lists.router, prefix="/lists", tags=["lists"])
 app.include_router(profile.router, prefix="/profile", tags=["profile"])
 app.include_router(trakt.router, prefix="/trakt", tags=["trakt"])
 app.include_router(simkl.router, prefix="/simkl", tags=["simkl"])
+app.include_router(wetrakr.router, prefix="/wetrakr", tags=["wetrakr"])
 app.include_router(mdblist.router, prefix="/mdblist", tags=["mdblist"])
 app.include_router(bingebase.router, prefix="/bingebase", tags=["bingebase"])
 app.include_router(comments.router, prefix="/comments", tags=["comments"])

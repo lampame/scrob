@@ -365,10 +365,12 @@ async def _settings_response(settings: UserSettings, db: AsyncSession) -> schema
     data = schemas.UserSettings.model_validate(settings)
     data.trakt_connected = bool(settings.trakt_access_token)
     data.simkl_connected = bool(settings.simkl_access_token)
+    data.wetrakr_connected = bool(settings.wetrakr_access_token)
     data.mdblist_connected = bool(settings.mdblist_api_key)
     data.bingebase_connected = bool(settings.bingebase_webhook_url or settings.bingebase_api_key)
     gs_result = await db.execute(select(GlobalSettings).where(GlobalSettings.id == 1))
     gs = gs_result.scalar_one_or_none()
+    data.has_rpdb_key = bool(settings.rpdb_api_key)
     data.has_global_tmdb_key = bool(gs and gs.tmdb_api_key)
     data.has_effective_tmdb_key = bool(settings.tmdb_api_key) or data.has_global_tmdb_key
     data.has_global_tvdb_key = bool(gs and gs.tvdb_api_key)
@@ -422,8 +424,14 @@ async def update_user_settings(
         db.add(settings)
 
     # Computed read-only fields; never write them back
-    READ_ONLY_FIELDS = {"trakt_connected", "simkl_connected", "mdblist_connected", "bingebase_connected", "has_global_tmdb_key", "has_effective_tmdb_key", "has_global_tvdb_key", "has_effective_tvdb_key"}
+    READ_ONLY_FIELDS = {"trakt_connected", "simkl_connected", "wetrakr_connected", "mdblist_connected", "bingebase_connected", "has_rpdb_key", "has_global_tmdb_key", "has_effective_tmdb_key", "has_global_tvdb_key", "has_effective_tvdb_key"}
     update_data = {k: v for k, v in settings_in.model_dump(exclude_unset=True).items() if k not in READ_ONLY_FIELDS}
+
+    new_rpdb_key = update_data.get("rpdb_api_key")
+    if new_rpdb_key and new_rpdb_key != settings.rpdb_api_key:
+        from core import rpdb
+        if not await rpdb.validate_api_key(new_rpdb_key):
+            raise HTTPException(status_code=400, detail="RPDB could not validate this API key. Check the key and try again.")
 
     if "tmdb_api_key" in update_data and update_data["tmdb_api_key"]:
         success = await tmdb.validate_api_key(update_data["tmdb_api_key"])
@@ -854,6 +862,16 @@ async def test_tmdb(
     if not success:
         raise HTTPException(status_code=400, detail="Invalid TMDB API Key")
     return {"status": "ok", "message": "TMDB API key is valid."}
+
+@router.post("/test-rpdb")
+async def test_rpdb(
+    body: schemas.ApiKeyTestRequest,
+    response: Response,
+    current_user: User = Depends(get_current_user)
+):
+    from core import rpdb
+    _prevent_sensitive_response_caching(response)
+    return {"success": await rpdb.validate_api_key(body.key.get_secret_value())}
 
 @router.post("/test-tvdb")
 async def test_tvdb(
@@ -1363,6 +1381,13 @@ async def get_connection_status(
         connected = await simkl_client.validate_token(user_settings.simkl_client_id, user_settings.simkl_access_token)
         return {"configured": True, "connected": connected}
 
+    async def check_wetrakr():
+        from core import wetrakr as wetrakr_client
+        if not user_settings or not user_settings.wetrakr_access_token:
+            return {"configured": False, "connected": False}
+        connected = await wetrakr_client.validate_token(user_settings.wetrakr_access_token)
+        return {"configured": True, "connected": connected}
+
     async def check_mdblist():
         from core import mdblist
         if not user_settings or not user_settings.mdblist_api_key:
@@ -1371,13 +1396,13 @@ async def get_connection_status(
         return {"configured": True, "connected": connected}
 
     media_server_tasks = [check_media_server(c) for c in media_server_conns]
-    rdr_status, snr_status, trakt_status, simkl_status, mdblist_status, *ms_statuses = await asyncio.gather(
-        check_radarr(), check_sonarr(), check_trakt(), check_simkl(), check_mdblist(), *media_server_tasks
+    rdr_status, snr_status, trakt_status, simkl_status, wetrakr_status, mdblist_status, *ms_statuses = await asyncio.gather(
+        check_radarr(), check_sonarr(), check_trakt(), check_simkl(), check_wetrakr(), check_mdblist(), *media_server_tasks
     )
     if any(conn.type in ("nuvio", "stremio") for conn in media_server_conns):
         await db.commit()
 
-    return {"radarr": rdr_status, "sonarr": snr_status, "trakt": trakt_status, "simkl": simkl_status, "mdblist": mdblist_status, "connections": ms_statuses}
+    return {"radarr": rdr_status, "sonarr": snr_status, "trakt": trakt_status, "simkl": simkl_status, "wetrakr": wetrakr_status, "mdblist": mdblist_status, "connections": ms_statuses}
 
 
 @router.post("/sonarr/profiles")

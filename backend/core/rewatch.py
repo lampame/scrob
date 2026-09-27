@@ -1,3 +1,5 @@
+from datetime import date
+
 from sqlalchemy import select, func, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,24 +11,78 @@ from models.show import Show as ShowModel
 from models.base import MediaType
 
 
-def capped_season_episode_counts(show: ShowModel, tmdb_extra: dict | None = None) -> dict[int, int]:
+def capped_season_episode_counts(
+    show: ShowModel, tmdb_extra: dict | None = None, today: date | None = None
+) -> dict[int, int]:
     """Per-season episode counts from cached (or freshly-fetched) TMDB metadata,
     capped at the last aired episode for shows still airing. Mirrors the
-    season_ep_counts calculation in routers.shows.get_show."""
-    season_ep_counts: dict[int, int] = {
-        s["season_number"]: s.get("episode_count", 0)
-        for s in (show.tmdb_data or {}).get("seasons", [])
-    }
+    season_ep_counts calculation in routers.shows.get_show.
 
-    last_ep = (tmdb_extra or show.tmdb_data or {}).get("last_episode_to_air")
-    if last_ep:
-        last_sn = last_ep.get("season_number")
-        last_en = last_ep.get("episode_number")
-        if last_sn in season_ep_counts:
-            season_ep_counts[last_sn] = last_en
+    Unaired episodes are excluded three ways, so a still-airing (or between-
+    seasons) show doesn't inflate a total (#385):
+    - cap the current season at last_episode_to_air, but only if it has
+      actually aired - TMDB's copy often runs a day or two ahead;
+    - if next_episode_to_air is set, everything from it onward is unaired;
+    - drop any whole season whose premiere date is still in the future, which
+      also covers TVDB-sourced shows that carry neither *_episode_to_air field.
+
+    That third check alone still let a renewed-but-unscheduled season through
+    (#385 follow-up): TMDB sometimes adds a placeholder next season with a
+    nonzero episode_count and NO air_date at all (not a future one - simply
+    absent, since nothing's been scheduled yet), and "no date" fails an
+    "is this date in the future" check either way. When last/next_episode_to_air
+    are both missing too - the only case this whole-season check is actually
+    relied on, since a real cap already zeroes anything past it regardless of
+    that season's own date - and the show is confirmed still active
+    ("Returning Series" or similar, not "Ended"/"Canceled"), a season is only
+    kept if its air_date is on or before today; missing no longer assumed
+    fine there, mirroring _has_confirmed_air_date's reasoning for Next Up.
+    A concluded show (or one with no status recorded at all) keeps the old,
+    lenient reading - it has nothing left to announce, so a season with no
+    air_date recorded is just an ordinary metadata gap, not a sign it hasn't
+    happened yet.
+    """
+    seasons = (show.tmdb_data or {}).get("seasons", [])
+    season_ep_counts: dict[int, int] = {
+        s["season_number"]: s.get("episode_count", 0) for s in seasons
+    }
+    today_str = (today or date.today()).isoformat()
+    data = tmdb_extra or show.tmdb_data or {}
+    last_ep = data.get("last_episode_to_air") or {}
+    next_ep = data.get("next_episode_to_air") or {}
+
+    cap: tuple[int, int] | None = None
+    if last_ep.get("season_number") is not None and last_ep.get("episode_number") is not None:
+        aired = not last_ep.get("air_date") or last_ep["air_date"] <= today_str
+        cap = (
+            last_ep["season_number"],
+            last_ep["episode_number"] if aired else last_ep["episode_number"] - 1,
+        )
+    if next_ep.get("season_number") is not None and next_ep.get("episode_number") is not None:
+        before_next = (next_ep["season_number"], next_ep["episode_number"] - 1)
+        cap = before_next if cap is None else min(cap, before_next)
+
+    if cap is not None:
+        cap_sn, cap_en = cap
+        if cap_sn in season_ep_counts:
+            season_ep_counts[cap_sn] = max(0, min(season_ep_counts[cap_sn], cap_en))
         for sn in season_ep_counts:
-            if sn > last_sn:
+            if sn > cap_sn:
                 season_ep_counts[sn] = 0
+
+    still_active = getattr(show, "status", None) in ("Returning Series", "In Production", "Planned", "Pilot")
+    for s in seasons:
+        air = s.get("air_date")
+        confirmed_past = bool(air) and air <= today_str
+        if cap is None and still_active:
+            # No last/next_episode_to_air data to anchor on, and the show is
+            # confirmed still active - the only remaining signal is each
+            # season's own air_date, so an unconfirmed one can't be assumed
+            # fine (#385 follow-up).
+            if not confirmed_past:
+                season_ep_counts[s["season_number"]] = 0
+        elif air and air > today_str:
+            season_ep_counts[s["season_number"]] = 0
 
     return season_ep_counts
 

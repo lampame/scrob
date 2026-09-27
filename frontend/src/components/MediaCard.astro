@@ -1,8 +1,10 @@
 ---
 import type { MediaItem } from "../lib/api";
 import { tmdbImageUrl } from "../lib/api";
+import { ratingPosterUrl } from "../lib/posters";
 import CardActionBar from "./CardActionBar.astro";
 import { episodeHref } from "../lib/episodeHref";
+import { episodeCode } from "../lib/media-format";
 
 interface Props {
   item: MediaItem;
@@ -20,9 +22,7 @@ const isEpisode = item.type === "episode";
 // it shares media with the whole show, so it's split out from the plain whole-show case.
 const isSeason = item.type === "series" && item.season_number != null;
 const isSeries = (item.type === "series" && item.season_number == null) || (item.type === "episode" && !item.season_number && !item.id);
-const sxe = isEpisode && item.season_number != null && item.episode_number != null
-  ? `S${String(item.season_number).padStart(2, '0')}E${String(item.episode_number).padStart(2, '0')}`
-  : null;
+const sxe = isEpisode ? episodeCode(item) : null;
 
 const href = isPerson
   ? `/person/${item.tmdb_id}`
@@ -31,10 +31,10 @@ const href = isPerson
     : episodeHref(item);
 
 const cardTitle = isSeason ? `Season ${item.season_number}` : item.title;
-const posterPath = tmdbImageUrl(
+const posterPath = ratingPosterUrl(tmdbImageUrl(
   (isEpisode || isSeason) && item.show_poster_path ? item.show_poster_path : item.poster_path,
   "w500"
-);
+), item, Astro.locals.hasRpdbKey);
 
 const showActionBar = !isPerson && !isCollection && !!user;
 // Seasons get the same percentage-style Watched/Collected labels as a whole show
@@ -57,6 +57,7 @@ const inLibrary = item.in_library ?? false;
   data-show-tvdb-id={item.show_tvdb_id ? String(item.show_tvdb_id) : ""}
   data-season={item.season_number != null ? String(item.season_number) : ""}
   data-episode-number={item.episode_number != null ? String(item.episode_number) : ""}
+  data-air-date={item.release_date ?? ""}
 >
   <!-- Clickable poster -->
   {href ? (
