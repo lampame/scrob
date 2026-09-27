@@ -1,6 +1,7 @@
 import asyncio
 import re
 import httpx
+from datetime import datetime
 from typing import Optional, List, Dict
 
 TIMEOUT = httpx.Timeout(120.0)  # 120 second timeout
@@ -444,15 +445,16 @@ async def scan_libraries(url: str, token: str) -> bool:
 
 PUSH_TIMEOUT = httpx.Timeout(15.0)  # shorter timeout for bulk push operations
 
-async def mark_watched(url: str, token: str, user_id: str, item_id: str, client: httpx.AsyncClient | None = None) -> bool:
-    """Mark a Jellyfin item as played."""
+async def mark_watched(url: str, token: str, user_id: str, item_id: str, client: httpx.AsyncClient | None = None, played_at: datetime | None = None) -> bool:
+    """Mark a Jellyfin/Emby item as played, optionally stamped with the original watch date (naive UTC)."""
     headers = _auth_headers(token)
+    params = {"DatePlayed": played_at.strftime("%Y-%m-%dT%H:%M:%SZ")} if played_at else None
     try:
         if client:
-            r = await client.post(f"{url.rstrip('/')}/Users/{user_id}/PlayedItems/{item_id}", headers=headers)
+            r = await client.post(f"{url.rstrip('/')}/Users/{user_id}/PlayedItems/{item_id}", headers=headers, params=params)
             return r.status_code < 400
         async with httpx.AsyncClient(timeout=PUSH_TIMEOUT, follow_redirects=False) as c:
-            r = await c.post(f"{url.rstrip('/')}/Users/{user_id}/PlayedItems/{item_id}", headers=headers)
+            r = await c.post(f"{url.rstrip('/')}/Users/{user_id}/PlayedItems/{item_id}", headers=headers, params=params)
             return r.status_code < 400
     except Exception:
         return False

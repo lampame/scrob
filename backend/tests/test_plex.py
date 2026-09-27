@@ -38,6 +38,51 @@ class GetHistorySinceCursorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["viewedAt>"], str(expected_epoch))
 
 
+class GetHistoryDecodingResilienceTests(unittest.IsolatedAsyncioTestCase):
+    """#388: some Plex Media Server setups emit a genuinely non-UTF-8 byte in
+    a scraped field (e.g. a legacy-agent title) despite the response
+    otherwise being well-formed JSON - this must not take down decoding of
+    the whole response, or discard whatever pages of history already
+    succeeded before a later page failed some other way."""
+
+    async def test_get_decodes_leniently_instead_of_raising(self) -> None:
+        # \xd0 followed by an ASCII byte is exactly the reported failure:
+        # a lead byte for a 2-byte UTF-8 sequence with no valid continuation
+        # byte after it.
+        bad_bytes = b'{"MediaContainer": {"Metadata": [{"title": "Bad\xd0Title"}], "totalSize": 1}}'
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=bad_bytes, headers={"content-type": "application/json"})
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            plex.httpx, "AsyncClient", side_effect=lambda **kw: _REAL_ASYNC_CLIENT(transport=transport, **kw),
+        ):
+            data = await plex._get("http://plex.local/status/sessions/history/all", "token")
+
+        self.assertEqual(data["MediaContainer"]["Metadata"][0]["title"], "Bad�Title")
+
+    async def test_get_history_keeps_already_fetched_pages_on_a_later_failure(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            start = request.url.params.get("X-Plex-Container-Start")
+            if start == "0":
+                return httpx.Response(200, json={
+                    "MediaContainer": {
+                        "Metadata": [{"ratingKey": "1"}, {"ratingKey": "2"}],
+                        "totalSize": 4,
+                    },
+                })
+            return httpx.Response(500)
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            plex.httpx, "AsyncClient", side_effect=lambda **kw: _REAL_ASYNC_CLIENT(transport=transport, **kw),
+        ):
+            items = await plex.get_history("http://plex.local", "token")
+
+        self.assertEqual([i["ratingKey"] for i in items], ["1", "2"])
+
+
 class PlexSeasonRatingTests(unittest.IsolatedAsyncioTestCase):
     async def test_resolve_season_rating_key_uses_parent_show_tmdb_id(self) -> None:
         requested_paths: list[str] = []

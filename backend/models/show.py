@@ -14,6 +14,12 @@ class Show(Base):
     id             : Mapped[int]             = mapped_column(Integer, primary_key=True)
     tmdb_id        : Mapped[Optional[int]]    = mapped_column(Integer, unique=True, nullable=True)
     tvdb_id        : Mapped[Optional[int]]    = mapped_column(Integer, unique=True, nullable=True)
+    # Which provider's season/episode numbering this show's Media rows use:
+    # "tmdb" (default) or "tvdb" (show created from TheTVDB with no TMDB
+    # counterpart). Fixed at creation. Gaining the other provider's id later
+    # backfills ids, it never renumbers - every watch event and progress row
+    # hangs off the existing positions.
+    canonical_source : Mapped[str]           = mapped_column(String(10), nullable=False, default="tmdb", server_default="tmdb")
     title          : Mapped[str]             = mapped_column(String(500), nullable=False)
     original_title : Mapped[Optional[str]]   = mapped_column(String(500))
     overview       : Mapped[Optional[str]]   = mapped_column(Text)

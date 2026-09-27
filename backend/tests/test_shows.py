@@ -1,7 +1,7 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
@@ -81,8 +81,9 @@ class GetEpisodeDetailTvdbFallbackMappingTests(unittest.IsolatedAsyncioTestCase)
     async def test_mapped_episode_translates_to_real_tvdb_position(self) -> None:
         show = SimpleNamespace(tmdb_id=980001, tvdb_id=980002)
         mapping = SimpleNamespace(tvdb_season_number=4, tvdb_episode_number=12)
-        # Query order: 1) show lookup, 2) EpisodeOrderMapping lookup.
-        db = _FakeSession([show, mapping])
+        # Query order: 1) show lookup, 2) episode-order preference (none),
+        # 3) EpisodeOrderMapping lookup.
+        db = _FakeSession([show, None, mapping])
 
         tvdb_calls = []
 
@@ -102,8 +103,9 @@ class GetEpisodeDetailTvdbFallbackMappingTests(unittest.IsolatedAsyncioTestCase)
 
     async def test_unmapped_episode_raises_instead_of_guessing(self) -> None:
         show = SimpleNamespace(tmdb_id=980001, tvdb_id=980002)
-        # Query order: 1) show lookup, 2) EpisodeOrderMapping lookup (none found).
-        db = _FakeSession([show, None])
+        # Query order: 1) show lookup, 2) episode-order preference (none),
+        # 3) EpisodeOrderMapping lookup (none found).
+        db = _FakeSession([show, None, None])
 
         with patch("routers.shows.get_user_tmdb_key", AsyncMock(return_value="key")), \
              patch("routers.shows.check_tmdb_key", lambda k: True), \
@@ -161,7 +163,7 @@ class RefreshShowMetadataTvdbFallbackCorruptionTests(unittest.IsolatedAsyncioTes
         show = self._show()
         tvdb_ep = SimpleNamespace(
             id=102, media_type=MediaType.episode, season_number=1, episode_number=2, show_id=show.id,
-            title="Stale Title", overview="stale", tmdb_id=888888,
+            title="Stale Title", overview="stale", tmdb_id=None, tvdb_id=888888,
             tmdb_data={"runtime": 20, "tvdb_episode_id": 888888, "source": "tvdb"},
         )
         db = _FakeSessionWithNesting([show, [tvdb_ep], []])
@@ -184,5 +186,113 @@ class RefreshShowMetadataTvdbFallbackCorruptionTests(unittest.IsolatedAsyncioTes
         self.assertEqual(tvdb_ep.title, "Refreshed Title")
 
 
+class RemapShowSeasonsTests(unittest.TestCase):
+    """#174: _remap_show_seasons rewrites a show payload's season structures
+    into a non-aired ordering."""
+
+    def _pos(self, ds, de, cs, ce, eid):
+        return SimpleNamespace(
+            display_season=ds, display_episode=de,
+            tmdb_season_number=cs, tmdb_episode_number=ce, tmdb_episode_id=eid,
+        )
+
+    def test_regroups_and_renumbers_episodes_and_meta(self):
+        by_canonical = {
+            (1, 1): self._pos(1, 1, 1, 1, 10),
+            (1, 2): self._pos(1, 3, 1, 2, 11),  # aired S1E2 -> display S1E3
+            (2, 1): self._pos(1, 2, 2, 1, 20),  # aired S2E1 -> display S1E2
+        }
+        payload = {
+            "poster_path": "/p.jpg",
+            "seasons": {
+                "season_1": [
+                    {"tmdb_id": 10, "season_number": 1, "episode_number": 1, "title": "A"},
+                    {"tmdb_id": 11, "season_number": 1, "episode_number": 2, "title": "B"},
+                ],
+                "season_2": [
+                    {"tmdb_id": 20, "season_number": 2, "episode_number": 1, "title": "C"},
+                ],
+            },
+        }
+        shows._remap_show_seasons(payload, by_canonical)
+
+        s1 = payload["seasons"]["season_1"]
+        self.assertEqual([(e["episode_number"], e["title"]) for e in s1], [(1, "A"), (2, "C"), (3, "B")])
+        self.assertEqual(s1[1]["canonical_season_number"], 2)
+        self.assertEqual(s1[1]["canonical_episode_number"], 1)
+        self.assertEqual(payload["seasons_meta"], [
+            {"season_number": 1, "name": "Season 1", "overview": None,
+             "poster_path": "/p.jpg", "episode_count": 3, "air_date": None},
+        ])
+
+    def test_drops_episodes_the_order_does_not_place(self):
+        by_canonical = {(1, 1): self._pos(1, 1, 1, 1, 10)}
+        payload = {"seasons": {"season_1": [
+            {"tmdb_id": 10, "season_number": 1, "episode_number": 1},
+            {"tmdb_id": 99, "season_number": 1, "episode_number": 9},
+        ]}}
+        shows._remap_show_seasons(payload, by_canonical)
+        self.assertEqual(len(payload["seasons"]["season_1"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TvdbSeasonArtTests(unittest.IsolatedAsyncioTestCase):
+    """Seasons under a tvdb:* ordering take TheTVDB's own season posters and
+    names instead of the show poster (reported on Reacher). Type-specific
+    entries (DVD, absolute, ...) fall back per field to the official season
+    with the same number, since TVDB rarely fills those in."""
+
+    _RAW = {"seasons": [
+        {"type": {"id": 1, "type": "official"}, "number": 1, "image": "/banners/s1.jpg", "name": "Killing Floor", "premiereDate": "2022-02-03"},
+        {"type": {"id": 1, "type": "official"}, "number": 2, "image": "/banners/s2.jpg", "name": "Bad Luck and Trouble", "premiereDate": "2023-12-15"},
+        {"type": {"id": 2, "type": "dvd"}, "number": 1, "image": "/banners/dvd1.jpg", "name": None, "premiereDate": None},
+        {"type": {"id": 2, "type": "dvd"}, "number": 2, "image": None, "name": None, "premiereDate": None},
+        {"type": {"id": 77, "type": "alternate"}, "number": 1, "image": None, "name": "Arc One", "premiereDate": None},
+    ]}
+
+    async def _art(self, order_key, key="tvdb-key", tvdb_id=366924):
+        with patch("routers.shows.get_user_tvdb_key", AsyncMock(return_value=key)), \
+             patch("routers.shows.tvdb_client.get_series", AsyncMock(return_value=self._RAW)):
+            return await shows._tvdb_season_art(MagicMock(), 7, order_key, tvdb_id)
+
+    async def test_official_order_uses_official_art(self):
+        art = await self._art("tvdb:official")
+        self.assertEqual(art[1]["poster_path"], "https://artworks.thetvdb.com/banners/s1.jpg")
+        self.assertEqual(art[2]["name"], "Bad Luck and Trouble")
+        self.assertEqual(art[1]["air_date"], "2022-02-03")
+
+    async def test_typed_order_prefers_its_own_art_then_official(self):
+        art = await self._art("tvdb:dvd")
+        self.assertEqual(art[1]["poster_path"], "https://artworks.thetvdb.com/banners/dvd1.jpg")
+        self.assertEqual(art[1]["name"], "Killing Floor")  # DVD S1 has no name -> official
+        self.assertEqual(art[2]["poster_path"], "https://artworks.thetvdb.com/banners/s2.jpg")  # DVD S2 no image -> official
+
+    async def test_custom_type_id_matches_by_id(self):
+        art = await self._art("tvdb:type:77")
+        self.assertEqual(art[1]["name"], "Arc One")
+        self.assertEqual(art[1]["poster_path"], "https://artworks.thetvdb.com/banners/s1.jpg")
+
+    async def test_empty_without_key_or_id_or_for_tmdb_orders(self):
+        self.assertEqual(await self._art("tvdb:dvd", key=None), {})
+        self.assertEqual(await self._art("tvdb:dvd", tvdb_id=None), {})
+        self.assertEqual(await self._art("tmdb:group:abc"), {})
+
+    def test_remap_overlays_season_art_on_meta_and_fallback_posters(self):
+        pos = SimpleNamespace(display_season=1, display_episode=1, tmdb_season_number=1, tmdb_episode_number=1, tmdb_episode_id=10)
+        payload = {
+            "poster_path": "/show.jpg",
+            "seasons": {"season_1": [
+                {"tmdb_id": 10, "season_number": 1, "episode_number": 1, "title": "A", "poster_path": "/show.jpg"},
+            ]},
+        }
+        art = {1: {"poster_path": "https://artworks.thetvdb.com/banners/s1.jpg", "name": "Killing Floor", "air_date": "2022-02-03"}}
+        shows._remap_show_seasons(payload, {(1, 1): pos}, art)
+        self.assertEqual(payload["seasons_meta"], [{
+            "season_number": 1, "name": "Killing Floor", "overview": None,
+            "poster_path": "https://artworks.thetvdb.com/banners/s1.jpg", "episode_count": 1, "air_date": "2022-02-03",
+        }])
+        # An episode that was only showing the show poster now shows its season's.
+        self.assertEqual(payload["seasons"]["season_1"][0]["poster_path"], "https://artworks.thetvdb.com/banners/s1.jpg")
