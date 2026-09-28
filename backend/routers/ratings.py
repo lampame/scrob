@@ -20,25 +20,17 @@ router = APIRouter()
 
 
 class RatingIn(BaseModel):
-    tmdb_id: int
+    # Any one of media_id / tmdb_id / tvdb_id identifies the item (a
+    # TVDB-only episode has no tmdb_id - see core/identity.py).
+    tmdb_id: Optional[int] = None
+    tvdb_id: Optional[int] = None
+    media_id: Optional[int] = None
     media_type: str
     rating: float = Field(..., ge=0.0, le=10.0)
     review: Optional[str] = None
     season_number: Optional[int] = None
     episode_order: Optional[str] = None
 
-
-async def _find_media(db: AsyncSession, tmdb_id: int, media_type: MediaType) -> Optional[Media]:
-    """Look up a Media row by (tmdb_id, media_type). Duplicate rows for the same
-    key exist in the wild - most commonly for episodes, from concurrent webhook/
-    sync ingestion racing to create the same one - so this deterministically
-    picks the oldest row instead of crashing with MultipleResultsFound (#157)."""
-    result = await db.execute(
-        select(Media)
-        .where(Media.tmdb_id == tmdb_id, Media.media_type == media_type)
-        .order_by(Media.id)
-    )
-    return result.scalars().first()
 
 
 def format_rating(rating: Rating, media: Media) -> dict:
@@ -83,8 +75,12 @@ async def submit_rating(
         raise HTTPException(status_code=400, detail=f"Invalid media_type: {body.media_type}")
 
     # Look up existing Media row, create on-the-fly if missing
-    media = await _find_media(db, body.tmdb_id, media_type)
+    media = await find_media(
+        db, media_type, media_id=body.media_id, tmdb_id=body.tmdb_id, tvdb_id=body.tvdb_id,
+    )
 
+    if not media and not body.tmdb_id:
+        raise HTTPException(status_code=404, detail="Media not found")
     if not media:
         from routers.media import get_user_tmdb_key
         from core import tmdb
@@ -105,13 +101,15 @@ async def submit_rating(
             raise HTTPException(status_code=404, detail=f"TMDB Media not found: {e}")
 
     effective_season = None if media_type == MediaType.episode else body.season_number
-    effective_episode_order = (
-        body.episode_order
-        if media_type == MediaType.series and effective_season is not None
-        else None
-    )
-    if effective_episode_order not in (None, "tvdb"):
-        raise HTTPException(status_code=400, detail="Invalid episode order")
+    # A season rating carries the ordering it was made under (#174) so
+    # "Season 3" of DVD order and of aired order stay distinct. NULL = aired.
+    effective_episode_order = None
+    if media_type == MediaType.series and effective_season is not None and body.episode_order:
+        try:
+            key = validate_episode_order(body.episode_order)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid episode order")
+        effective_episode_order = None if is_aired_order(key) else key
 
     result2 = await db.execute(
         select(Rating).where(
@@ -213,8 +211,10 @@ async def get_media_rating(
 
 @router.delete("")
 async def delete_rating(
-    tmdb_id: int,
     media_type: str,
+    tmdb_id: Optional[int] = Query(None),
+    tvdb_id: Optional[int] = Query(None),
+    media_id: Optional[int] = Query(None),
     season_number: Optional[int] = Query(None),
     episode_order: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
@@ -224,17 +224,18 @@ async def delete_rating(
         mt = MediaType(media_type)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid media_type: {media_type}")
+    if not (tmdb_id or tvdb_id or media_id):
+        raise HTTPException(status_code=400, detail="One of tmdb_id, tvdb_id or media_id is required")
 
-    media = await _find_media(db, tmdb_id, mt)
+    media = await find_media(db, mt, media_id=media_id, tmdb_id=tmdb_id, tvdb_id=tvdb_id)
     if not media:
         raise HTTPException(status_code=404, detail="Media not found")
 
     effective_season = None if mt == MediaType.episode else season_number
-    effective_episode_order = (
-        episode_order
-        if mt == MediaType.series and effective_season is not None
-        else None
-    )
+    effective_episode_order = None
+    if mt == MediaType.series and effective_season is not None and episode_order:
+        key = normalize_order_key(episode_order)
+        effective_episode_order = None if is_aired_order(key) else key
 
     result = await db.execute(
         select(Rating).where(

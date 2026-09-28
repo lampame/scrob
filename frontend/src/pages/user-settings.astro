@@ -755,13 +755,16 @@ const COUNTRIES = [
       }
     });
 
-    // Show/hide backfill section as language select changes
+    // Hide the backfill section as soon as the select is cleared - safe to
+    // do immediately since it only ever removes the option to start a job.
+    // The reverse (showing it) must NOT happen here: the backfill endpoint
+    // needs the language actually persisted, and reacting to the select's
+    // live value let a user pick a language and hit "Start" before ever
+    // saving, which 400'd with "No metadata language set" (#401). Revealing
+    // it is handled by the save handler above, only after a successful save.
     document.getElementById('metadata_language')?.addEventListener('change', (e) => {
       const val = (e.target as HTMLSelectElement).value;
-      if (backfillSection) {
-        if (val) backfillSection.classList.remove('hidden');
-        else backfillSection.classList.add('hidden');
-      }
+      if (!val) backfillSection?.classList.add('hidden');
     });
 
     // ── Metadata language combobox ─────────────────────────────────────────

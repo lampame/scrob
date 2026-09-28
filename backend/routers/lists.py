@@ -18,6 +18,7 @@ from models.follows import Follow
 from models.global_settings import GlobalSettings
 from routers.media import enrich_with_state, require_anon_nav_allowed
 from core.enrichment import is_unmapped_tvdb_episode, create_media_safely
+from core.identity import find_media
 from core.translations import (
     apply_media_translations,
     get_media_translations,
@@ -77,7 +78,12 @@ class ListUpdate(BaseModel):
 
 
 class ListItemAdd(BaseModel):
-    tmdb_id: int
+    # Any one of media_id / tmdb_id / tvdb_id identifies the item. Creating a
+    # row that doesn't exist yet still needs a tmdb_id (it is fetched from
+    # TMDB); a TVDB-only episode always exists locally already.
+    tmdb_id: Optional[int] = None
+    tvdb_id: Optional[int] = None
+    media_id: Optional[int] = None
     media_type: MediaType
     season_number: Optional[int] = None
 
@@ -117,7 +123,7 @@ def _format_item(item: ListItem) -> dict:
         "notes": item.notes,
         "media": {
             "id": media.id,
-            "tmdb_id": media.tmdb_id,
+            "tmdb_id": media.tmdb_id, "tvdb_id": media.tvdb_id, "imdb_id": media.imdb_id,
             "type": media.media_type,
             "title": media.title,
             "poster_path": media.poster_path,
@@ -674,19 +680,19 @@ async def add_list_item(
     if body.season_number is not None and body.media_type != MediaType.series:
         raise HTTPException(status_code=400, detail="season_number is only valid for media_type=series")
 
-    media_result = await db.execute(
-        select(Media)
-        .options(selectinload(Media.show))
-        .where(Media.tmdb_id == body.tmdb_id, Media.media_type == body.media_type)
-        .order_by(Media.id)
+    media = await find_media(
+        db, body.media_type,
+        media_id=body.media_id, tmdb_id=body.tmdb_id, tvdb_id=body.tvdb_id,
+        load_show=True,
     )
-    media = media_result.scalars().first()
 
     from routers.media import get_user_tmdb_key
     from core import tmdb
 
     api_key = await get_user_tmdb_key(db, current_user.id)
 
+    if not media and not body.tmdb_id:
+        raise HTTPException(status_code=404, detail="Media not found")
     if not media:
         try:
             if body.media_type == MediaType.movie:
@@ -723,7 +729,7 @@ async def add_list_item(
                 )
         except Exception as e:
             raise HTTPException(status_code=404, detail=f"Media not found: {e}")
-    elif not media.adult and body.media_type in (MediaType.movie, MediaType.series):
+    elif body.tmdb_id and not media.adult and body.media_type in (MediaType.movie, MediaType.series):
         # Existing record may pre-date the adult flag — refresh from TMDB
         try:
             if body.media_type == MediaType.movie:
@@ -736,8 +742,11 @@ async def add_list_item(
             pass
 
     if body.season_number is not None:
+        season_show_tmdb_id = body.tmdb_id or media.tmdb_id
+        if not season_show_tmdb_id:
+            raise HTTPException(status_code=404, detail="Season not found")
         try:
-            await tmdb.get_season(body.tmdb_id, body.season_number, api_key=api_key)
+            await tmdb.get_season(season_show_tmdb_id, body.season_number, api_key=api_key)
         except Exception:
             raise HTTPException(status_code=404, detail="Season not found")
 

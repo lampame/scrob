@@ -29,12 +29,9 @@ const RAW_ICON_SVGS: Record<string, string> = {
   websocket: `<svg width="36" height="36" viewBox="0 0 256 256" class="shrink-0"><title>WebSocket</title><path fill="#ffffff" d="M192.4 144.6h31.8v-76.3l-35.8-35.8-22.5 22.5 26.5 26.5v63zm31.9 15.9h-46.3l-64.5 0-26.5-26.5 11.2-11.2 21.9 21.9h45.1l-44.4-44.4 11.3-11.3 44.4 44.4v-45l-21.8-21.8 11.2-11.2-55.1-55.1-54.3 0h-56.3l31.7 31.7h.2l65.5 0 23.2 23.2-33.9 33.9-23.2-23.2v-18h-31.8v31.2l55 55-22.4 22.4 35.8 35.8 54.3 0h101.6l-31.7-31.5z"/></svg>`,
 };
 
-// Services with no brand asset available - fall back to a small colored
-// monogram badge, same treatment Bingebase's card already uses.
-const MONOGRAM_ICONS: Record<string, { label: string; classes: string }> = {
-  arvio: { label: "AR", classes: "bg-teal-500/15 text-teal-400" },
-  nuvio: { label: "NV", classes: "bg-cyan-500/15 text-cyan-400" },
-};
+// No services currently need the monogram fallback below, but the
+// mechanism stays for any future integration with no brand asset.
+const MONOGRAM_ICONS: Record<string, { label: string; classes: string }> = {};
 
 export function connectionIconHtml(type: string): string {
   const raw = RAW_ICON_SVGS[type];
