@@ -3,9 +3,13 @@ import Base from "../../../layouts/Base.astro";
 import MediaRow from "../../../components/MediaRow.astro";
 import ActionBar from "../../../components/ActionBar.astro";
 import CommentsSection from "../../../components/CommentsSection.astro";
+import TraktCommentsSection from "../../../components/TraktCommentsSection.astro";
+import CastCrewSection from "../../../components/CastCrewSection.astro";
 import VideoPlayer from "../../../components/VideoPlayer.astro";
 import ManualScrobble from "../../../components/ManualScrobble.astro";
+import TrailerButton from "../../../components/TrailerButton.astro";
 import { api, type MediaItem } from "../../../lib/api";
+import { ratingPosterUrl } from "../../../lib/posters";
 export const prerender = false;
 
 const { type, id } = Astro.params;
@@ -30,6 +34,9 @@ const rating = item?.tmdb_rating ? item.tmdb_rating.toFixed(1) : null;
 const isEpisode = item?.type === "episode";
 const isMovie = item?.type === "movie";
 const collection = item?.collection;
+const posterPath = item && !isEpisode
+  ? ratingPosterUrl(item.poster_path, item, Astro.locals.hasRpdbKey)
+  : item?.poster_path;
 
 // Header for the shared rating popover (shown once the modal dims the page).
 // ActionBar prefixes the SxxExx itself, so pass just the episode name here.
@@ -37,7 +44,7 @@ const rateTitle = isEpisode ? (item?.show_title ?? item?.title) : item?.title;
 const rateSubtitle = isEpisode ? (item?.title ?? "") : "";
 // Episode: the landscape still (ActionBar flags episodes landscape), show
 // poster as fallback. Movie: its poster.
-const ratePosterPath = isEpisode ? (item?.poster_path ?? item?.show_poster_path) : item?.poster_path;
+const ratePosterPath = isEpisode ? (item?.poster_path ?? item?.show_poster_path) : posterPath;
 const showRefreshBtn = !!user && item?.in_library && (item.type === "movie" || (isEpisode && !!item.show_tmdb_id));
 
 const today = new Date();
@@ -101,10 +108,10 @@ const refreshUrl = isEpisode
           <!-- Poster -->
           <div class="w-64 shrink-0 mx-auto md:mx-0">
             <div class="aspect-[2/3] rounded-2xl overflow-hidden shadow-2xl border border-zinc-800 bg-zinc-900 ring-1 ring-white/10 relative" data-adult={item.adult ? "true" : undefined}>
-              {item.poster_path ? (
+              {posterPath ? (
                 <button id="poster-zoom-btn" class="w-full h-full group/poster block cursor-zoom-in" aria-label={`Enlarge poster for ${item.title}`}>
                   <img
-                    src={item.poster_path}
+                    src={posterPath}
                     alt={item.title}
                     class="w-full h-full object-cover transition-transform duration-300 group-hover/poster:scale-105"
                     loading="eager"
@@ -255,6 +262,7 @@ const refreshUrl = isEpisode
                   ratingPosterPath={ratePosterPath}
                   showDrop={item.type === 'movie'}
                   dropped={item.dropped ?? false}
+                  airDate={item.release_date}
                 />
               </div>
             )}
@@ -302,7 +310,7 @@ const refreshUrl = isEpisode
               </div>
             )}
 
-            {((item.type === 'movie' || item.type === 'episode') && (item.in_library ?? false)) && (
+            {(isMovie || (isEpisode && (item.in_library ?? false))) && (
               <div class="mb-8 flex flex-wrap gap-3 items-start">
                 {showRefreshBtn && (
                   <button
@@ -327,6 +335,9 @@ const refreshUrl = isEpisode
                     token={token}
                     secondary
                   />
+                )}
+                {isMovie && (
+                  <TrailerButton tmdbId={item.tmdb_id} mediaType="movie" title={item.title} year={year} />
                 )}
               </div>
             )}
@@ -374,39 +385,7 @@ const refreshUrl = isEpisode
           </div>
         </div>
 
-        <!-- Cast -->
-        {item.cast?.length > 0 && (
-          <div class="mt-24 border-zinc-900 pt-16">
-            <div class="flex items-center justify-between mb-10">
-              <h2 class="text-3xl font-black text-zinc-100 tracking-tighter uppercase">Top Cast</h2>
-            </div>
-            <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-6">
-              {item.cast.slice(0, 12).map((person) => (
-                <a href={`/person/${person.tmdb_id}`} class="group/cast bg-zinc-900/20 border border-zinc-800/40 p-4 rounded-3xl hover:bg-zinc-800/40 hover:border-blue-500/50 transition-all duration-500 hover:shadow-2xl hover:shadow-blue-900/10 active:scale-95 active:opacity-70">
-                  <div class="aspect-square w-full rounded-2xl overflow-hidden mb-5 ring-2 ring-zinc-800/50 group-hover/cast:ring-blue-500 transition-all duration-500 shadow-lg">
-                    {person.profile_path ? (
-                      <img
-                        src={person.profile_path}
-                        alt={person.name}
-                        class="w-full h-full object-cover group-hover/cast:scale-110 transition-transform duration-700"
-                        loading="lazy"
-                        decoding="async"
-                      />
-                    ) : (
-                      <div class="w-full h-full bg-zinc-800 flex items-center justify-center text-zinc-400 text-4xl">
-                        👤
-                      </div>
-                    )}
-                  </div>
-                  <div class="space-y-1.5 text-center">
-                    <p class="text-sm font-black text-zinc-100 group-hover/cast:text-blue-400 transition-colors line-clamp-1 leading-tight">{person.name}</p>
-                    <p class="text-[11px] text-zinc-500 font-bold uppercase tracking-wider line-clamp-1 opacity-80">{person.character}</p>
-                  </div>
-                </a>
-              ))}
-            </div>
-          </div>
-        )}
+        <CastCrewSection cast={item.cast} crew={item.crew} />
 
         {collection && collection.parts?.length > 1 && (
           <div class="mt-32">
@@ -421,6 +400,14 @@ const refreshUrl = isEpisode
         <CommentsSection
           mediaType={item.type}
           tmdbId={item.tmdb_id}
+          seasonNumber={isEpisode ? item.season_number : undefined}
+          episodeNumber={isEpisode ? item.episode_number : undefined}
+        />
+
+        <TraktCommentsSection
+          mediaType={isEpisode ? "show" : "movie"}
+          tmdbId={isEpisode ? item.show_tmdb_id : item.tmdb_id}
+          tvdbId={isEpisode ? item.show_tvdb_id : undefined}
           seasonNumber={isEpisode ? item.season_number : undefined}
           episodeNumber={isEpisode ? item.episode_number : undefined}
         />
@@ -484,11 +471,11 @@ const refreshUrl = isEpisode
   }
 </script>
 
-{item?.poster_path && (
+{item && posterPath && (
   <div id="poster-modal" class="fixed inset-0 z-[999] flex items-center justify-center hidden" role="dialog" aria-modal="true">
     <div id="poster-modal-backdrop" class="absolute inset-0 bg-black/90 backdrop-blur-sm cursor-pointer"></div>
     <img
-      src={item.poster_path}
+      src={posterPath}
       alt={item.title}
       class="relative max-h-[90vh] max-w-[85vw] md:max-w-[50vw] object-contain rounded-2xl shadow-2xl ring-1 ring-white/10"
     />

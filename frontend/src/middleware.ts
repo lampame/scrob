@@ -37,6 +37,8 @@ const PUBLIC_MEDIA_DETAIL_PAGE_RE =
 // (fetch() follows redirects, so it looks like a normal 200 response).
 const PUBLIC_RECOMMENDATIONS_PARTIAL_RE = /^\/partials\/recommendations\/?$/;
 const PUBLIC_PERSON_CREDITS_PARTIAL_RE = /^\/partials\/person-credits\/?$/;
+// The Trailer button on the detail pages resolves its YouTube link client-side.
+const PUBLIC_TRAILER_PROXY_RE = /^\/api\/proxy\/media\/(?:movie|series)\/\d+\/trailer\/?$/;
 // The homepage's and /discover's data rows are loaded client-side straight
 // from the backend proxy (not a same-origin partial), so the proxy path
 // itself needs the same allowance - otherwise the fetch() gets redirected to
@@ -95,6 +97,7 @@ export const onRequest = defineMiddleware(async (context, next) => {
       PUBLIC_MEDIA_DETAIL_PAGE_RE.test(pathname) ||
       PUBLIC_RECOMMENDATIONS_PARTIAL_RE.test(pathname) ||
       PUBLIC_PERSON_CREDITS_PARTIAL_RE.test(pathname) ||
+      PUBLIC_TRAILER_PROXY_RE.test(pathname) ||
       PUBLIC_MEDIA_ROWS_PROXY_RE.test(pathname);
     if (!isGatedPage) return false;
     try {
@@ -142,6 +145,14 @@ export const onRequest = defineMiddleware(async (context, next) => {
     if (!isPublicRoute && !(await isAllowedAnonymousPublicPage())) {
       return context.redirect("/login", 302);
     }
+  }
+
+  // Resolve the viewer's settings once per page (reused by the layout and the
+  // pages that need them, e.g. the RPDB rating-poster toggle - #377). One
+  // failed lookup just leaves the normal artwork and session intact.
+  if (context.locals.user && token && !isStaticAsset && !pathname.startsWith('/api/')) {
+    context.locals.settings = await api.auth.getSettings(token).catch(() => undefined);
+    context.locals.hasRpdbKey = !!context.locals.settings?.has_rpdb_key;
   }
 
   const response = await next();

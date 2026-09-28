@@ -2,6 +2,7 @@
 import Base from "../../layouts/Base.astro";
 import MediaCard from "../../components/MediaCard.astro";
 import ListCard from "../../components/ListCard.astro";
+import SortButton from "../../components/SortButton.astro";
 import { api, type ListDetail, type UserList, type PublicList, type MediaItem } from "../../lib/api";
 export const prerender = false;
 
@@ -292,29 +293,42 @@ const sonarrUrl = `${origin}/api/proxy/sonarr-compat/${list?.id}`;
 
       <!-- Items Grid -->
       <div>
-        <div class="flex items-center justify-between gap-4 mb-6">
+        <div class="flex items-center justify-between gap-4 mb-6 flex-wrap">
           <h2 class="text-sm font-black text-zinc-400 uppercase tracking-widest">Items</h2>
           {list.items.length > 0 && (
-            <div class="flex gap-1.5 bg-zinc-950 border border-zinc-800 rounded-xl p-1 shrink-0">
-              {[
-                { value: "all", label: "All" },
-                { value: "movie", label: "Movies" },
-                { value: "series", label: "Shows" },
-                { value: "person", label: "People" },
-              ].map(f => (
-                <button
-                  class="items-filter-btn px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer"
-                  class:list={[
-                    "items-filter-btn",
-                    f.value === "all"
-                      ? "bg-zinc-800 text-zinc-100"
-                      : "text-zinc-500 hover:text-zinc-300"
-                  ]}
-                  data-items-filter={f.value}
-                >
-                  {f.label}
-                </button>
-              ))}
+            <div class="flex items-center gap-3 flex-wrap">
+              <SortButton
+                id="list-items-sort"
+                current="added_at"
+                navigate={false}
+                options={[
+                  { value: "title", label: "A–Z" },
+                  { value: "rating", label: "Top" },
+                  { value: "release_date", label: "Newest" },
+                  { value: "added_at", label: "Recently Added" },
+                ]}
+              />
+              <div class="flex gap-1.5 bg-zinc-950 border border-zinc-800 rounded-xl p-1 shrink-0">
+                {[
+                  { value: "all", label: "All" },
+                  { value: "movie", label: "Movies" },
+                  { value: "series", label: "Shows" },
+                  { value: "person", label: "People" },
+                ].map(f => (
+                  <button
+                    class="items-filter-btn px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer"
+                    class:list={[
+                      "items-filter-btn",
+                      f.value === "all"
+                        ? "bg-zinc-800 text-zinc-100"
+                        : "text-zinc-500 hover:text-zinc-300"
+                    ]}
+                    data-items-filter={f.value}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -326,7 +340,14 @@ const sonarrUrl = `${origin}/api/proxy/sonarr-compat/${list?.id}`;
         ) : (
           <div id="items-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-6">
             {list.items.map((entry) => (
-              <div data-item-id={entry.id} data-type={entry.media.type}>
+              <div
+                data-item-id={entry.id}
+                data-type={entry.media.type}
+                data-title={entry.media.title}
+                data-rating={entry.media.tmdb_rating ?? ""}
+                data-release-date={entry.media.release_date ?? ""}
+                data-added-at={entry.added_at}
+              >
                 <MediaCard item={entry.media}>
                   {list.is_owner && (
                     <button
@@ -570,6 +591,73 @@ const sonarrUrl = `${origin}/api/proxy/sonarr-compat/${list?.id}`;
     itemsFilterEmpty?.classList.toggle('hidden', visible > 0);
   }
 
+  // --- Items sort (#398) - client-side only: every item is already on the
+  // page (lists aren't paginated), so re-sorting is just reordering the
+  // existing cards, same idea as the type filter above rather than a
+  // server round-trip. Missing values (e.g. a person entry has no rating or
+  // release date) always sort to the end regardless of direction.
+  function applyItemsSort(sortKey) {
+    const grid = document.getElementById('items-grid');
+    if (!grid) return;
+    // :scope > ... - see the matching comment in applyItemsFilter above.
+    // Without it this also matched each card's remove button (same
+    // data-item-id attribute) and appendChild below would then reparent
+    // the button out of its card and onto the grid directly, deleting the
+    // trash icon from every affected card.
+    const cards = Array.from(grid.querySelectorAll(':scope > [data-item-id]'));
+
+    const getters = {
+      title: (card) => card.getAttribute('data-title') ?? '',
+      rating: (card) => card.getAttribute('data-rating') ?? '',
+      release_date: (card) => card.getAttribute('data-release-date') ?? '',
+      added_at: (card) => card.getAttribute('data-added-at') ?? '',
+    };
+    const get = getters[sortKey];
+    if (!get) return;
+
+    const numeric = sortKey === 'rating';
+    const descending = sortKey !== 'title';
+
+    cards.sort((a, b) => {
+      const av = get(a);
+      const bv = get(b);
+      let cmp;
+      if (!av && !bv) {
+        cmp = 0;
+      } else if (!av) {
+        cmp = 1; // missing values always sort last, independent of direction
+      } else if (!bv) {
+        cmp = -1;
+      } else {
+        const raw = numeric ? Number(av) - Number(bv) : av.localeCompare(bv);
+        cmp = descending ? -raw : raw;
+      }
+      if (cmp !== 0) return cmp;
+      // Deterministic tie-break, independent of whatever order the cards
+      // happened to be in before this sort ran. Without this, a genuine tie
+      // (e.g. several items sharing the exact added_at from one sync
+      // transaction, or two movies with the same rating) just inherited
+      // whatever the *previous* sort left behind, since Array.sort is
+      // stable - so "Recently Added" could show a different order
+      // depending on whether you came from A-Z or Top.
+      return Number(a.getAttribute('data-item-id')) - Number(b.getAttribute('data-item-id'));
+    });
+
+    cards.forEach((card) => grid.appendChild(card));
+  }
+
+  document.getElementById('list-items-sort')?.addEventListener('sortchange', (e) => {
+    applyItemsSort(e.detail.value);
+  });
+
+  // The server's own default order is (sort_order, added_at) - sort_order is
+  // never actually set anywhere in the app, so in practice that's just
+  // added_at ascending (oldest-added first). "Recently Added" is pre-checked
+  // in the sort button above to match, so apply it for real here rather than
+  // just labeling it - otherwise the button would claim an order the grid
+  // isn't actually in.
+  applyItemsSort('added_at');
+
   // --- Search & Add ---
   const searchInput = document.getElementById('search-input');
   const searchResults = document.getElementById('search-results');
@@ -644,7 +732,7 @@ const sonarrUrl = `${origin}/api/proxy/sonarr-compat/${list?.id}`;
       searchResults.classList.remove('hidden');
 
       items.slice(0, 12).forEach(item => {
-        const poster = tmdbImageUrl(item.poster_path, 'w300');
+        const poster = window.ratingPosterUrl(tmdbImageUrl(item.poster_path, 'w300'), item, window.__HAS_RPDB__);
         const year = item.release_date?.slice(0, 4) || '';
         const isPerson = item.type === 'person';
         const rating = item.tmdb_rating ? Number(item.tmdb_rating).toFixed(1) : '';
@@ -688,28 +776,27 @@ const sonarrUrl = `${origin}/api/proxy/sonarr-compat/${list?.id}`;
 
     // Local copy of lib/episodeHref's season/series branches - this
     // define:vars script can't import (see lib/episodeHref.ts's own header
-    // comment for the full list of duplicate sites to keep in sync). #186:
-    // route to /show/tvdb/... using the translated position when the show
-    // is set to TVDB numbering, instead of always guessing TMDB.
+    // comment for the full list of duplicate sites to keep in sync). #174:
+    // use the display season when the show is on a non-aired ordering.
+    const ordered = media.show_episode_order && media.show_episode_order !== 'tmdb:aired';
     const href = isSeason
-      ? (media.show_episode_order === 'tvdb' && media.show_tvdb_id && media.tvdb_season_number != null
-          ? `/show/tvdb/${media.show_tvdb_id}/season/${media.tvdb_season_number}`
-          : media.show_tmdb_id || media.tmdb_id
-            ? `/show/${media.show_tmdb_id || media.tmdb_id}/season/${media.season_number}`
-            : media.show_tvdb_id
-              ? `/show/tvdb/${media.show_tvdb_id}/season/${media.season_number}`
-              : null)
+      ? ((media.show_tmdb_id || media.tmdb_id)
+          ? `/show/${media.show_tmdb_id || media.tmdb_id}/season/${ordered && media.display_season_number != null ? media.display_season_number : media.season_number}`
+          : media.show_tvdb_id
+            ? `/show/tvdb/${media.show_tvdb_id}/season/${media.season_number}`
+            : null)
       : isSeries
-      ? (media.show_episode_order === 'tvdb' && media.tvdb_id
-          ? `/show/tvdb/${media.tvdb_id}`
-          : media.tvdb_id && !media.tmdb_id
+      ? (media.tmdb_id
+          ? `/show/${media.tmdb_id}`
+          : media.tvdb_id
             ? `/show/tvdb/${media.tvdb_id}`
             : `/show/${media.tmdb_id}`)
       : isPerson
       ? `/person/${media.tmdb_id}`
       : `/media/${media.type}/${media.tmdb_id}`;
 
-    const poster = tmdbImageUrl(isSeason && media.show_poster_path ? media.show_poster_path : media.poster_path, 'w500');
+    const originalPoster = tmdbImageUrl(isSeason && media.show_poster_path ? media.show_poster_path : media.poster_path, 'w500');
+    const poster = window.ratingPosterUrl(originalPoster, media, window.__HAS_RPDB__);
 
     const rating = media.tmdb_rating ? Number(media.tmdb_rating).toFixed(1) : null;
     const year = media.release_date?.slice(0, 4) ?? '';

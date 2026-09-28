@@ -239,6 +239,14 @@ async def get_season(season_id: int, api_key: str, cache_ttl: float | None = DEF
     return data.get("data") or {}
 
 
+async def get_episode(episode_id: int, api_key: str, cache_ttl: float | None = DEFAULT_CACHE_TTL) -> dict:
+    """Fetch extended episode metadata - the only place TVDB exposes this
+    episode's own cast/crew (its `characters` field), separate from the
+    series-level extended data get_series returns."""
+    data = await _get(f"/episodes/{episode_id}/extended", api_key, cache_ttl=cache_ttl)
+    return data.get("data") or {}
+
+
 def format_season(raw: dict, language: str | None = None) -> dict:
     """Normalise extended TVDB season metadata."""
     translations = raw.get("translations") or {}
@@ -271,9 +279,13 @@ async def get_series_episodes(
     api_key: str,
     language: str | None = None,
     cache_ttl: float | None = DEFAULT_CACHE_TTL,
+    season_type: str = "official",
 ) -> list[dict]:
-    """Fetch episodes for a specific season (season_type=official), or every
-    episode in the series if season_number is None.
+    """Fetch episodes for a specific season in the given season type
+    ("official" = aired order; also "dvd", "absolute", "alternate", "regional",
+    or a numbered custom/streaming type id - see #174), or every episode in the
+    series in that type if season_number is None. Each episode's `seasonNumber`
+    and `number` are that type's values.
 
     TVDB v4 has no `language` query param on this endpoint — it's silently
     ignored if passed. Translated episode name/overview require the separate
@@ -285,7 +297,7 @@ async def get_series_episodes(
     """
     episodes = []
     page = 0
-    path = f"/series/{tvdb_id}/episodes/official/{language}" if language else f"/series/{tvdb_id}/episodes/official"
+    path = f"/series/{tvdb_id}/episodes/{season_type}/{language}" if language else f"/series/{tvdb_id}/episodes/{season_type}"
     while True:
         params: dict = {"page": page}
         if season_number is not None:
@@ -408,13 +420,18 @@ def format_series(raw: dict, language: str | None = None) -> dict:
 
 
 def format_cast(raw: dict) -> list[dict]:
-    """Extract actor list from TVDB extended series data."""
-    characters = [c for c in (raw.get("characters") or []) if c.get("type") == 3]
+    """Extract actor list from TVDB extended series/episode data.
+
+    TVDB's own peopleType string ("Actor", "Director", "Writer", "Guest
+    Star", ...) is used directly rather than the numeric type code - no
+    lookup table needed, and it's confirmed present on every characters entry.
+    """
+    characters = [c for c in (raw.get("characters") or []) if c.get("peopleType") == "Actor"]
     characters.sort(key=lambda x: x.get("sort") or 999)
     return [
         {
             "tmdb_id": None,
-            "person_id": c.get("personId"),
+            "person_id": c.get("peopleId"),
             "name": c.get("personName") or "",
             "character": c.get("name") or "",
             "profile_path": _image_url(c.get("image")),
@@ -422,6 +439,54 @@ def format_cast(raw: dict) -> list[dict]:
         for c in characters[:12]
         if c.get("personName")
     ]
+
+
+# TVDB peopleType strings that count as crew (see format_cast's docstring -
+# no numeric type-code lookup needed, TVDB hands back the label directly).
+# Confirmed against live data: crew (Director/Writer) only ever appears on
+# episode-level extended data (GET /episodes/{id}/extended), never on the
+# series-level extended endpoint - a TV series doesn't have "a director",
+# its episodes do.
+CREW_PEOPLE_TYPES = {"Director", "Writer", "Producer"}
+
+
+def format_crew(raw: dict) -> list[dict]:
+    """Extract crew list from TVDB extended episode data, deduped by person id
+    - a writer-director gets one entry with a combined job label, not two rows
+    for the same person (each role is its own characters entry on TVDB, same
+    as TMDB's crew array). See format_cast for the peopleType convention."""
+    crew = [c for c in (raw.get("characters") or []) if c.get("peopleType") in CREW_PEOPLE_TYPES and c.get("personName")]
+    crew.sort(key=lambda x: x.get("sort") or 999)
+
+    by_id: dict[int, dict] = {}
+    order: list[int] = []
+    for c in crew:
+        pid = c.get("peopleId")
+        if pid is None:
+            continue
+        if pid not in by_id:
+            by_id[pid] = {
+                "tmdb_id": None,
+                "person_id": pid,
+                "name": c.get("personName") or "",
+                "jobs": [c.get("peopleType") or ""],
+                "profile_path": _image_url(c.get("image")),
+            }
+            order.append(pid)
+        elif c.get("peopleType") not in by_id[pid]["jobs"]:
+            by_id[pid]["jobs"].append(c.get("peopleType") or "")
+
+    result = []
+    for pid in order:
+        entry = by_id[pid]
+        result.append({
+            "tmdb_id": None,
+            "person_id": entry["person_id"],
+            "name": entry["name"],
+            "job": ", ".join(entry["jobs"]),
+            "profile_path": entry["profile_path"],
+        })
+    return result
 
 
 def format_episode(raw: dict) -> dict:

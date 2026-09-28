@@ -11,6 +11,12 @@ _RETRYABLE = (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolEr
 
 DEFAULT_CACHE_TTL = 1800  # 30 minutes — TMDB metadata/discovery results don't need to be fresher than this
 
+# Crew jobs surfaced in a title's "Crew" tab - a curated allowlist, not a
+# department filter: TMDB's "Production" department alone pulls in Casting,
+# Production Coordinator, Assistant Director tiers, etc., which is far more
+# than a viewer means by "who directed/wrote/produced this".
+NOTABLE_CREW_JOBS = {"Director", "Writer", "Screenplay", "Story", "Teleplay", "Producer", "Executive Producer", "Co-Producer"}
+
 # Request-path budget. Kept deliberately tight: these calls sit inside
 # page-render fan-outs (home page enrich_with_state, Next Up, etc.), so a wide
 # retry window turns "TMDB is unreachable" into a multi-minute hang and a proxy
@@ -218,7 +224,9 @@ async def get_season(tmdb_id: int, season_number: int, api_key: str = None, lang
 
 
 async def get_episode(tmdb_id: int, season_number: int, episode_number: int, api_key: str = None, language: str | None = None, cache_ttl: float | None = DEFAULT_CACHE_TTL) -> dict:
-    params: dict = {"append_to_response": "credits"}
+    # external_ids rides along so enrichment can persist the TVDB episode id
+    # (and IMDb id) on the Media row without a second per-episode call.
+    params: dict = {"append_to_response": "credits,external_ids"}
     if language:
         params["language"] = language
     return await _get(
@@ -238,6 +246,45 @@ async def get_episode_external_ids(
     return await _get(
         f"{TMDB_BASE}/tv/{tmdb_id}/season/{season_number}/episode/{episode_number}/external_ids",
         headers=get_headers(api_key),
+    )
+
+
+# TMDB episode-group type ids -> a human label (see #174). 1 is the show's
+# regular aired order and is offered separately, so it's excluded by callers.
+EPISODE_GROUP_TYPE_LABELS = {
+    1: "Original Air Date",
+    2: "Absolute Order",
+    3: "DVD Order",
+    4: "Digital Order",
+    5: "Story Arc",
+    6: "Production Order",
+    7: "TV Order",
+}
+
+
+async def get_episode_groups(
+    tmdb_id: int, api_key: str = None, cache_ttl: float | None = DEFAULT_CACHE_TTL
+) -> dict:
+    """`GET /tv/{id}/episode_groups` - the alternate orderings TMDB has for a
+    show. Returns `{"results": [{id, name, type, episode_count, group_count, ...}]}`."""
+    return await _get(
+        f"{TMDB_BASE}/tv/{tmdb_id}/episode_groups",
+        headers=get_headers(api_key),
+        cache_ttl=cache_ttl,
+    )
+
+
+async def get_episode_group(
+    group_id: str, api_key: str = None, cache_ttl: float | None = DEFAULT_CACHE_TTL
+) -> dict:
+    """`GET /tv/episode_group/{id}` - one ordering's full structure:
+    `{id, name, type, groups: [{order, name, episodes: [{id, season_number,
+    episode_number, order, ...}]}]}`. Each episode's season_number/episode_number
+    are the canonical TMDB values; `order` is its 0-based slot in the group."""
+    return await _get(
+        f"{TMDB_BASE}/tv/episode_group/{group_id}",
+        headers=get_headers(api_key),
+        cache_ttl=cache_ttl,
     )
 
 
@@ -346,6 +393,42 @@ def poster_url(path: str, size: str = "w500") -> str | None:
     if not path:
         return None
     return f"{TMDB_IMAGE_BASE}/{size}{path}"
+
+
+def notable_crew(credits: dict, limit: int = 12, profile_size: str = "w500") -> list[dict]:
+    """Director/writer/producer crew for a title's "Crew" tab, deduped by
+    person id - a writer-director (e.g. Richard Kelly on Donnie Darko) is one
+    entry with a combined job label, not two rows for the same person."""
+    by_id: dict[int, dict] = {}
+    order: list[int] = []
+    for c in credits.get("crew", []):
+        job = c.get("job")
+        if job not in NOTABLE_CREW_JOBS:
+            continue
+        pid = c.get("id")
+        if pid is None:
+            continue
+        if pid not in by_id:
+            by_id[pid] = {
+                "tmdb_id": pid,
+                "name": c.get("name"),
+                "jobs": [job],
+                "profile_path": poster_url(c.get("profile_path"), size=profile_size),
+            }
+            order.append(pid)
+        elif job not in by_id[pid]["jobs"]:
+            by_id[pid]["jobs"].append(job)
+
+    result = []
+    for pid in order[:limit]:
+        entry = by_id[pid]
+        result.append({
+            "tmdb_id": entry["tmdb_id"],
+            "name": entry["name"],
+            "job": ", ".join(entry["jobs"]),
+            "profile_path": entry["profile_path"],
+        })
+    return result
 
 
 async def get_person(person_id: int, api_key: str = None) -> dict:
@@ -490,6 +573,26 @@ async def get_company(company_id: int, api_key: str = None) -> dict:
 
 async def get_movie_videos(tmdb_id: int, api_key: str = None) -> dict:
     return await _get(f"{TMDB_BASE}/movie/{tmdb_id}/videos", headers=get_headers(api_key))
+
+
+async def get_videos(kind: str, tmdb_id: int, api_key: str = None, language: str | None = None) -> dict:
+    """Videos for a movie ("movie") or show ("tv"). With `language`, TMDB returns
+    only videos tagged with that language - no English fallback."""
+    params = {"language": language} if language else None
+    return await _get(f"{TMDB_BASE}/{kind}/{tmdb_id}/videos", headers=get_headers(api_key), params=params)
+
+
+def pick_trailer(videos: list[dict], language: str | None = None) -> dict | None:
+    """Best YouTube trailer: official first, then any. With `language` (e.g.
+    "pt-BR"), only videos tagged with that language qualify, so a localized
+    request never quietly returns the English trailer (#413)."""
+    lang = language.split("-")[0].lower() if language else None
+    trailers = [
+        v for v in videos
+        if v.get("site") == "YouTube" and v.get("type") == "Trailer" and v.get("key")
+        and (not lang or (v.get("iso_639_1") or "").lower() == lang)
+    ]
+    return next((v for v in trailers if v.get("official")), trailers[0] if trailers else None)
 
 
 async def find_by_external_id(external_id: str, source: str, api_key: str = None) -> dict:
