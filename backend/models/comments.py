@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import Integer, String, Text, Boolean, ForeignKey, DateTime, func, Index
+from sqlalchemy import BigInteger, Integer, String, Text, Boolean, ForeignKey, DateTime, func, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .base import Base
 
@@ -23,5 +23,13 @@ class Comment(Base):
     is_spoiler: Mapped[bool] = mapped_column(Boolean, default=False, server_default='false', nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), onupdate=func.now())
+
+    # WeTrakr's own comment id — set on pull (imported from) or push (created
+    # on). WeTrakr has no edit-comment endpoint and no dedup on write, so this
+    # is also what a push checks to avoid re-posting the same comment twice.
+    # BigInteger: WeTrakr comment ids run well past Postgres INTEGER's 32-bit
+    # range (e.g. 3000053946) — likely a large id-space offset from imported
+    # data, not a bug on their side.
+    wetrakr_comment_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
 
     user: Mapped["User"] = relationship()

@@ -48,6 +48,10 @@ async def get_public_access_status(db: AsyncSession = Depends(get_db)):
         # was removed after the admin enabled it.
         "enable_logged_out_navigation": bool(gs and gs.enable_logged_out_navigation and gs.tmdb_api_key),
         "disable_comments": bool(gs and gs.disable_comments),
+        # Lets an anonymous visitor's search page offer the TVDB fallback
+        # search too, the same as a logged-in user with an effective key -
+        # there's no per-anon-visitor UserSettings override to also check.
+        "has_global_tvdb_key": bool(gs and gs.tvdb_api_key),
     }
 
 
