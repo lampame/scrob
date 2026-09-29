@@ -119,6 +119,8 @@ class TotpBackupCodesResponse(BaseModel):
 
 class UserSettings(BaseModel):
     tmdb_api_key: Optional[str] = None
+    rpdb_api_key: Optional[str] = Field(default=None, max_length=255)
+    has_rpdb_key: bool = False
     has_effective_tmdb_key: bool = False
     has_global_tmdb_key: bool = False
 
@@ -162,6 +164,7 @@ class UserSettings(BaseModel):
     trakt_push_dropped: Optional[bool] = None
     trakt_push_lists: Optional[bool] = None
     trakt_scrobble: Optional[bool] = None
+    trakt_show_comments: Optional[bool] = None
     trakt_auto_sync_interval: Optional[float] = None
     trakt_auto_push_interval: Optional[float] = None
 
@@ -177,9 +180,24 @@ class UserSettings(BaseModel):
     simkl_auto_sync_interval: Optional[float] = None
     simkl_auto_push_interval: Optional[float] = None
 
+    # WeTrakr — single Scrob-owned app key (core/wetrakr.py), no client_id/secret
+    # field here; OAuth tokens managed via /wetrakr/* endpoints
+    wetrakr_connected: Optional[bool] = None  # read-only, derived from token presence
+    wetrakr_sync_watched: Optional[bool] = None
+    wetrakr_sync_ratings: Optional[bool] = None
+    wetrakr_push_watched: Optional[bool] = None
+    wetrakr_push_ratings: Optional[bool] = None
+    wetrakr_sync_lists: Optional[bool] = None
+    wetrakr_push_lists: Optional[bool] = None
+    wetrakr_sync_comments: Optional[bool] = None
+    wetrakr_push_comments: Optional[bool] = None
+    wetrakr_auto_sync_interval: Optional[float] = None
+    wetrakr_auto_push_interval: Optional[float] = None
+
     # MDBList — API key authentication
     mdblist_api_key: Optional[str] = None
     mdblist_connected: Optional[bool] = None  # read-only, validated by /auth/connection-status
+    has_global_mdblist_key: bool = False  # read-only; global key is for list imports only
     mdblist_sync_watched: Optional[bool] = None
     mdblist_sync_ratings: Optional[bool] = None
     mdblist_sync_watchlist: Optional[bool] = None
@@ -208,6 +226,7 @@ class UserSettings(BaseModel):
     shuffle_next_up: Optional[bool] = None
     minimalist_next_up: Optional[bool] = None
     hide_watched_from_recently_added: Optional[bool] = None
+    condense_history_by_show: Optional[bool] = None
     rate_prompt_movies: Optional[bool] = None
     rate_prompt_episodes: Optional[bool] = None
     watchlist_auto_remove_id: Optional[int] = None
@@ -367,7 +386,12 @@ class PasswordUpdate(BaseModel):
     new_password: str
 
 class WatchEventCreate(BaseModel):
-    tmdb_id: int
+    # Any one of media_id / tmdb_id / tvdb_id identifies the item (see
+    # core/identity.py). tmdb_id used to be mandatory; a TVDB-only episode
+    # has none, so clients send media_id (or tvdb_id + series_tvdb_id context).
+    tmdb_id: Optional[int] = None
+    tvdb_id: Optional[int] = None
+    media_id: Optional[int] = None
     media_type: MediaType
     watched_at: Optional[datetime] = None  # omitted = now; explicit null = unknown date
     completed: bool = True
@@ -375,6 +399,10 @@ class WatchEventCreate(BaseModel):
     series_tvdb_id: Optional[int] = None  # lets the show be linked to TVDB (see #101) without requiring a prior visit to its TVDB page
     season_number: Optional[int] = None
     episode_number: Optional[int] = None
+    # Set after the user confirms a "this looks like a duplicate, add anyway?"
+    # prompt (see the 409 duplicate_watch response from POST /history), to
+    # record it despite an existing watch within the dedup window (#390).
+    force: bool = False
 
 
 class ManualSessionStart(BaseModel):
@@ -459,6 +487,7 @@ class PublicProfileResponse(BaseModel):
 
 class GlobalSettings(BaseModel):
     tmdb_api_key           : Optional[str] = None
+    mdblist_api_key        : Optional[str] = None
     tvdb_api_key           : Optional[str] = None
     tvdb_subscriber_pin    : Optional[str] = None
     radarr_url             : Optional[str] = None

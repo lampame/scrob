@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 import httpx
@@ -18,7 +19,19 @@ async def _get(url: str, token: str, params: Optional[Dict] = None) -> Dict:
         }
         res = await client.get(url, headers=headers, params=params)
         res.raise_for_status()
-        return res.json()
+        try:
+            return res.json()
+        except UnicodeDecodeError:
+            # Some Plex Media Server setups emit a genuinely non-UTF-8 byte
+            # somewhere in a scraped field (title/summary/etc, likely a
+            # mis-transcoded legacy agent result) despite claiming a JSON
+            # response - one bad byte anywhere in the payload used to fail
+            # decoding of the *entire* response, taking the whole request
+            # (e.g. an entire page of watch history) down with it (#388).
+            # Decode leniently instead: a mangled character in that one field
+            # beats losing every item the response actually carried.
+            logger.warning("Plex response from %s was not valid UTF-8 - decoding leniently", url)
+            return json.loads(res.content.decode("utf-8", errors="replace"))
 
 def get_guids(item: Dict) -> List[Dict]:
     """Return a normalised Guid list for a Plex item.
@@ -209,27 +222,48 @@ async def get_libraries(url: str, token: str) -> List[Dict]:
     data = await _get(f"{url.rstrip('/')}/library/sections", token)
     return data.get("MediaContainer", {}).get("Directory", [])
 
+async def _get_library_items_paginated(url: str, token: str, section_id: str, params: Dict) -> List[Dict]:
+    """Fetch every item in a library section, paging with X-Plex-Container-
+    Start/-Size the same way get_watchlist/get_plex_history already do.
+
+    A single unpaginated request for a whole section used to time out on a
+    large TV library (tens of thousands of episodes in one response, #441) -
+    movies libraries are usually small enough that this went unnoticed. A
+    fixed page size keeps each request's latency predictable regardless of
+    how large the library grows.
+    """
+    page_size = 1000
+    items: List[Dict] = []
+    start = 0
+    while True:
+        data = await _get(
+            f"{url.rstrip('/')}/library/sections/{section_id}/all",
+            token,
+            params={**params, "X-Plex-Container-Start": start, "X-Plex-Container-Size": page_size},
+        )
+        container = data.get("MediaContainer", {})
+        batch = container.get("Metadata", [])
+        items.extend(batch)
+        total = container.get("totalSize", 0) or len(items)
+        start += len(batch)
+        if not batch or start >= total:
+            break
+    return items
+
+
 async def get_movies(url: str, token: str, section_id: str) -> List[Dict]:
-    params = {"includeGuids": 1}
-    data = await _get(f"{url.rstrip('/')}/library/sections/{section_id}/all", token, params=params)
-    return data.get("MediaContainer", {}).get("Metadata", [])
+    return await _get_library_items_paginated(url, token, section_id, {"includeGuids": 1})
 
 async def get_shows(url: str, token: str, section_id: str) -> List[Dict]:
-    params = {"includeGuids": 1}
-    data = await _get(f"{url.rstrip('/')}/library/sections/{section_id}/all", token, params=params)
-    return data.get("MediaContainer", {}).get("Metadata", [])
+    return await _get_library_items_paginated(url, token, section_id, {"includeGuids": 1})
 
 async def get_seasons(url: str, token: str, section_id: str) -> List[Dict]:
     """Fetch season metadata, including user ratings, from a TV library."""
-    params = {"type": 3, "includeGuids": 1}
-    data = await _get(f"{url.rstrip('/')}/library/sections/{section_id}/all", token, params=params)
-    return data.get("MediaContainer", {}).get("Metadata", [])
+    return await _get_library_items_paginated(url, token, section_id, {"type": 3, "includeGuids": 1})
 
 
 async def get_episodes(url: str, token: str, section_id: str) -> List[Dict]:
-    params = {"type": 4, "includeGuids": 1}
-    data = await _get(f"{url.rstrip('/')}/library/sections/{section_id}/all", token, params=params)
-    return data.get("MediaContainer", {}).get("Metadata", [])
+    return await _get_library_items_paginated(url, token, section_id, {"type": 4, "includeGuids": 1})
 
 async def get_recently_added(url: str, token: str, section_id: str, media_type: int, limit: int = 50) -> List[Dict]:
     """Fetch the most recently-added items from a library section.
@@ -283,10 +317,15 @@ async def get_history(url: str, token: str, since: Optional[datetime] = None) ->
             start += len(batch)
             if not batch or start >= total:
                 break
-        return items
     except Exception:
-        logger.warning("Could not fetch Plex play history from %s", url)
-        return []
+        # Whatever pages already succeeded are still worth keeping - losing
+        # every prior page over one later failure (#388) meant a single bad
+        # page silently discarded an entire account's watch history instead
+        # of importing everything up to that point. The next sync's full
+        # re-scan (see _backfill_plex_watch_history) still dedupes safely
+        # against whatever this run did manage to save.
+        logger.warning("Could not fetch all Plex play history from %s (got %d item(s) before failing)", url, len(items))
+    return items
 
 
 async def get_account_id(url: str, token: str, username: str) -> Optional[int]:

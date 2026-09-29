@@ -48,6 +48,52 @@ async def get_global_settings(
     return await _get_or_create_global_settings(db)
 
 
+@router.post("/settings/test-mdblist")
+async def test_global_mdblist(
+    body: schemas.ApiKeyTestRequest,
+    response: Response,
+    _: User = Depends(require_admin),
+):
+    from core import mdblist
+
+    response.headers["Cache-Control"] = "no-store"
+    api_key = body.key.get_secret_value().strip()
+    if not api_key or not await mdblist.validate_api_key(api_key):
+        raise HTTPException(status_code=400, detail="Failed to connect to MDBList")
+    return {"status": "ok"}
+
+
+@router.post("/settings/test-tmdb")
+async def test_global_tmdb(
+    body: schemas.ApiKeyTestRequest,
+    response: Response,
+    _: User = Depends(require_admin),
+):
+    from core import tmdb
+
+    response.headers["Cache-Control"] = "no-store"
+    api_key = body.key.get_secret_value().strip()
+    if not api_key or not await tmdb.validate_api_key(api_key):
+        raise HTTPException(status_code=400, detail="Failed to connect to TMDB")
+    return {"status": "ok"}
+
+
+@router.post("/settings/test-tvdb")
+async def test_global_tvdb(
+    body: schemas.ApiKeyTestRequest,
+    response: Response,
+    _: User = Depends(require_admin),
+):
+    from core import tvdb
+
+    response.headers["Cache-Control"] = "no-store"
+    api_key = body.key.get_secret_value().strip()
+    pin = body.pin.get_secret_value().strip() if body.pin else None
+    if not api_key or not await tvdb.validate_api_key(api_key, pin=pin or None):
+        raise HTTPException(status_code=400, detail="Failed to connect to TVDB")
+    return {"status": "ok"}
+
+
 @router.patch("/settings", response_model=schemas.GlobalSettings)
 async def update_global_settings(
     body: schemas.GlobalSettings,
@@ -57,6 +103,12 @@ async def update_global_settings(
     gs = await _get_or_create_global_settings(db)
 
     update_data = body.model_dump(exclude_unset=True)
+
+    if "mdblist_api_key" in update_data and update_data["mdblist_api_key"]:
+        from core import mdblist
+
+        if not await mdblist.validate_api_key(update_data["mdblist_api_key"]):
+            raise HTTPException(status_code=400, detail="Invalid MDBList API key")
 
     url_fields = {"radarr_url": "Radarr URL", "sonarr_url": "Sonarr URL"}
     for field, label in url_fields.items():
