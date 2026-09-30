@@ -1,18 +1,21 @@
 import asyncio
 import logging
 import re
+import time
 import unicodedata
 from collections.abc import Awaitable, Callable
 from datetime import date
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core import tmdb, tvdb
 from models.base import MediaType
 from models.collection import Collection, CollectionFile
 from models.comments import Comment
-from models.episode_order import EpisodeOrderMapping, UserShowEpisodeOrder
+from models.episode_order import EpisodeOrderMapping, UserShowEpisodeOrder, ShowEpisodePosition
+from models.show import Show as ShowModel
 from models.events import WatchEvent
 from models.lists import ListItem
 from models.media import Media
@@ -38,6 +41,393 @@ def _date_distance(left: str | None, right: str | None) -> int | None:
         return abs((date.fromisoformat(left) - date.fromisoformat(right)).days)
     except ValueError:
         return None
+
+
+# ── Order keys (#174) ────────────────────────────────────────────────────────
+#
+# An "order key" identifies one ordering of a show's episodes:
+#   "tmdb:aired"          the default aired order; identity, never materialised
+#   "tvdb:official"       TVDB aired order (was the legacy "tvdb")
+#   "tvdb:dvd" | "tvdb:absolute" | "tvdb:alternate" | "tvdb:regional"
+#   "tvdb:type:<id>"      a numbered custom / streaming TVDB season type
+#   "tmdb:group:<id>"     a TMDB episode group (DVD, Story Arc, Production, ...)
+
+ORDER_AIRED = "tmdb:aired"
+_TVDB_NAMED_TYPES = {"official", "dvd", "absolute", "alternate", "regional"}
+
+
+def normalize_order_key(value: str | None) -> str:
+    """Map any stored/legacy value onto a canonical order key. `None`, `""`,
+    `"tmdb"` and `"tmdb:aired"` all mean aired order; the pre-#174 `"tvdb"`
+    means `"tvdb:official"`."""
+    if not value or value in ("tmdb", "tmdb:aired"):
+        return ORDER_AIRED
+    if value == "tvdb":
+        return "tvdb:official"
+    return value
+
+
+def is_aired_order(key: str | None) -> bool:
+    return normalize_order_key(key) == ORDER_AIRED
+
+
+def _tvdb_season_type(order_key: str) -> str:
+    """The TVDB `season-type` path segment for a `tvdb:*` order key."""
+    rest = order_key.split(":", 1)[1]
+    if rest.startswith("type:"):
+        return rest.split(":", 1)[1]
+    return rest
+
+
+async def resolve_order_key(db: AsyncSession, user_id: int, series_tmdb_id: int) -> str:
+    """The user's chosen order key for a show, or `"tmdb:aired"`."""
+    row = await get_episode_order(db, user_id, series_tmdb_id)
+    return normalize_order_key(row.episode_order if row else None)
+
+
+async def get_order_keys_for_series(
+    db: AsyncSession, user_id: int, series_tmdb_ids: list[int]
+) -> dict[int, str]:
+    """Batched `resolve_order_key` for many shows - only non-aired shows appear
+    in the result (aired needs no remap). For `enrich_with_state`."""
+    if not series_tmdb_ids:
+        return {}
+    rows = (await db.execute(
+        select(UserShowEpisodeOrder).where(
+            UserShowEpisodeOrder.user_id == user_id,
+            UserShowEpisodeOrder.series_tmdb_id.in_(series_tmdb_ids),
+        )
+    )).scalars().all()
+    out: dict[int, str] = {}
+    for r in rows:
+        key = normalize_order_key(r.episode_order)
+        if not is_aired_order(key):
+            out[r.series_tmdb_id] = key
+    return out
+
+
+async def get_positions_for_series(
+    db: AsyncSession, pairs: list[tuple[int, str]]
+) -> dict[tuple[int, str], dict[tuple[int, int], ShowEpisodePosition]]:
+    """For each `(series_tmdb_id, order_key)` pair, a
+    `{(canonical_season, canonical_episode): position}` map - the shape
+    `_attach_episode_order_fields` needs to turn canonical numbers into display
+    numbers. Aired-order pairs are dropped."""
+    wanted = {(sid, normalize_order_key(k)) for sid, k in pairs if not is_aired_order(k)}
+    if not wanted:
+        return {}
+    rows = (await db.execute(
+        select(ShowEpisodePosition).where(
+            ShowEpisodePosition.series_tmdb_id.in_({s for s, _ in wanted}),
+            ShowEpisodePosition.order_key.in_({k for _, k in wanted}),
+        )
+    )).scalars().all()
+    out: dict[tuple[int, str], dict[tuple[int, int], ShowEpisodePosition]] = {}
+    for r in rows:
+        pair = (r.series_tmdb_id, r.order_key)
+        if pair not in wanted:
+            continue
+        out.setdefault(pair, {})[(r.tmdb_season_number, r.tmdb_episode_number)] = r
+    return out
+
+
+async def get_position_maps(
+    db: AsyncSession, series_tmdb_id: int, order_key: str
+) -> tuple[
+    dict[tuple[int, int], ShowEpisodePosition],
+    dict[tuple[int, int], ShowEpisodePosition],
+]:
+    """`(by_canonical, by_display)` position maps for one show+order - the
+    single-show read used by the show/season/episode endpoints. Empty for aired
+    order."""
+    key = normalize_order_key(order_key)
+    if is_aired_order(key):
+        return {}, {}
+    rows = (await db.execute(
+        select(ShowEpisodePosition).where(
+            ShowEpisodePosition.series_tmdb_id == series_tmdb_id,
+            ShowEpisodePosition.order_key == key,
+        )
+    )).scalars().all()
+    by_canonical = {(r.tmdb_season_number, r.tmdb_episode_number): r for r in rows}
+    by_display = {(r.display_season, r.display_episode): r for r in rows}
+    return by_canonical, by_display
+
+
+async def canonical_pairs_for_display_season(
+    db: AsyncSession, series_tmdb_id: int, order_key: str | None, display_season: int,
+) -> set[tuple[int, int]]:
+    """The canonical (season, episode) pairs a non-aired order groups into the
+    given *display* season - what a bulk season action (collect/watch a season)
+    needs to translate its target. Empty for aired order or an order whose
+    positions haven't been built yet."""
+    key = normalize_order_key(order_key)
+    if is_aired_order(key):
+        return set()
+    rows = (await db.execute(
+        select(
+            ShowEpisodePosition.tmdb_season_number,
+            ShowEpisodePosition.tmdb_episode_number,
+        ).where(
+            ShowEpisodePosition.series_tmdb_id == series_tmdb_id,
+            ShowEpisodePosition.order_key == key,
+            ShowEpisodePosition.display_season == display_season,
+        )
+    )).all()
+    return {(s, e) for s, e in rows}
+
+
+async def resolve_display_to_canonical(
+    db: AsyncSession, series_tmdb_id: int, order_key: str | None,
+    display_season: int, display_episode: int,
+) -> tuple[int, int] | None:
+    """Translate a `(display_season, display_episode)` the user acted on in a
+    non-aired view back to the canonical `(tmdb_season, tmdb_episode)` before a
+    write touches Media. Aired order is the identity; an unknown position
+    returns None (caller decides whether to fall through to raw numbers)."""
+    key = normalize_order_key(order_key)
+    if is_aired_order(key):
+        return (display_season, display_episode)
+    r = (await db.execute(
+        select(ShowEpisodePosition).where(
+            ShowEpisodePosition.series_tmdb_id == series_tmdb_id,
+            ShowEpisodePosition.order_key == key,
+            ShowEpisodePosition.display_season == display_season,
+            ShowEpisodePosition.display_episode == display_episode,
+        )
+    )).scalar_one_or_none()
+    return (r.tmdb_season_number, r.tmdb_episode_number) if r else None
+
+
+async def list_available_orders(
+    db: AsyncSession,
+    series_tmdb_id: int,
+    show: ShowModel | None,
+    tmdb_api_key: str | None,
+    tvdb_api_key: str | None,
+) -> list[dict]:
+    """Every ordering offered for this show: always aired order, plus any TMDB
+    episode groups and TVDB season types the providers expose. Never raises -
+    a provider failing just trims its section."""
+    orders: list[dict] = [{"key": ORDER_AIRED, "label": "Aired Order", "provider": "tmdb"}]
+
+    if tmdb_api_key:
+        try:
+            data = await tmdb.get_episode_groups(series_tmdb_id, api_key=tmdb_api_key)
+            for g in data.get("results") or []:
+                if not g.get("id") or (g.get("episode_count") or 0) == 0 or g.get("type") == 1:
+                    continue
+                label = g.get("name") or tmdb.EPISODE_GROUP_TYPE_LABELS.get(g.get("type"), "Alternate Order")
+                orders.append({"key": f"tmdb:group:{g['id']}", "label": label, "provider": "tmdb"})
+        except Exception:
+            logger.exception("episode-orders: TMDB episode groups failed for %s", series_tmdb_id)
+
+    tvdb_id = getattr(show, "tvdb_id", None) if show else None
+    if not tvdb_id and tmdb_api_key:
+        try:
+            sd = await tmdb.get_show(series_tmdb_id, api_key=tmdb_api_key)
+            tvdb_id = (sd.get("external_ids") or {}).get("tvdb_id")
+        except Exception:
+            tvdb_id = None
+    if tvdb_id and tvdb_api_key:
+        try:
+            raw = await tvdb.get_series(int(tvdb_id), tvdb_api_key)
+            seen: set[str] = set()
+            for s in raw.get("seasons") or []:
+                t = s.get("type") or {}
+                slug = t.get("type")
+                if not slug or slug in seen:
+                    continue
+                seen.add(slug)
+                if slug == "official":
+                    key, label = "tvdb:official", "Aired Order"
+                elif slug in _TVDB_NAMED_TYPES:
+                    key, label = f"tvdb:{slug}", (t.get("name") or f"TVDB {slug.title()}")
+                else:
+                    key, label = f"tvdb:type:{t.get('id')}", (t.get("name") or "TVDB Custom Order")
+                orders.append({"key": key, "label": label, "provider": "tvdb"})
+        except Exception:
+            logger.exception("episode-orders: TVDB season types failed for %s", tvdb_id)
+
+    deduped: dict[str, dict] = {}
+    for o in orders:
+        deduped.setdefault(o["key"], o)
+    return list(deduped.values())
+
+
+async def _order_positions_from_tmdb_group(
+    series_tmdb_id: int, order_key: str, tmdb_api_key: str, cache_ttl: float | None,
+) -> list[ShowEpisodePosition]:
+    group_id = order_key.split(":", 2)[2]
+    data = await tmdb.get_episode_group(group_id, api_key=tmdb_api_key, cache_ttl=cache_ttl)
+    rows: list[ShowEpisodePosition] = []
+    seen_display: set[tuple[int, int]] = set()
+    seen_canonical: set[int] = set()
+    for display_season, g in enumerate(
+        sorted(data.get("groups") or [], key=lambda x: x.get("order", 0)), start=1
+    ):
+        episodes = sorted(g.get("episodes") or [], key=lambda x: x.get("order", 0))
+        for display_episode, ep in enumerate(episodes, start=1):
+            eid, s, e = ep.get("id"), ep.get("season_number"), ep.get("episode_number")
+            if eid is None or s is None or e is None:
+                continue
+            if int(eid) in seen_canonical or (display_season, display_episode) in seen_display:
+                continue
+            seen_canonical.add(int(eid))
+            seen_display.add((display_season, display_episode))
+            rows.append(ShowEpisodePosition(
+                series_tmdb_id=series_tmdb_id, order_key=order_key,
+                display_season=display_season, display_episode=display_episode,
+                tmdb_episode_id=int(eid),
+                tmdb_season_number=int(s), tmdb_episode_number=int(e),
+            ))
+    return rows
+
+
+async def _order_positions_from_tvdb_type(
+    db: AsyncSession, series_tmdb_id: int, order_key: str, show_tvdb_id: int,
+    tmdb_api_key: str, tvdb_api_key: str, cache_ttl: float | None,
+) -> list[ShowEpisodePosition]:
+    # Every tvdb:* order needs the tvdb-episode-id <-> canonical bridge.
+    await ensure_episode_order_mapping(db, series_tmdb_id, tmdb_api_key, tvdb_api_key)
+    bridge = {
+        m.tvdb_id: m
+        for m in (await db.execute(
+            select(EpisodeOrderMapping).where(EpisodeOrderMapping.series_tmdb_id == series_tmdb_id)
+        )).scalars().all()
+    }
+    if not bridge:
+        raise ValueError("No TMDB<->TVDB episode mapping could be built for this show")
+
+    if order_key == "tvdb:official":
+        rows: list[ShowEpisodePosition] = []
+        seen_display: set[tuple[int, int]] = set()
+        for m in bridge.values():
+            key = (m.tvdb_season_number, m.tvdb_episode_number)
+            if key in seen_display:
+                continue
+            seen_display.add(key)
+            rows.append(ShowEpisodePosition(
+                series_tmdb_id=series_tmdb_id, order_key=order_key,
+                display_season=m.tvdb_season_number, display_episode=m.tvdb_episode_number,
+                tmdb_episode_id=m.tmdb_episode_id,
+                tmdb_season_number=m.tmdb_season_number, tmdb_episode_number=m.tmdb_episode_number,
+            ))
+        return rows
+
+    season_type = _tvdb_season_type(order_key)
+    episodes = await tvdb.get_series_episodes(
+        int(show_tvdb_id), None, tvdb_api_key, season_type=season_type, cache_ttl=cache_ttl
+    )
+    rows = []
+    seen_display = set()
+    seen_canonical: set[int] = set()
+    for ep in episodes:
+        tvdb_ep_id = ep.get("id")
+        m = bridge.get(int(tvdb_ep_id)) if tvdb_ep_id is not None else None
+        if not m:
+            continue
+        ds = ep.get("seasonNumber")
+        de = ep.get("number")
+        ds = int(ds) if ds is not None else 1
+        if de is None:
+            continue
+        de = int(de)
+        if (ds, de) in seen_display or m.tmdb_episode_id in seen_canonical:
+            continue
+        seen_display.add((ds, de))
+        seen_canonical.add(m.tmdb_episode_id)
+        rows.append(ShowEpisodePosition(
+            series_tmdb_id=series_tmdb_id, order_key=order_key,
+            display_season=ds, display_episode=de,
+            tmdb_episode_id=m.tmdb_episode_id,
+            tmdb_season_number=m.tmdb_season_number, tmdb_episode_number=m.tmdb_episode_number,
+        ))
+    return rows
+
+
+async def build_order_positions(
+    db: AsyncSession,
+    series_tmdb_id: int,
+    order_key: str,
+    *,
+    show: ShowModel | None = None,
+    tmdb_api_key: str | None = None,
+    tvdb_api_key: str | None = None,
+    force: bool = False,
+    on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+) -> dict:
+    """(Re)build `show_episode_positions` for one show+order. Delete + reinsert.
+    Aired order is a no-op (identity). Raises ValueError if the ordering can't
+    be resolved."""
+    key = normalize_order_key(order_key)
+    if is_aired_order(key):
+        return {"order_key": ORDER_AIRED, "positions": 0}
+
+    existing = (await db.execute(
+        select(ShowEpisodePosition.id).where(
+            ShowEpisodePosition.series_tmdb_id == series_tmdb_id,
+            ShowEpisodePosition.order_key == key,
+        ).limit(1)
+    )).first()
+    if existing and not force:
+        count = (await db.execute(
+            select(func.count(ShowEpisodePosition.id)).where(
+                ShowEpisodePosition.series_tmdb_id == series_tmdb_id,
+                ShowEpisodePosition.order_key == key,
+            )
+        )).scalar_one()
+        return {"order_key": key, "positions": count, "cached": True}
+
+    cache_ttl = None if force else tmdb.DEFAULT_CACHE_TTL
+
+    if show is None:
+        show = (await db.execute(
+            select(ShowModel).where(ShowModel.tmdb_id == series_tmdb_id)
+        )).scalar_one_or_none()
+
+    if key.startswith("tmdb:group:"):
+        if not tmdb_api_key:
+            raise ValueError("TMDB API key required")
+        rows = await _order_positions_from_tmdb_group(series_tmdb_id, key, tmdb_api_key, cache_ttl)
+    elif key.startswith("tvdb:"):
+        if not (tmdb_api_key and tvdb_api_key):
+            raise ValueError("TMDB and TVDB API keys required")
+        show_tvdb_id = show.tvdb_id if show is not None else None
+        if not show_tvdb_id:
+            # ensure_episode_order_mapping resolves the tvdb id from TMDB itself,
+            # but the non-official types also need the show's TVDB id for the
+            # type fetch. The id is used directly; it is only persisted on the
+            # Show row when no other row already holds it (shows.tvdb_id is
+            # unique - a TVDB-only twin of this show may own it, and a blind
+            # assignment then blows up the whole request on autoflush).
+            sd = await tmdb.get_show(series_tmdb_id, api_key=tmdb_api_key, cache_ttl=cache_ttl)
+            resolved = (sd.get("external_ids") or {}).get("tvdb_id")
+            if not resolved:
+                raise ValueError("TMDB does not expose a TVDB id for this show")
+            show_tvdb_id = int(resolved)
+            if show is not None:
+                from core.identity import link_show_ids
+                with db.no_autoflush:
+                    await link_show_ids(db, show, tvdb_id=show_tvdb_id)
+        rows = await _order_positions_from_tvdb_type(
+            db, series_tmdb_id, key, show_tvdb_id, tmdb_api_key, tvdb_api_key, cache_ttl
+        )
+    else:
+        raise ValueError(f"Unsupported episode order: {order_key}")
+
+    if not rows:
+        raise ValueError("This ordering has no resolvable episodes for this show")
+
+    await db.execute(
+        delete(ShowEpisodePosition).where(
+            ShowEpisodePosition.series_tmdb_id == series_tmdb_id,
+            ShowEpisodePosition.order_key == key,
+        )
+    )
+    db.add_all(rows)
+    await db.flush()
+    return {"order_key": key, "positions": len(rows)}
 
 
 async def get_episode_order(
@@ -230,8 +620,16 @@ async def _match_tmdb_to_tvdb_episodes(
 
     for episode, external_ids in external_rows:
         external_tvdb_id = external_ids.get("tvdb_id")
-        match = tvdb_by_id.get(int(external_tvdb_id)) if external_tvdb_id else None
+        match = None
         method = "external_id"
+        # A TVDB episode can only back one mapping row (uq_episode_order_mapping_tvdb_id).
+        # TMDB occasionally points two of its episodes at the same TVDB
+        # episode (a special duplicated into a regular season, say) - the
+        # first one keeps it, the second falls through to title/date
+        # matching like any other unmatched episode. Without this the whole
+        # batch failed to INSERT, so nothing was ever persisted (#412).
+        if external_tvdb_id and int(external_tvdb_id) not in used_tvdb_ids:
+            match = tvdb_by_id.get(int(external_tvdb_id))
         if match is None:
             title = _normalise_title(episode.get("name"))
             candidates = [
@@ -283,6 +681,14 @@ async def _get_tvdb_id_for_show(
     return int(tvdb_id), show_data
 
 
+# TVDB returns each episode's original-language title unless a language is
+# requested, while TMDB titles here are English - so an anime's Japanese TVDB
+# titles never matched and the switch failed with "No TMDB episodes could be
+# matched to TVDB" (#351). Matching compares titles, so both sides must be
+# English regardless of the user's display language.
+_MATCH_LANGUAGE = "eng"
+
+
 async def _fetch_show_episodes(
     series_tmdb_id: int,
     tvdb_id: int,
@@ -330,7 +736,9 @@ async def _fetch_show_episodes(
         ),
         asyncio.gather(
             *(
-                tvdb.get_series_episodes(tvdb_id, number, tvdb_api_key, cache_ttl=cache_ttl)
+                tvdb.get_series_episodes(
+                    tvdb_id, number, tvdb_api_key, language=_MATCH_LANGUAGE, cache_ttl=cache_ttl
+                )
                 for number in tvdb_season_numbers
             )
         ),
@@ -403,6 +811,30 @@ async def ensure_episode_order_mapping(
     }
 
 
+# Guards for the on-demand webhook path below (#412). A show with no
+# mapping rows yet costs one TMDB external-id lookup per episode to resolve -
+# a 4 000-episode daily show is ~4 400 requests - and Jellyfin reports
+# playback progress every second, so without these every progress tick
+# started that computation over again, concurrently, each one holding its
+# request's DB connection until the pool ran dry and took the whole app down.
+#
+# One computation per show at a time (the lock), and at most one attempt per
+# show per _SEASON_MAPPING_ATTEMPT_TTL whatever its outcome (the deadline
+# map): every other webhook in that window returns [] immediately, which the
+# caller already treats as "no translation, use the raw numbers" - the same
+# behaviour as before #162 for that one event. Both are per-process, which is
+# exactly the scope of the problem (one uvicorn worker, one connection pool).
+_SEASON_MAPPING_ATTEMPT_TTL = tmdb.DEFAULT_CACHE_TTL
+_season_mapping_locks: dict[int, asyncio.Lock] = {}
+_season_mapping_attempts: dict[int, float] = {}
+
+
+def _reset_season_mapping_guards() -> None:
+    """Test hook - forget in-flight locks and recent attempts."""
+    _season_mapping_locks.clear()
+    _season_mapping_attempts.clear()
+
+
 async def ensure_episode_order_mapping_for_season(
     db: AsyncSession,
     show,
@@ -426,10 +858,36 @@ async def ensure_episode_order_mapping_for_season(
 
     Returns only the newly-inserted mapping rows (possibly empty if nothing
     new could be matched - a real TVDB-only episode, not a bug).
+
+    Also empty, without touching TMDB/TVDB at all, while another request is
+    already computing this show's mapping or one was attempted within the
+    last _SEASON_MAPPING_ATTEMPT_TTL - see the guards above (#412). Waiting
+    on the lock instead would park this request, DB connection and all, for
+    as long as the computation takes, which is the pool exhaustion this
+    guards against.
     """
     if not show.tvdb_id or not tmdb_api_key or not tvdb_api_key:
         return []
 
+    deadline = _season_mapping_attempts.get(show.tmdb_id)
+    if deadline is not None and time.monotonic() < deadline:
+        return []
+    lock = _season_mapping_locks.setdefault(show.tmdb_id, asyncio.Lock())
+    if lock.locked():
+        return []
+    async with lock:
+        return await _ensure_episode_order_mapping_for_season_locked(
+            db, show, season_number, tmdb_api_key, tvdb_api_key
+        )
+
+
+async def _ensure_episode_order_mapping_for_season_locked(
+    db: AsyncSession,
+    show,
+    season_number: int,
+    tmdb_api_key: str,
+    tvdb_api_key: str,
+) -> list[EpisodeOrderMapping]:
     existing_result = await db.execute(
         select(EpisodeOrderMapping).where(
             EpisodeOrderMapping.series_tmdb_id == show.tmdb_id
@@ -445,6 +903,12 @@ async def ensure_episode_order_mapping_for_season(
         # returns, so there's nothing more to do unless the show's episode
         # count grew (a genuinely new episode), which force-refresh handles.
         return []
+
+    # From here on this is a real attempt, however it ends - remember it so
+    # the next _SEASON_MAPPING_ATTEMPT_TTL of webhooks for this show don't
+    # repeat it. The cheap early return above is deliberately not counted:
+    # a webhook for another, still-unmapped season must still get its turn.
+    _season_mapping_attempts[show.tmdb_id] = time.monotonic() + _SEASON_MAPPING_ATTEMPT_TTL
 
     try:
         show_data = await tmdb.get_show(show.tmdb_id, api_key=tmdb_api_key, cache_ttl=tmdb.DEFAULT_CACHE_TTL)
@@ -471,8 +935,24 @@ async def ensure_episode_order_mapping_for_season(
     if not mappings:
         return []
 
-    db.add_all(mappings)
-    await db.flush()
+    try:
+        # add_all() inside the savepoint, same discipline as
+        # create_media_safely: on conflict the SAVEPOINT rolls back only this
+        # INSERT and the session stays usable, so the webhook that called us
+        # carries on with its own work instead of failing with a 500.
+        async with db.begin_nested():
+            db.add_all(mappings)
+            await db.flush()
+    except IntegrityError:
+        # Another worker/process got its rows in first (the in-process lock
+        # can't see across workers), or the batch still clashes with an
+        # existing row - either way whatever is in the table is what the
+        # caller's next lookup will find.
+        logger.warning(
+            "Episode order mapping for show tmdb_id=%s conflicted with existing rows, keeping those",
+            show.tmdb_id,
+        )
+        return []
     return mappings
 
 
@@ -562,10 +1042,22 @@ async def reconcile_divergent_episode_media(
     return stats
 
 
-async def _merge_episode_media(db: AsyncSession, canonical: Media, divergent: Media) -> None:
+async def _merge_episode_media(
+    db: AsyncSession,
+    canonical: Media,
+    divergent: Media,
+    *,
+    keep_divergent_files: bool = False,
+) -> None:
     """Moves every reference to `divergent` onto `canonical`, deduplicating
     against rows canonical already has where a table's uniqueness would
-    otherwise be violated, then deletes the now-empty divergent row."""
+    otherwise be violated, then deletes the now-empty divergent row.
+
+    With `keep_divergent_files=True`, a Collection clash moves divergent's
+    CollectionFile rows onto canonical's collection entry instead of dropping
+    them - for when the two rows are genuinely distinct physical files the
+    user wants to keep (e.g. a colour and a black-and-white cut of the same
+    show, matched to one episode)."""
     # WatchEvent: no uniqueness on media_id - every play is real and distinct,
     # re-point them all directly.
     await db.execute(update(WatchEvent).where(WatchEvent.media_id == divergent.id).values(media_id=canonical.id))
@@ -624,7 +1116,21 @@ async def _merge_episode_media(db: AsyncSession, canonical: Media, divergent: Me
             select(Collection).where(Collection.user_id == row.user_id, Collection.media_id == canonical.id)
         )).scalars().first()
         if clash:
-            await db.delete(row)  # cascades to its CollectionFile rows
+            if keep_divergent_files:
+                have = set((await db.execute(
+                    select(CollectionFile.source, CollectionFile.source_id)
+                    .where(CollectionFile.collection_id == clash.id)
+                )).all())
+                for cf in (await db.execute(
+                    select(CollectionFile).where(CollectionFile.collection_id == row.id)
+                )).scalars().all():
+                    if (cf.source, cf.source_id) in have:
+                        await db.delete(cf)
+                    else:
+                        cf.collection_id = clash.id
+                        have.add((cf.source, cf.source_id))
+                await db.flush()
+            await db.delete(row)  # cascades to any CollectionFile rows left on it
         else:
             row.media_id = canonical.id
 
@@ -647,7 +1153,16 @@ async def _merge_episode_media(db: AsyncSession, canonical: Media, divergent: Me
     await db.delete(divergent)
 
 
+_ORDER_KEY_RE = re.compile(
+    r"^(tmdb:aired|tvdb:official|tvdb:dvd|tvdb:absolute|tvdb:alternate"
+    r"|tvdb:regional|tvdb:type:\d+|tmdb:group:[A-Za-z0-9]+)$"
+)
+
+
 def validate_episode_order(value: str) -> str:
-    if value not in _VALID_ORDERS:
+    """Normalise + syntax-check an order key. Whether the key actually exists
+    for a given show is decided later by build_order_positions."""
+    key = normalize_order_key(value)
+    if not _ORDER_KEY_RE.match(key):
         raise ValueError(f"Unsupported episode order: {value}")
-    return value
+    return key
