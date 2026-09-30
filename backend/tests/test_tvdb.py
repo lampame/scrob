@@ -86,6 +86,27 @@ class GetSeriesCacheBypassTests(unittest.IsolatedAsyncioTestCase):
         # and the (path, params) cache key wasn't served from a prior test.
         self.assertEqual(len(requests), 1)
 
+    async def test_season_type_is_threaded_into_the_path(self) -> None:
+        # #174: get_series_episodes fetches a non-aired ordering via the
+        # season-type path segment.
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/login"):
+                return httpx.Response(200, json={"data": {"token": "tok"}})
+            seen.append(request.url.path)
+            return httpx.Response(200, json={"data": {"episodes": []}})
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            tvdb.httpx, "AsyncClient", side_effect=lambda **kw: _REAL_ASYNC_CLIENT(transport=transport, **kw),
+        ):
+            await tvdb.get_series_episodes(121361, 1, "key", cache_ttl=None)
+            await tvdb.get_series_episodes(121361, None, "key", season_type="dvd", cache_ttl=None)
+
+        self.assertTrue(seen[0].endswith("/series/121361/episodes/official"))
+        self.assertTrue(seen[1].endswith("/series/121361/episodes/dvd"))
+
 
 class SubscriberPinTests(unittest.IsolatedAsyncioTestCase):
     """#322/#325: a subscriber-supported TVDB key must be sent to /login with
@@ -205,6 +226,21 @@ class SearchSeriesYearFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[0]["tvdb_id"], 4)
         self.assertEqual(results[0]["status"], "Ended")
         self.assertEqual(results[0]["network"], "Fuji TV")
+
+    async def test_missing_artwork_placeholder_is_treated_as_no_image(self) -> None:
+        # TheTVDB serves its own stock "no artwork" graphic for a show that
+        # has none, instead of omitting image_url - showing it looked like a
+        # real (blank) poster rather than triggering our own placeholder.
+        results = await self._search([
+            {"tvdb_id": "5", "name": "Show", "image_url": "https://artworks.thetvdb.com/banners/images/missing/series.jpg"},
+        ])
+        self.assertIsNone(results[0]["image_url"])
+
+    async def test_real_artwork_url_still_passes_through(self) -> None:
+        results = await self._search([
+            {"tvdb_id": "6", "name": "Show", "image_url": "https://artworks.thetvdb.com/banners/series/6/posters/abc.jpg"},
+        ])
+        self.assertEqual(results[0]["image_url"], "https://artworks.thetvdb.com/banners/series/6/posters/abc.jpg")
 
 
 if __name__ == "__main__":
