@@ -296,8 +296,9 @@ class EnrichMediaEpisodeTvdbFallbackTests(unittest.IsolatedAsyncioTestCase):
             )
 
         get_tvdb_eps.assert_awaited_once_with(411, 4, "tvdb-key", language="eng")
-        # TVDB episode id stored in tmdb_id - existing convention (enrich_episode_from_tvdb).
-        self.assertEqual(media.tmdb_id, 9001)
+        # TVDB episode id lives in tvdb_id; tmdb_id stays unset (migration tvdb1st).
+        self.assertEqual(media.tvdb_id, 9001)
+        self.assertIsNone(media.tmdb_id)
         self.assertEqual(media.title, "TVDB Episode")
         self.assertEqual(media.tmdb_data.get("source"), "tvdb")
 
@@ -331,7 +332,8 @@ class EnrichMediaEpisodeTvdbFallbackTests(unittest.IsolatedAsyncioTestCase):
             await enrich_media(media, api_key="tmdb-key", tvdb_id=999, tvdb_api_key="tvdb-key")
 
         get_ep.assert_not_awaited()
-        self.assertEqual(media.tmdb_id, 100)
+        self.assertEqual(media.tvdb_id, 100)
+        self.assertIsNone(media.tmdb_id)
         self.assertEqual(media.tmdb_data.get("source"), "tvdb")
 
 
