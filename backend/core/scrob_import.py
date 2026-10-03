@@ -29,6 +29,7 @@ from models.ratings import Rating, RatingChanges
 from models.scrobble_connection import ScrobbleConnection
 from models.show import Show
 from core.rewatch import record_rewatch_progress
+from core.watch_dedup import get_dedup_window_minutes, is_duplicate_watch_time, load_existing_watch_times
 from models.sync import SyncJob
 from models.users import UserSettings
 
@@ -289,8 +290,15 @@ async def apply_scrob_import(
 
     # ── Watch history ──────────────────────────────────────────────────
     if include_watched:
-        we_result = await db.execute(select(WatchEvent.media_id, WatchEvent.watched_at).where(WatchEvent.user_id == user_id))
-        existing_watched: set[tuple[int, datetime | None]] = {(r[0], r[1]) for r in we_result}
+        existing_times = await load_existing_watch_times(db, user_id)
+        window_minutes = await get_dedup_window_minutes(db, user_id)
+
+        def _is_duplicate_play(media_id: int, watched_at: datetime | None) -> bool:
+            # See routers.trakt._apply_trakt_import's _is_duplicate_play: an
+            # unknown-dated play matches any existing play of the same item.
+            if watched_at is None:
+                return bool(existing_times.get(media_id))
+            return is_duplicate_watch_time(existing_times, media_id, watched_at, window_minutes)
 
         for entry in data.history_movies:
             tmdb_id = entry.get("movie", {}).get("ids", {}).get("tmdb")
@@ -305,10 +313,9 @@ async def apply_scrob_import(
                             stats["errors"] += 1
                             continue
                         watched_at = _parse_iso(entry.get("watched_at"))
-                        key = (media.id, watched_at)
-                        if key not in existing_watched:
+                        if not _is_duplicate_play(media.id, watched_at):
                             db.add(WatchEvent(user_id=user_id, media_id=media.id, watched_at=watched_at, completed=True, play_count=1))
-                            existing_watched.add(key)
+                            existing_times.setdefault(media.id, []).append(watched_at or datetime.utcnow())
                             stats["movies"] += 1
                         else:
                             stats["skipped"] += 1
@@ -345,13 +352,12 @@ async def apply_scrob_import(
                             stats["errors"] += 1
                             continue
                         watched_at = _parse_iso(entry.get("watched_at"))
-                        key = (media.id, watched_at)
-                        if key not in existing_watched:
+                        if not _is_duplicate_play(media.id, watched_at):
                             event = WatchEvent(user_id=user_id, media_id=media.id, watched_at=watched_at, completed=True, play_count=1)
                             db.add(event)
                             await db.flush()
                             await record_rewatch_progress(db, user_id, media.id, event.id)
-                            existing_watched.add(key)
+                            existing_times.setdefault(media.id, []).append(watched_at or datetime.utcnow())
                             stats["episodes"] += 1
                         else:
                             stats["skipped"] += 1
@@ -619,8 +625,17 @@ async def apply_scrob_import(
         settings_result = await db.execute(select(UserSettings).where(UserSettings.user_id == user_id))
         settings = settings_result.scalar_one_or_none()
         if settings:
-            for field_name in ("tmdb_api_key", "tvdb_api_key", "tvdb_subscriber_pin"):
+            for field_name in ("tmdb_api_key", "tvdb_api_key", "tvdb_subscriber_pin", "rpdb_api_key"):
                 value = data.api_keys.get(field_name)
+                if field_name == "rpdb_api_key":
+                    from core.rpdb import normalize_api_key
+                    try:
+                        if value is not None and not isinstance(value, str):
+                            raise ValueError("Invalid RPDB API key")
+                        value = normalize_api_key(value)
+                    except ValueError:
+                        stats["errors"] += 1
+                        continue
                 if value and not getattr(settings, field_name):
                     setattr(settings, field_name, value)
                     stats["connections"] += 1
