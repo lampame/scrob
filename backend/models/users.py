@@ -49,6 +49,7 @@ class UserSettings(Base):
     id             : Mapped[int]            = mapped_column(Integer, primary_key=True)
     user_id        : Mapped[int]            = mapped_column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
     tmdb_api_key   : Mapped[Optional[str]]  = mapped_column(String(255))
+    rpdb_api_key   : Mapped[Optional[str]]  = mapped_column(String(255))
 
     # Radarr integration
     radarr_url             : Mapped[Optional[str]] = mapped_column(String(500))
@@ -93,6 +94,9 @@ class UserSettings(Base):
     trakt_push_dropped       : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     trakt_scrobble           : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
+    # Show Trakt's public comments (not the user's own) on movie/show/season/episode pages
+    trakt_show_comments      : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
     # Trakt list import/export
     trakt_sync_lists         : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     trakt_push_lists         : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
@@ -112,7 +116,10 @@ class UserSettings(Base):
 
     # Simkl OAuth token
     simkl_access_token       : Mapped[Optional[str]]  = mapped_column(String(2000))
-    simkl_device_code        : Mapped[Optional[str]]  = mapped_column(String(255))  # user_code during PIN auth
+    simkl_device_code        : Mapped[Optional[str]]  = mapped_column(String(255))  # user_code during PIN auth (V1), "v2:<device_code>" during device auth (V2)
+    # AUTH V2 only: 7-day access token + 180-day refresh token. NULL on a V1 connection.
+    simkl_refresh_token      : Mapped[Optional[str]]  = mapped_column(String(2000))
+    simkl_token_expires_at   : Mapped[Optional[int]]  = mapped_column(BigInteger)  # Unix timestamp
 
     # Simkl inbound sync flags (Simkl → Scrob)
     simkl_sync_watched       : Mapped[bool] = mapped_column(Boolean, nullable=False, default=True,  server_default="true")
@@ -127,6 +134,32 @@ class UserSettings(Base):
     # Simkl auto sync/push interval, in hours (null = disabled)
     simkl_auto_sync_interval : Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     simkl_auto_push_interval : Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # WeTrakr OAuth tokens — no client_id/secret columns: Scrob ships a single
+    # app-owned client_id (core/wetrakr.py), never a per-user one (the WeTrakr
+    # dev asked for this, unlike Trakt/Simkl's per-user-app model).
+    wetrakr_access_token       : Mapped[Optional[str]]      = mapped_column(String(2000))
+    wetrakr_refresh_token      : Mapped[Optional[str]]      = mapped_column(String(2000))
+    wetrakr_token_expires_at   : Mapped[Optional[int]]      = mapped_column(BigInteger)  # Unix timestamp
+    wetrakr_device_code        : Mapped[Optional[str]]      = mapped_column(String(255))  # Temporary during device auth
+
+    # WeTrakr inbound sync flags (WeTrakr → Scrob)
+    wetrakr_sync_watched       : Mapped[bool] = mapped_column(Boolean, nullable=False, default=True,  server_default="true")
+    wetrakr_sync_ratings       : Mapped[bool] = mapped_column(Boolean, nullable=False, default=True,  server_default="true")
+
+    # WeTrakr outbound push flags (Scrob → WeTrakr)
+    wetrakr_push_watched       : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    wetrakr_push_ratings       : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+    # WeTrakr lists + comments (both directions)
+    wetrakr_sync_lists         : Mapped[bool] = mapped_column(Boolean, nullable=False, default=True,  server_default="true")
+    wetrakr_push_lists         : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    wetrakr_sync_comments      : Mapped[bool] = mapped_column(Boolean, nullable=False, default=True,  server_default="true")
+    wetrakr_push_comments      : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+    # WeTrakr auto sync/push interval, in hours (null = disabled)
+    wetrakr_auto_sync_interval : Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    wetrakr_auto_push_interval : Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     preferences    : Mapped[Optional[dict]] = mapped_column(JSONB)
     blur_explicit   : Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
@@ -150,6 +183,13 @@ class UserSettings(Base):
     # Playing bar drops the session -> star-rating popup), separately per type (#177).
     rate_prompt_movies   : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     rate_prompt_episodes : Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+    # Minutes within which a second watch of the same movie/episode is treated
+    # as a duplicate of an existing one and not recorded again, regardless of
+    # which source (webhook, import, manual entry, ...) either one came from
+    # (#390). NULL/0 means "use the built-in minimum only" - see
+    # core.watch_dedup.DEFAULT_DEDUP_WINDOW_MINUTES.
+    duplicate_watch_window_minutes : Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # MDBList — API key authentication
     mdblist_api_key: Mapped[Optional[str]] = mapped_column(String(255))

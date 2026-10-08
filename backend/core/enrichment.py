@@ -7,9 +7,35 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core import tmdb
 from core import tvdb as tvdb_client
+from core.identity import external_ids_from_tmdb, link_media_ids
 from models.media import Media, MediaType
 
 logger = logging.getLogger(__name__)
+
+
+async def get_or_create_tvdb_series_media(db: AsyncSession, tvdb_id: int) -> Media | None:
+    """The series-type Media row (lists, ratings) of a TheTVDB-only show, built
+    from its local Show. Such a show has no TMDB record to fetch from, so its
+    row carries tvdb_id and no tmdb_id. None when the show isn't local yet
+    (its show page creates it from TheTVDB)."""
+    from core.identity import find_media, find_show
+
+    existing = await find_media(db, MediaType.series, tvdb_id=tvdb_id)
+    if existing:
+        return existing
+    show = await find_show(db, tvdb_id=tvdb_id)
+    if show is None:
+        return None
+    media, _created = await create_media_safely(
+        db, None, MediaType.series,
+        tvdb_id=tvdb_id,
+        title=show.title,
+        poster_path=show.poster_path,
+        backdrop_path=show.backdrop_path,
+        release_date=show.first_air_date,
+        overview=show.overview,
+    )
+    return media
 
 
 async def create_media_safely(
@@ -93,15 +119,18 @@ def tmdb_season_covers(show_tmdb_data: dict | None, season_number: int, episode_
 
 
 def is_unmapped_tvdb_episode(media: Media) -> bool:
-    """True if this episode Media row was created from TVDB data because it
-    has no TMDB counterpart — its tmdb_id is a TVDB episode id in disguise
-    (see enrich_episode_from_tvdb), not a real TMDB id. Must be excluded from
-    anything sent to services that expect real TMDB identifiers (Trakt,
-    Simkl, MDBList)."""
+    """True if this episode Media row has a TVDB identity but no TMDB one -
+    it was created from TheTVDB because TMDB has no counterpart (or none
+    under the same numbering). Such rows must be excluded from anything sent
+    to services keyed purely on TMDB ids, and their season/episode numbers
+    are TVDB-native, not TMDB-canonical.
+
+    Purely id-based since migration tvdb1st: the old ``tmdb_data.source``
+    tag is still written for diagnostics but no longer decides anything."""
     return (
         media.media_type == MediaType.episode
-        and isinstance(media.tmdb_data, dict)
-        and media.tmdb_data.get("source") == "tvdb"
+        and media.tmdb_id is None
+        and media.tvdb_id is not None
     )
 
 
@@ -109,16 +138,12 @@ async def enrich_episode_from_tvdb(media: Media, tvdb_episode_data: dict) -> Non
     """Populate a bare episode Media record from TVDB data (shape: core.tvdb's
     format_episode output) for an episode that has no TMDB counterpart.
 
-    Stores the TVDB episode id in tmdb_id — the same convention already used
-    by the "resolve a fully-unmatched show to TVDB" flow (routers/sync.py) —
-    so every tmdb_id-keyed consumer (ActionBar, ratings, collection, next-up)
-    works unchanged, since none of them re-validate tmdb_id against a live
-    TMDB call. tmdb_data.source is tagged "tvdb" so is_unmapped_tvdb_episode
-    can identify and exclude these rows from outbound TMDB-id-based pushes.
+    Stores the TVDB episode id in ``tvdb_id``. ``tmdb_id`` is left untouched
+    (normally NULL for such a row); it is never used to smuggle a TVDB id.
     """
     tvdb_episode_id = tvdb_episode_data.get("tvdb_id")
     if tvdb_episode_id:
-        media.tmdb_id = tvdb_episode_id
+        media.tvdb_id = int(tvdb_episode_id)
     # TVDB sometimes has an episode with no name at all (see #173) - media.title
     # is NOT NULL, so a brand-new row (media.title still unset) needs a fallback
     # rather than crashing the insert. Episode 0 is a real episode number (not
@@ -218,6 +243,8 @@ async def enrich_media(
                 "has_post_credits_scene": has_post_credits_scene,
             }
             media.adult = data.get("adult", False)
+            _, imdb_id = external_ids_from_tmdb(data)
+            link_media_ids(media, imdb_id=imdb_id)
 
         elif media.media_type == MediaType.series:
             if not media.tmdb_id:
@@ -239,8 +266,11 @@ async def enrich_media(
                 "tagline": data.get("tagline"),
                 "status": data.get("status"),
                 "adult": data.get("adult", False),
+                "external_ids": data.get("external_ids", {}),
             }
             media.adult = data.get("adult", False)
+            series_tvdb_id, imdb_id = external_ids_from_tmdb(data)
+            link_media_ids(media, tvdb_id=series_tvdb_id, imdb_id=imdb_id)
 
         elif media.media_type == MediaType.episode:
             if media.season_number is None or media.episode_number is None:
@@ -257,6 +287,8 @@ async def enrich_media(
 
             if data:
                 media.tmdb_id = data.get("id") or media.tmdb_id
+                ep_tvdb_id, ep_imdb_id = external_ids_from_tmdb(data)
+                link_media_ids(media, tvdb_id=ep_tvdb_id, imdb_id=ep_imdb_id)
                 media.title = data.get("name") or media.title
                 media.overview = data.get("overview")
                 media.poster_path = tmdb.poster_url(data.get("still_path"), size="w500")

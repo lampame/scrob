@@ -12,8 +12,11 @@ interface Props {
   seasonNumber?: number;
   episodeNumber?: number;
   displaySeasonNumber?: number;
-  episodeOrder?: "tmdb" | "tvdb";
+  episodeOrder?: string;
   tvdbId?: number;
+  // tmdbId is really a TheTVDB id (a show with no TMDB counterpart): the
+  // Sonarr status check / add must go by tvdb id, never as a tmdb id.
+  tvdbOnly?: boolean;
   hideRequest?: boolean;
   hideLists?: boolean;
   isMonitored?: boolean;
@@ -48,8 +51,9 @@ const {
   seasonNumber,
   episodeNumber,
   displaySeasonNumber,
-  episodeOrder = "tmdb",
+  episodeOrder = "tmdb:aired",
   tvdbId,
+  tvdbOnly = false,
   hideRequest = false,
   hideLists = false,
   isMonitored = false,
@@ -142,7 +146,7 @@ const dropTitle = dropped
 
 <div
   data-card
-  data-tmdb-id={String(tmdbId)}
+  data-tmdb-id={tmdbId != null ? String(tmdbId) : ""}
   data-media-type={mediaType}
   data-show-tmdb-id={showTmdbId ? String(showTmdbId) : ""}
   data-season={seasonNumber != null ? String(seasonNumber) : ""}
@@ -150,6 +154,7 @@ const dropTitle = dropped
   data-episode-order={episodeOrder}
   data-air-date={airDate ?? ""}
   data-tvdb-id={tvdbId != null ? String(tvdbId) : ""}
+  data-tvdb-only={tvdbOnly ? "true" : undefined}
   data-display-season={displaySeasonNumber != null ? String(displaySeasonNumber) : ""}
   data-media-id={mediaId != null ? String(mediaId) : ""}
   data-rate-title={ratingTitle ?? ""}
