@@ -184,8 +184,10 @@ class ArvioApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_apply_arvio_watched_movie(self) -> None:
         db = AsyncMock()
         db.add = MagicMock()
+        db.get_bind = MagicMock(return_value=None)  # non-Postgres: skip the #440 dedup lock
         db.execute = AsyncMock(side_effect=[
             _Result(scalars=[]),  # Media search
+            _Result(scalars=[]),  # get_dedup_window_minutes lookup (#390)
             _Result(scalars=[]),  # WatchEvent search
         ])
 
@@ -206,8 +208,10 @@ class ArvioApplyTests(unittest.IsolatedAsyncioTestCase):
         # real watch time.
         db = AsyncMock()
         db.add = MagicMock()
+        db.get_bind = MagicMock(return_value=None)  # non-Postgres: skip the #440 dedup lock
         db.execute = AsyncMock(side_effect=[
             _Result(scalars=[]),  # Media search
+            _Result(scalars=[]),  # get_dedup_window_minutes lookup (#390)
             _Result(scalars=[]),  # WatchEvent search
         ])
 
@@ -224,9 +228,11 @@ class ArvioApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_apply_arvio_watched_episode(self) -> None:
         db = AsyncMock()
         db.add = MagicMock()
+        db.get_bind = MagicMock(return_value=None)  # non-Postgres: skip the #440 dedup lock
         db.execute = AsyncMock(side_effect=[
             _Result(scalars=[]),  # Show search
             _Result(scalars=[]),  # Media episode search
+            _Result(scalars=[]),  # get_dedup_window_minutes lookup (#390)
             _Result(scalars=[]),  # WatchEvent search
         ])
 
@@ -267,8 +273,10 @@ class ArvioApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_apply_arvio_watched_movie_int_item(self) -> None:
         db = AsyncMock()
         db.add = MagicMock()
+        db.get_bind = MagicMock(return_value=None)  # non-Postgres: skip the #440 dedup lock
         db.execute = AsyncMock(side_effect=[
             _Result(scalars=[]),  # Media search
+            _Result(scalars=[]),  # get_dedup_window_minutes lookup (#390)
             _Result(scalars=[]),  # WatchEvent search
         ])
 
@@ -296,9 +304,11 @@ class ArvioApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_apply_arvio_watched_episode_formats(self) -> None:
         db = AsyncMock()
         db.add = MagicMock()
+        db.get_bind = MagicMock(return_value=None)  # non-Postgres: skip the #440 dedup lock
         db.execute = AsyncMock(side_effect=[
             _Result(scalars=[]),  # Show search
             _Result(scalars=[]),  # Media episode search
+            _Result(scalars=[]),  # get_dedup_window_minutes lookup (#390)
             _Result(scalars=[]),  # WatchEvent search
         ])
 
