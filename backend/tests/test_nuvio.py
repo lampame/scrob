@@ -541,6 +541,63 @@ class NuvioClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pushed_items[0]["addon_base_url"], "https://addon.example")
 
 
+class RpcRetryTests(unittest.IsolatedAsyncioTestCase):
+    """#389: a transient network/timeout failure on a Nuvio RPC call must be
+    retried a couple of times instead of immediately failing the whole sync
+    job, but a real error response from the server is never retried."""
+
+    async def test_retries_a_transient_timeout_then_succeeds(self) -> None:
+        calls = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["count"] += 1
+            if calls["count"] < 3:
+                raise httpx.ReadTimeout("timed out", request=request)
+            return httpx.Response(200, json={"ok": True})
+
+        transport = httpx.MockTransport(handler)
+        client = _REAL_ASYNC_CLIENT(transport=transport)
+        try:
+            with patch.object(nuvio.asyncio, "sleep", AsyncMock()):
+                result = await nuvio._rpc(client, "https://api.nuvio.tv", "token", "sync_pull_profiles")
+        finally:
+            await client.aclose()
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(calls["count"], 3)
+
+    async def test_gives_up_after_exhausting_retries(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("timed out", request=request)
+
+        transport = httpx.MockTransport(handler)
+        client = _REAL_ASYNC_CLIENT(transport=transport)
+        try:
+            with patch.object(nuvio.asyncio, "sleep", AsyncMock()):
+                with self.assertRaises(httpx.ReadTimeout):
+                    await nuvio._rpc(client, "https://api.nuvio.tv", "token", "sync_pull_profiles")
+        finally:
+            await client.aclose()
+
+    async def test_a_real_error_response_is_never_retried(self) -> None:
+        calls = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["count"] += 1
+            return httpx.Response(400, json={"message": "bad request"})
+
+        transport = httpx.MockTransport(handler)
+        client = _REAL_ASYNC_CLIENT(transport=transport)
+        try:
+            with patch.object(nuvio.asyncio, "sleep", AsyncMock()):
+                with self.assertRaises(nuvio.NuvioAPIError):
+                    await nuvio._rpc(client, "https://api.nuvio.tv", "token", "sync_pull_profiles")
+        finally:
+            await client.aclose()
+
+        self.assertEqual(calls["count"], 1)
+
+
 class NuvioCollectionFanoutTests(unittest.IsolatedAsyncioTestCase):
     async def test_local_collection_addition_pushes_imdb_item_to_nuvio(self) -> None:
         movie = Media(
@@ -655,6 +712,7 @@ class NuvioWatchHistoryTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=[
                     _Result(scalars=[movie]),
                     _Result(rows=[]),
+                    _Result(),  # get_dedup_window_minutes lookup (#390)
                     # record_rewatch_progress's own Media lookup, once per new
                     # WatchEvent (2 distinct timestamps below) - no-ops since
                     # this test isn't exercising rewatch behavior.
