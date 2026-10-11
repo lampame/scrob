@@ -8,8 +8,9 @@ os.environ.setdefault(
     "postgresql+asyncpg://test:test@localhost/test",
 )
 
+from core.identity import find_media
 from models.base import MediaType
-from routers import ratings as ratings_router
+from routers import ratings as ratings_router  # noqa: F401 - import smoke test for the router module
 
 
 class _FakeScalars:
@@ -45,15 +46,18 @@ class _FakeDB:
 
 
 class FindMediaDeduplicationTests(unittest.IsolatedAsyncioTestCase):
+    """The ratings router resolves items through core.identity.find_media
+    (dual identity, step 1) - the dedup guarantee below carries over."""
+
     async def test_returns_none_when_no_rows(self) -> None:
         db = _FakeDB([])
-        media = await ratings_router._find_media(db, 12345, MediaType.episode)
+        media = await find_media(db, MediaType.episode, tmdb_id=12345)
         self.assertIsNone(media)
 
     async def test_returns_the_single_row(self) -> None:
         only = _FakeMedia(id=42)
         db = _FakeDB([only])
-        media = await ratings_router._find_media(db, 12345, MediaType.episode)
+        media = await find_media(db, MediaType.episode, tmdb_id=12345)
         self.assertIs(media, only)
 
     async def test_duplicate_rows_return_a_result_instead_of_crashing(self) -> None:
@@ -67,7 +71,7 @@ class FindMediaDeduplicationTests(unittest.IsolatedAsyncioTestCase):
         dup_a = _FakeMedia(id=115243)
         dup_b = _FakeMedia(id=114817)
         db = _FakeDB([dup_a, dup_b])
-        media = await ratings_router._find_media(db, 7079819, MediaType.episode)
+        media = await find_media(db, MediaType.episode, tmdb_id=7079819)
         self.assertIsNotNone(media)
         self.assertIn(media, (dup_a, dup_b))
 
