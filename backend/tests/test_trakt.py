@@ -1399,7 +1399,7 @@ class TraktExportSyncTests(unittest.IsolatedAsyncioTestCase):
 
         captured: dict = {}
 
-        async def fake_apply(db, job_id, user_id, source, api_key, sync_watched, sync_ratings, sync_lists, split_watchlist, history_start, history_end):
+        async def fake_apply(db, job_id, user_id, source, api_key, sync_watched, sync_ratings, sync_lists, split_watchlist, history_start, history_end, window_minutes=5):
             captured.update(sync_watched=sync_watched, sync_ratings=sync_ratings, sync_lists=sync_lists)
             return (
                 {"movies": 0, "episodes": 0, "ratings": 0, "lists": 0, "list_items": 0, "skipped": 0, "errors": 0},

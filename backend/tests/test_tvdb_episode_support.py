@@ -37,30 +37,36 @@ class TmdbSeasonCoversTests(unittest.TestCase):
 
 class IsUnmappedTvdbEpisodeTests(unittest.TestCase):
     """Regression tests for #101: episodes enriched from TVDB must be
-    identifiable so outbound pushes (Trakt/Simkl/MDBList) can exclude them —
-    their tmdb_id is a TVDB episode id in disguise, not a real TMDB id."""
+    identifiable so outbound pushes (Trakt/Simkl/MDBList) can exclude them.
+    Since migration tvdb1st this is purely id-based: a TVDB id and no TMDB
+    id. The legacy tmdb_data.source tag no longer decides anything."""
 
-    def test_tvdb_sourced_episode_is_unmapped(self):
-        media = Media(media_type=MediaType.episode, tmdb_data={"source": "tvdb"})
+    def test_tvdb_only_episode_is_unmapped(self):
+        media = Media(media_type=MediaType.episode, tmdb_id=None, tvdb_id=9001, tmdb_data={"source": "tvdb"})
         self.assertTrue(is_unmapped_tvdb_episode(media))
 
-    def test_tmdb_sourced_episode_is_not_unmapped(self):
-        media = Media(media_type=MediaType.episode, tmdb_data={"runtime": 42})
+    def test_source_tag_alone_is_not_enough(self):
+        # A row tagged source=tvdb that kept a real TMDB id is TMDB-addressable.
+        media = Media(media_type=MediaType.episode, tmdb_id=555, tvdb_id=9001, tmdb_data={"source": "tvdb"})
         self.assertFalse(is_unmapped_tvdb_episode(media))
 
-    def test_no_tmdb_data_is_not_unmapped(self):
-        media = Media(media_type=MediaType.episode, tmdb_data=None)
+    def test_tmdb_sourced_episode_is_not_unmapped(self):
+        media = Media(media_type=MediaType.episode, tmdb_id=555, tvdb_id=9001, tmdb_data={"runtime": 42})
+        self.assertFalse(is_unmapped_tvdb_episode(media))
+
+    def test_no_ids_at_all_is_not_unmapped(self):
+        media = Media(media_type=MediaType.episode, tmdb_id=None, tvdb_id=None, tmdb_data=None)
         self.assertFalse(is_unmapped_tvdb_episode(media))
 
     def test_non_episode_media_is_never_unmapped(self):
-        media = Media(media_type=MediaType.movie, tmdb_data={"source": "tvdb"})
+        media = Media(media_type=MediaType.movie, tmdb_id=None, tvdb_id=9001, tmdb_data={"source": "tvdb"})
         self.assertFalse(is_unmapped_tvdb_episode(media))
 
 
 class EnrichEpisodeFromTvdbTests(unittest.IsolatedAsyncioTestCase):
     """Regression tests for #101: populating a bare episode Media record from
-    TVDB data, mirroring the tmdb_id-disguise convention already used by the
-    "resolve unmatched show to TVDB" flow in routers/sync.py."""
+    TVDB data. The TVDB episode id goes to tvdb_id; tmdb_id is never touched
+    (the pre-tvdb1st disguise convention is gone)."""
 
     async def test_populates_fields_and_tags_source(self):
         media = Media(media_type=MediaType.episode, season_number=5, episode_number=1)
@@ -75,7 +81,8 @@ class EnrichEpisodeFromTvdbTests(unittest.IsolatedAsyncioTestCase):
             "image_url": "https://artworks.thetvdb.com/banners/episodes/x.jpg",
         }
         await enrich_episode_from_tvdb(media, tvdb_data)
-        self.assertEqual(media.tmdb_id, 9988776)
+        self.assertEqual(media.tvdb_id, 9988776)
+        self.assertIsNone(media.tmdb_id)
         self.assertEqual(media.title, "Big Block Swap")
         self.assertEqual(media.overview, "An engine gets swapped.")
         self.assertEqual(media.poster_path, tvdb_data["image_url"])
@@ -84,10 +91,11 @@ class EnrichEpisodeFromTvdbTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(media.tmdb_data["tvdb_episode_id"], 9988776)
         self.assertEqual(media.tmdb_data["runtime"], 42)
 
-    async def test_missing_tvdb_id_leaves_existing_tmdb_id_untouched(self):
-        media = Media(media_type=MediaType.episode, tmdb_id=None)
+    async def test_missing_tvdb_id_leaves_ids_untouched(self):
+        media = Media(media_type=MediaType.episode, tmdb_id=777, tvdb_id=None)
         await enrich_episode_from_tvdb(media, {"name": "Untitled"})
-        self.assertIsNone(media.tmdb_id)
+        self.assertEqual(media.tmdb_id, 777)
+        self.assertIsNone(media.tvdb_id)
         self.assertEqual(media.tmdb_data["source"], "tvdb")
 
     async def test_missing_name_keeps_existing_title(self):
