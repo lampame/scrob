@@ -2,6 +2,8 @@
 import Base from "../../layouts/Base.astro";
 import ListCard from "../../components/ListCard.astro";
 import { api, type PublicProfile, type ProfileListItem, type ProfileFollowEntry, tmdbImageUrl } from "../../lib/api";
+import { ratingPosterUrl } from "../../lib/posters";
+import { wetrakrCredit } from "../../lib/wetrakrAttribution";
 
 export const prerender = false;
 
@@ -57,19 +59,29 @@ function mediaUrl(type: string, tmdbId: number): string {
   return `/media/${type}/${tmdbId}`;
 }
 
-function commentUrl(item: { media_type: string; tmdb_id: number; season_number: number | null; episode_number: number | null }): string {
-  if (item.media_type === "movie") return `/media/movie/${item.tmdb_id}`;
-  if (item.media_type === "series") return `/show/${item.tmdb_id}`;
-  if (item.media_type === "season" && item.season_number != null) return `/show/${item.tmdb_id}/season/${item.season_number}`;
-  if (item.media_type === "episode" && item.season_number != null && item.episode_number != null)
-    return `/show/${item.tmdb_id}/season/${item.season_number}/${item.episode_number}`;
-  return `/show/${item.tmdb_id}`;
+// Season and episode pages post their comments as media_type "series" with the
+// season/episode numbers set, so the kind comes from the numbers, not media_type.
+function commentKind(item: { media_type: string; season_number: number | null; episode_number: number | null }): "movie" | "show" | "season" | "episode" {
+  if (item.media_type === "movie") return "movie";
+  if (item.season_number != null && item.episode_number != null) return "episode";
+  if (item.season_number != null) return "season";
+  return "show";
+}
+
+function commentUrl(item: { media_type: string; tmdb_id: number | null; tvdb_id: number | null; season_number: number | null; episode_number: number | null }): string {
+  const kind = commentKind(item);
+  if (kind === "movie") return `/media/movie/${item.tmdb_id}`;
+  const base = item.tvdb_id && !item.tmdb_id ? `/show/tvdb/${item.tvdb_id}` : `/show/${item.tmdb_id}`;
+  if (kind === "season") return `${base}/season/${item.season_number}`;
+  if (kind === "episode") return `${base}/season/${item.season_number}/${item.episode_number}`;
+  return base;
 }
 
 function commentLabel(item: { media_type: string; season_number: number | null; episode_number: number | null; title: string | null }): string {
-  if (item.media_type === "season" && item.season_number != null)
+  const kind = commentKind(item);
+  if (kind === "season")
     return `${item.title ?? "Unknown"} — Season ${item.season_number}`;
-  if (item.media_type === "episode" && item.season_number != null && item.episode_number != null)
+  if (kind === "episode")
     return `${item.title ?? "Unknown"} — S${String(item.season_number).padStart(2, "0")}E${String(item.episode_number).padStart(2, "0")}`;
   return item.title ?? "Unknown";
 }
@@ -241,7 +253,7 @@ Recently Watched Movies
                 </div>
                 <div class="flex gap-3 overflow-x-auto pb-3 scrollbar-none">
                   {profile.recently_watched_movies.map((item) => {
-                    const thumb = posterUrl(item.poster_path);
+                    const thumb = ratingPosterUrl(posterUrl(item.poster_path), item, Astro.locals.hasRpdbKey);
                     const href = mediaUrl(item.media_type, item.tmdb_id);
                     return (
                       <a href={href} class="flex-shrink-0 w-32 group active:scale-95 active:opacity-70 transition-all duration-150">
@@ -324,7 +336,7 @@ Top Rated Movies
                 </div>
                 <div class="flex gap-3 overflow-x-auto pb-3 scrollbar-none">
                   {profile.top_rated_movies.map((item) => {
-                    const thumb = posterUrl(item.poster_path);
+                    const thumb = ratingPosterUrl(posterUrl(item.poster_path), item, Astro.locals.hasRpdbKey);
                     const href = mediaUrl(item.media_type, item.tmdb_id);
                     return (
                       <a href={href} class="flex-shrink-0 w-32 group active:scale-95 active:opacity-70 transition-all duration-150">
@@ -360,7 +372,7 @@ Top Rated Shows
                 </div>
                 <div class="flex gap-3 overflow-x-auto pb-3 scrollbar-none">
                   {profile.top_rated_shows.map((item) => {
-                    const thumb = posterUrl(item.poster_path);
+                    const thumb = ratingPosterUrl(posterUrl(item.poster_path), item, Astro.locals.hasRpdbKey);
                     const href = mediaUrl(item.media_type, item.tmdb_id);
                     return (
                       <a href={href} class="flex-shrink-0 w-32 group active:scale-95 active:opacity-70 transition-all duration-150">
@@ -393,7 +405,7 @@ Recent Comments
                   {profile.recent_comments.map((comment) => {
                     const href = commentUrl(comment);
                     const label = commentLabel(comment);
-                    const thumb = posterUrl(comment.poster_path, "w92");
+                    const thumb = ratingPosterUrl(posterUrl(comment.poster_path, "w92"), comment, Astro.locals.hasRpdbKey);
                     return (
                       <div
                         class="flex gap-4 bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 hover:border-zinc-600 transition-all group"
@@ -404,10 +416,18 @@ Recent Comments
                             <img src={thumb} alt={label} class="w-full h-full object-cover" loading="lazy" />
                           </a>
                         )}
-                        <a href={href} class="flex-1 min-w-0">
-                          <p class="text-xs font-bold text-zinc-400 group-hover:text-zinc-200 transition-colors truncate mb-1.5">{label}</p>
-                          <p class="text-sm text-zinc-300 leading-relaxed line-clamp-2">{comment.content}</p>
-                        </a>
+                        <div class="flex-1 min-w-0">
+                          <a href={href} class="block">
+                            <p class="text-xs font-bold text-zinc-400 group-hover:text-zinc-200 transition-colors truncate mb-1.5">{label}</p>
+                            <p class="text-sm text-zinc-300 leading-relaxed line-clamp-2">{comment.content}</p>
+                          </a>
+                          {wetrakrCredit(comment.wetrakr_source, comment.wetrakr_comment_id) && (
+                            <a href={wetrakrCredit(comment.wetrakr_source, comment.wetrakr_comment_id)!.url} target="_blank" rel="noopener" class="wetrakr-credit mt-1.5 inline-flex items-center gap-1.5 text-[11px] leading-none font-medium text-zinc-400 hover:text-zinc-200 transition-colors">
+                              <img src="/wetrakr.png" alt="WeTrakr" class="block w-4 h-4 rounded shrink-0" loading="lazy" />
+                              {wetrakrCredit(comment.wetrakr_source, comment.wetrakr_comment_id)!.label}
+                            </a>
+                          )}
+                        </div>
                         <div class="flex flex-col items-end justify-between shrink-0 gap-2">
                           <span class="text-[10px] text-zinc-400 font-medium">{timeAgo(comment.created_at)}</span>
                           {isOwner && (
