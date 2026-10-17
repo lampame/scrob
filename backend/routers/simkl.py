@@ -1,7 +1,7 @@
 """Simkl integration router.
 
 Endpoints:
-  POST   /simkl/auth/pin/start   – Start PIN auth flow
+  POST   /simkl/auth/pin/start   – Start the device auth flow (AUTH V2, through Scrob's own Simkl app)
   POST   /simkl/auth/pin/poll    – Poll for token completion
   DELETE /simkl/auth/disconnect  – Clear stored token
   POST   /simkl/sync             – Trigger a Simkl import (watched history + ratings + lists)
@@ -12,6 +12,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -44,7 +45,7 @@ def _require_simkl_config(settings: UserSettings) -> None:
     if not settings.simkl_client_id:
         raise HTTPException(
             status_code=503,
-            detail="Simkl Client ID is not configured. Add it in Settings → Sync → Simkl.",
+            detail="Simkl is not connected. Connect it in Settings → Sync → Simkl.",
         )
 
 
@@ -55,25 +56,42 @@ async def simkl_pin_start(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Initiate PIN authentication. Returns user_code + url."""
+    """Start the device sign-in. Returns user_code + url."""
     result = await db.execute(select(UserSettings).where(UserSettings.user_id == current_user.id))
     settings = result.scalar_one_or_none()
     if not settings:
         settings = UserSettings(user_id=current_user.id)
         db.add(settings)
 
-    _require_simkl_config(settings)
+    # Always sign in through Scrob's own AUTH V2 app, so there is no app to
+    # register. Whatever Client ID was saved before (an AUTH V1 one) is replaced,
+    # which is how reconnecting moves a V1 user onto V2 (#455).
+    client_id = simkl_client.SCROB_CLIENT_ID
+    try:
+        v2 = await simkl_client.start_device_auth_v2(client_id)
+    except simkl_client.SimklNotV2Client:
+        logger.error("Simkl rejected Scrob's own client_id as not enabled for AUTH V2")
+        raise HTTPException(status_code=502, detail="Simkl rejected Scrob's app registration. Please report this.")
+    except httpx.HTTPStatusError as exc:
+        logger.warning("Simkl device auth start rejected: HTTP %s", exc.response.status_code)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Simkl rejected the request (HTTP {exc.response.status_code}). Try again in a moment.",
+        )
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("Simkl device auth start failed: %s", exc)
+        raise HTTPException(status_code=502, detail="Could not reach Simkl. Try again in a moment.")
+    if not isinstance(v2, dict) or not v2.get("device_code") or not v2.get("user_code"):
+        raise HTTPException(status_code=502, detail="Simkl did not return a device code. Try again in a moment.")
 
-    data = await simkl_client.start_pin_auth(settings.simkl_client_id)
-
-    settings.simkl_device_code = data["user_code"]
+    settings.simkl_client_id = client_id
+    settings.simkl_device_code = f"v2:{v2['device_code']}"
     await db.commit()
-
     return {
-        "user_code": data["user_code"],
-        "url": data.get("url") or f"https://simkl.com/pin/{data['user_code']}",
-        "expires_in": data.get("expires_in", 600),
-        "interval": data.get("interval", 5),
+        "user_code": v2["user_code"],
+        "url": v2.get("verification_uri_complete") or v2.get("verification_uri") or "https://simkl.com/pin",
+        "expires_in": v2.get("expires_in", 900),
+        "interval": v2.get("interval", 5),
     }
 
 
@@ -91,6 +109,28 @@ async def simkl_pin_poll(
 
     _require_simkl_config(settings)
 
+    if settings.simkl_device_code.startswith("v2:"):
+        try:
+            tokens = await simkl_client.poll_device_token_v2(
+                settings.simkl_client_id, settings.simkl_device_code[len("v2:"):]
+            )
+        except Exception as exc:
+            settings.simkl_device_code = None
+            await db.commit()
+            raise HTTPException(status_code=400, detail=f"Authorization failed: {exc}")
+        if tokens is None:
+            return {"status": "pending"}
+        if "media:write" not in str(tokens.get("scope") or ""):
+            # Simkl silently downgrades to read-only; the push/scrobble features would
+            # then fail on the first write, so say so now instead.
+            logger.warning("Simkl granted scope %r without media:write", tokens.get("scope"))
+        settings.simkl_access_token = tokens["access_token"]
+        settings.simkl_refresh_token = tokens.get("refresh_token")
+        settings.simkl_token_expires_at = simkl_client.token_expires_at(tokens)
+        settings.simkl_device_code = None
+        await db.commit()
+        return {"status": "connected"}
+
     try:
         access_token = await simkl_client.poll_pin_token(
             settings.simkl_client_id,
@@ -105,6 +145,8 @@ async def simkl_pin_poll(
         return {"status": "pending"}
 
     settings.simkl_access_token = access_token
+    settings.simkl_refresh_token = None
+    settings.simkl_token_expires_at = None
     settings.simkl_device_code = None
     await db.commit()
 
@@ -121,11 +163,68 @@ async def simkl_disconnect(
     settings = result.scalar_one_or_none()
 
     if settings:
+        if settings.simkl_refresh_token and settings.simkl_client_id:
+            await simkl_client.revoke_token_v2(settings.simkl_client_id, settings.simkl_refresh_token)
         settings.simkl_access_token = None
+        settings.simkl_refresh_token = None
+        settings.simkl_token_expires_at = None
         settings.simkl_device_code = None
         await db.commit()
 
     return {"status": "disconnected"}
+
+
+# ── AUTH V2 token refresh ─────────────────────────────────────────────────────
+
+# Refreshing replaces the access token on the grant, so two refreshers racing on
+# one user would cut each other off - serialise them per user.
+_refresh_locks: dict[int, asyncio.Lock] = {}
+
+
+async def ensure_simkl_token_fresh(db: AsyncSession, settings: UserSettings) -> bool:
+    """Refresh a V2 access token that is expired or close to it. No-op (True)
+    for a V1 connection or a token that is comfortably valid. Returns False when
+    a refresh was needed but failed - the caller carries on with what it has."""
+    if not simkl_client.needs_refresh(settings):
+        return True
+    lock = _refresh_locks.setdefault(settings.user_id, asyncio.Lock())
+    async with lock:
+        # Someone else may have refreshed while we waited.
+        await db.refresh(settings)
+        if not simkl_client.needs_refresh(settings):
+            return True
+        try:
+            tokens = await simkl_client.refresh_access_token_v2(settings.simkl_client_id, settings.simkl_refresh_token)
+        except simkl_client.SimklAuthError as exc:
+            logger.warning("Simkl token refresh rejected for user %s: %s", settings.user_id, exc)
+            return False
+        except Exception as exc:
+            logger.warning("Simkl token refresh failed for user %s: %s", settings.user_id, exc)
+            return False
+        settings.simkl_access_token = tokens["access_token"]
+        if tokens.get("refresh_token"):
+            settings.simkl_refresh_token = tokens["refresh_token"]
+        settings.simkl_token_expires_at = simkl_client.token_expires_at(tokens)
+        await db.commit()
+        logger.info("Refreshed Simkl access token for user %s", settings.user_id)
+        return True
+
+
+async def refresh_expiring_simkl_tokens() -> int:
+    """Refresh every V2 connection whose access token is expiring. Run at
+    startup and periodically, which keeps every other Simkl call site (webhook
+    scrobbles, push fan-out, scheduled syncs) on a fresh token without each
+    one having to refresh for itself. Returns how many were refreshed."""
+    maker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    refreshed = 0
+    async with maker() as db:
+        rows = (
+            await db.execute(select(UserSettings).where(UserSettings.simkl_refresh_token.isnot(None)))
+        ).scalars().all()
+        for settings in rows:
+            if simkl_client.needs_refresh(settings) and await ensure_simkl_token_fresh(db, settings):
+                refreshed += 1
+    return refreshed
 
 
 # ── Sync helpers (shared with run_simkl_sync) ─────────────────────────────────
@@ -284,7 +383,7 @@ def _simkl_rating_value(item: dict) -> float | None:
 # ── Background sync job ───────────────────────────────────────────────────────
 
 async def run_simkl_sync(user_id: int, job_id: int) -> None:
-    from routers.sync import SyncCancelled, _raise_if_cancelled
+    from routers.sync import SyncCancelled, _raise_if_cancelled, _short_error
     print(f"Starting Simkl sync for user {user_id}, job {job_id}")
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
@@ -305,6 +404,7 @@ async def run_simkl_sync(user_id: int, job_id: int) -> None:
                 await db.commit()
                 return
 
+            await ensure_simkl_token_fresh(db, settings)
             client_id    = settings.simkl_client_id
             access_token = settings.simkl_access_token
 
@@ -558,12 +658,30 @@ async def run_simkl_sync(user_id: int, job_id: int) -> None:
 
                 await db.commit()
 
+            # ── Dropped shows (#474) ──────────────────────────────────────────
+            if settings.simkl_sync_dropped:
+                from routers.trakt import _apply_dropped_shows_import
+
+                # Simkl returns ids.tmdb as a string, and the shared importer
+                # filters Show.tmdb_id (an integer column) with these as-is.
+                dropped_items = []
+                for s in raw_shows:
+                    if s.get("status") != "dropped":
+                        continue
+                    try:
+                        tmdb_id = int((s.get("show") or {}).get("ids", {}).get("tmdb"))
+                    except (TypeError, ValueError):
+                        continue
+                    dropped_items.append({"show": {"ids": {"tmdb": tmdb_id}}})
+                stats["dropped"] = await _apply_dropped_shows_import(db, user_id, dropped_items)
+
             print(
                 f"Simkl sync job {job_id} completed. "
                 f"Movies: {stats['movies']} new. "
                 f"Episodes: {stats['episodes']} new. "
                 f"Ratings: {stats['ratings']} new. "
                 f"Lists: {stats['lists']} new, {stats['list_items']} items. "
+                f"Dropped: {stats.get('dropped', 0)} new. "
                 f"Skipped: {stats['skipped']}. Errors: {stats['errors']}."
             )
             # A pull only populates scrob's own data — it never automatically pushes
@@ -594,7 +712,7 @@ async def run_simkl_sync(user_id: int, job_id: int) -> None:
             print(f"Simkl sync job {job_id} failed: {exc}")
             await db.execute(
                 update(SyncJob).where(SyncJob.id == job_id).values(
-                    status=SyncStatus.failed, error_message=str(exc)
+                    status=SyncStatus.failed, error_message=_short_error(exc)
                 )
             )
             await db.commit()
@@ -634,7 +752,7 @@ async def sync_simkl(
 # ── Push (Scrob → Simkl) ──────────────────────────────────────────────────────
 
 async def _run_simkl_push(user_id: int, job_id: int) -> None:
-    from routers.sync import SyncCancelled, _raise_if_cancelled
+    from routers.sync import SyncCancelled, _raise_if_cancelled, _select_in_chunks, _short_error
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
         try:
@@ -649,6 +767,27 @@ async def _run_simkl_push(user_id: int, job_id: int) -> None:
                 await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.failed, error_message="Simkl is not connected"))
                 await db.commit()
                 return
+            await ensure_simkl_token_fresh(db, settings)
+
+            # Dropped shows Simkl is missing. The one-shot push at drop time is
+            # best-effort (#329), so reconcile against Simkl's own dropped list.
+            dropped_to_push: list[int] = []
+            if settings.simkl_push_dropped:
+                try:
+                    from routers.trakt import _local_dropped_show_tmdb_ids
+
+                    local_dropped = await _local_dropped_show_tmdb_ids(db, settings)
+                    if local_dropped:
+                        remote_all = await simkl_client.get_all_items(settings.simkl_client_id, settings.simkl_access_token)
+                        remote_dropped = {
+                            int(tid)
+                            for item in (remote_all.get("shows") or [])
+                            if item.get("status") == "dropped"
+                            and (tid := (item.get("show") or {}).get("ids", {}).get("tmdb"))
+                        }
+                        dropped_to_push = sorted(local_dropped - remote_dropped)
+                except Exception as exc:
+                    logger.warning("Simkl push job %s: could not reconcile dropped shows: %s", job_id, exc)
 
             all_media_ids: set[int] = set()
             watched_ids:   set[int] = set()
@@ -676,22 +815,30 @@ async def _run_simkl_push(user_id: int, job_id: int) -> None:
                 ratings_map = {row[0]: row[1] for row in ratings_result.all()}
                 all_media_ids |= set(ratings_map.keys())
 
-            if not all_media_ids:
+            if not all_media_ids and not dropped_to_push:
                 await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.completed, stats={"succeeded": 0, "failed": 0}, processed_items=0, total_items=0))
                 await db.commit()
                 return
 
-            await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(total_items=len(all_media_ids)))
+            await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(total_items=len(all_media_ids) + len(dropped_to_push)))
             await db.commit()
 
-            media_result = await db.execute(select(Media).where(Media.id.in_(all_media_ids)))
-            media_by_id: dict[int, Media] = {m.id: m for m in media_result.scalars().all()}
+            media_rows = await _select_in_chunks(
+                db,
+                lambda chunk: select(Media).where(Media.id.in_(chunk)),
+                list(all_media_ids),
+            )
+            media_by_id: dict[int, Media] = {m.id: m for m in media_rows}
 
             show_ids = {m.show_id for m in media_by_id.values() if m.show_id}
             shows_by_id: dict[int, Show] = {}
             if show_ids:
-                shows_result = await db.execute(select(Show).where(Show.id.in_(show_ids)))
-                shows_by_id = {s.id: s for s in shows_result.scalars().all()}
+                show_rows = await _select_in_chunks(
+                    db,
+                    lambda chunk: select(Show).where(Show.id.in_(chunk)),
+                    list(show_ids),
+                )
+                shows_by_id = {s.id: s for s in show_rows}
 
             movie_candidates: list[tuple[int, datetime]] = []
             episode_candidates: list[tuple[int, int, int, datetime]] = []
@@ -730,13 +877,16 @@ async def _run_simkl_push(user_id: int, job_id: int) -> None:
                 # can have local watch history even when the user chose not to push
                 # watched history to Simkl this run.
                 rating_media_ids = list(ratings_map.keys())
-                watch_check_result = await db.execute(
-                    select(WatchEvent.media_id).where(
-                        WatchEvent.user_id == user_id,
-                        WatchEvent.media_id.in_(rating_media_ids),
-                    ).distinct()
+                media_ids_with_watch_event = set(
+                    await _select_in_chunks(
+                        db,
+                        lambda chunk: select(WatchEvent.media_id).where(
+                            WatchEvent.user_id == user_id,
+                            WatchEvent.media_id.in_(chunk),
+                        ).distinct(),
+                        rating_media_ids,
+                    )
                 )
-                media_ids_with_watch_event = {row[0] for row in watch_check_result.all()}
 
                 rated_show_tmdb_ids = {
                     media_by_id[mid].tmdb_id
@@ -745,14 +895,17 @@ async def _run_simkl_push(user_id: int, job_id: int) -> None:
                 }
                 shows_with_watched_episode: set[int] = set()
                 if rated_show_tmdb_ids:
-                    watched_show_result = await db.execute(
-                        select(Show.tmdb_id)
-                        .join(Media, Media.show_id == Show.id)
-                        .join(WatchEvent, WatchEvent.media_id == Media.id)
-                        .where(WatchEvent.user_id == user_id, Show.tmdb_id.in_(rated_show_tmdb_ids))
-                        .distinct()
+                    shows_with_watched_episode = set(
+                        await _select_in_chunks(
+                            db,
+                            lambda chunk: select(Show.tmdb_id)
+                            .join(Media, Media.show_id == Show.id)
+                            .join(WatchEvent, WatchEvent.media_id == Media.id)
+                            .where(WatchEvent.user_id == user_id, Show.tmdb_id.in_(chunk))
+                            .distinct(),
+                            list(rated_show_tmdb_ids),
+                        )
                     )
-                    shows_with_watched_episode = {row[0] for row in watched_show_result.all()}
 
                 for mid, rating in ratings_map.items():
                     media = media_by_id.get(mid)
@@ -801,9 +954,9 @@ async def _run_simkl_push(user_id: int, job_id: int) -> None:
                     simkl_client.set_ratings_batch(settings.simkl_client_id, settings.simkl_access_token, movie_ratings, show_ratings),
                 ))
 
-            total = sum(item_count for _, item_count, _ in push_tasks)
+            total = sum(item_count for _, item_count, _ in push_tasks) + len(dropped_to_push)
 
-            if not push_tasks:
+            if not push_tasks and not dropped_to_push:
                 await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.completed, stats={"succeeded": 0, "failed": 0}, processed_items=0))
                 await db.commit()
                 return
@@ -820,7 +973,29 @@ async def _run_simkl_push(user_id: int, job_id: int) -> None:
                         failed += item_count
                         logger.warning("Simkl push batch failed (%s, %d items): %s", category, item_count, result)
                     else:
-                        succeeded += item_count
+                        # add_history_batch returns how many items Simkl
+                        # accepted the request for but couldn't resolve (#453).
+                        rejected = min(item_count, result) if isinstance(result, int) else 0
+                        failed += rejected
+                        succeeded += item_count - rejected
+                await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(processed_items=succeeded + failed))
+                await db.commit()
+                await _raise_if_cancelled(db, job_id)
+
+            # Dropped goes last: a history/rating push can move a show back to
+            # watching on Simkl's side, and the drop has to be the final word.
+            for i in range(0, len(dropped_to_push), SIMKL_PUSH_BATCH_SIZE):
+                chunk = dropped_to_push[i:i + SIMKL_PUSH_BATCH_SIZE]
+                try:
+                    rejected = await simkl_client.add_shows_to_dropped(
+                        settings.simkl_client_id, settings.simkl_access_token, chunk
+                    )
+                    rejected = min(len(chunk), rejected)
+                    failed += rejected
+                    succeeded += len(chunk) - rejected
+                except Exception as exc:
+                    failed += len(chunk)
+                    logger.warning("Simkl push batch failed (dropped, %d shows): %s", len(chunk), exc)
                 await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(processed_items=succeeded + failed))
                 await db.commit()
                 await _raise_if_cancelled(db, job_id)
@@ -846,7 +1021,7 @@ async def _run_simkl_push(user_id: int, job_id: int) -> None:
 
         except Exception as exc:
             print(f"Simkl push job {job_id} failed: {exc}")
-            await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.failed, error_message=str(exc)))
+            await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.failed, error_message=_short_error(exc)))
             await db.commit()
 
 
@@ -861,7 +1036,7 @@ async def push_simkl(
     _require_simkl_config(settings)
     if not settings or not settings.simkl_access_token:
         raise HTTPException(status_code=400, detail="Simkl is not connected")
-    if not settings.simkl_push_watched and not settings.simkl_push_ratings:
+    if not settings.simkl_push_watched and not settings.simkl_push_ratings and not settings.simkl_push_dropped:
         raise HTTPException(status_code=400, detail="Enable 'Scrob → Simkl' push flags first")
     job = SyncJob(user_id=current_user.id, source=CollectionSource.simkl, status=SyncStatus.pending, job_type="push")
     db.add(job)

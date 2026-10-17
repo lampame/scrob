@@ -2,7 +2,7 @@ import secrets
 import pyotp
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +25,7 @@ from core.security import (
     verify_password,
     get_password_hash,
     create_access_token,
+    session_lifetime,
     hash_opaque_token,
     generate_opaque_token,
     ALGORITHM,
@@ -36,7 +37,7 @@ from core.limiter import limiter
 from core.backup import restore_backup
 from core.nuvio import NuvioAPIError, parse_profile_id
 import schemas
-from dependencies import get_current_user, DEVICE_TOKEN_TYPE
+from dependencies import get_current_user, oauth2_scheme, DEVICE_TOKEN_TYPE
 from sqlalchemy.orm import selectinload
 from fastapi import File, UploadFile
 
@@ -217,9 +218,20 @@ async def register(request: Request, user_in: schemas.UserCreate, db: AsyncSessi
 
     return new_user
 
+def _session_claims(remember: bool) -> Optional[dict]:
+    """Extra claims on a user login token. `rem` records "Stay logged in" so
+    a renewed token keeps the same lifetime as the one it replaces."""
+    return {"rem": True} if remember else None
+
+
 @router.post("/login", response_model=schemas.Token)
 @limiter.limit("10/minute")
-async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+async def login(
+    request: Request,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    remember: bool = Form(False),
+    db: AsyncSession = Depends(get_db),
+):
     if app_settings.oidc_enabled and app_settings.oidc_disable_password_login:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -247,12 +259,15 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
         temp_token = create_access_token(
             subject=user.id,
             expires_delta=timedelta(minutes=10),
-            extra_claims={"type": "2fa_pending"},
+            extra_claims={"type": "2fa_pending", "remember": remember},
         )
         return {"requires_2fa": True, "temp_token": temp_token}
 
-    access_token = create_access_token(subject=user.id)
-    return {"access_token": access_token, "token_type": "bearer"}
+    lifetime = session_lifetime(remember)
+    access_token = create_access_token(
+        subject=user.id, expires_delta=lifetime, extra_claims=_session_claims(remember)
+    )
+    return {"access_token": access_token, "token_type": "bearer", "expires_in": int(lifetime.total_seconds())}
 
 @router.get("/activate/{token}", include_in_schema=False)
 async def activate_email(token: str, db: AsyncSession = Depends(get_db)):
@@ -336,6 +351,38 @@ async def bootstrap_restore(
     return {"status": "restored"}
 
 
+# Re-issue a login token with a fresh expiry (sliding session). The frontend
+# calls this on page loads so an active user is never logged out, while an idle
+# one still expires after the normal 7 days (or SESSION_REMEMBER_DAYS).
+SESSION_RENEW_MIN_AGE_SECONDS = 5 * 60
+
+
+@router.post("/session/renew")
+async def renew_session(
+    token: str = Depends(oauth2_scheme),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        payload = jwt.decode(token, app_settings.secret_key, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
+    # Only plain login tokens slide; typed ones (device grants, 2FA) never do.
+    if payload.get("type"):
+        return {"access_token": None, "expires_in": None}
+
+    remember = bool(payload.get("rem"))
+    lifetime = session_lifetime(remember)
+    remaining = float(payload.get("exp", 0)) - datetime.now(timezone.utc).timestamp()
+    if remaining > lifetime.total_seconds() - SESSION_RENEW_MIN_AGE_SECONDS:
+        # Issued moments ago, nothing to gain from minting another.
+        return {"access_token": None, "expires_in": int(remaining)}
+
+    new_token = create_access_token(
+        subject=current_user.id, expires_delta=lifetime, extra_claims=_session_claims(remember)
+    )
+    return {"access_token": new_token, "expires_in": int(lifetime.total_seconds())}
+
+
 @router.get("/me", response_model=schemas.User)
 async def read_users_me(current_user: User = Depends(get_current_user)):
     return current_user
@@ -365,14 +412,18 @@ async def _settings_response(settings: UserSettings, db: AsyncSession) -> schema
     data = schemas.UserSettings.model_validate(settings)
     data.trakt_connected = bool(settings.trakt_access_token)
     data.simkl_connected = bool(settings.simkl_access_token)
+    data.simkl_auth_v1 = bool(settings.simkl_access_token and not settings.simkl_refresh_token)
+    data.wetrakr_connected = bool(settings.wetrakr_access_token)
     data.mdblist_connected = bool(settings.mdblist_api_key)
     data.bingebase_connected = bool(settings.bingebase_webhook_url or settings.bingebase_api_key)
     gs_result = await db.execute(select(GlobalSettings).where(GlobalSettings.id == 1))
     gs = gs_result.scalar_one_or_none()
+    data.has_rpdb_key = bool(settings.rpdb_api_key)
     data.has_global_tmdb_key = bool(gs and gs.tmdb_api_key)
     data.has_effective_tmdb_key = bool(settings.tmdb_api_key) or data.has_global_tmdb_key
     data.has_global_tvdb_key = bool(gs and gs.tvdb_api_key)
     data.has_effective_tvdb_key = bool(settings.tvdb_api_key) or data.has_global_tvdb_key
+    data.has_global_mdblist_key = bool(gs and getattr(gs, "mdblist_api_key", None))
     # Same "all 4 fields set, user config first" rule as _effective_radarr/
     # _effective_sonarr in routers/media.py - inlined rather than imported to
     # avoid a routers.media <-> routers.auth cross-import.
@@ -422,8 +473,14 @@ async def update_user_settings(
         db.add(settings)
 
     # Computed read-only fields; never write them back
-    READ_ONLY_FIELDS = {"trakt_connected", "simkl_connected", "mdblist_connected", "bingebase_connected", "has_global_tmdb_key", "has_effective_tmdb_key", "has_global_tvdb_key", "has_effective_tvdb_key"}
+    READ_ONLY_FIELDS = {"trakt_connected", "simkl_connected", "simkl_auth_v1", "wetrakr_connected", "mdblist_connected", "bingebase_connected", "has_rpdb_key", "has_global_tmdb_key", "has_effective_tmdb_key", "has_global_tvdb_key", "has_effective_tvdb_key", "has_global_mdblist_key"}
     update_data = {k: v for k, v in settings_in.model_dump(exclude_unset=True).items() if k not in READ_ONLY_FIELDS}
+
+    new_rpdb_key = update_data.get("rpdb_api_key")
+    if new_rpdb_key and new_rpdb_key != settings.rpdb_api_key:
+        from core import rpdb
+        if not await rpdb.validate_api_key(new_rpdb_key):
+            raise HTTPException(status_code=400, detail="RPDB could not validate this API key. Check the key and try again.")
 
     if "tmdb_api_key" in update_data and update_data["tmdb_api_key"]:
         success = await tmdb.validate_api_key(update_data["tmdb_api_key"])
@@ -854,6 +911,16 @@ async def test_tmdb(
     if not success:
         raise HTTPException(status_code=400, detail="Invalid TMDB API Key")
     return {"status": "ok", "message": "TMDB API key is valid."}
+
+@router.post("/test-rpdb")
+async def test_rpdb(
+    body: schemas.ApiKeyTestRequest,
+    response: Response,
+    current_user: User = Depends(get_current_user)
+):
+    from core import rpdb
+    _prevent_sensitive_response_caching(response)
+    return {"success": await rpdb.validate_api_key(body.key.get_secret_value())}
 
 @router.post("/test-tvdb")
 async def test_tvdb(
@@ -1360,8 +1427,24 @@ async def get_connection_status(
         from core import simkl as simkl_client
         if not user_settings or not (user_settings.simkl_access_token and user_settings.simkl_client_id):
             return {"configured": False, "connected": False}
+        from routers.simkl import ensure_simkl_token_fresh
+        await ensure_simkl_token_fresh(db, user_settings)
         connected = await simkl_client.validate_token(user_settings.simkl_client_id, user_settings.simkl_access_token)
         return {"configured": True, "connected": connected}
+
+    async def check_wetrakr():
+        from core import wetrakr as wetrakr_client
+        if not user_settings or not user_settings.wetrakr_access_token:
+            return {"configured": False, "connected": False}
+        # Refresh an expired token first (as Simkl's check does) - validating
+        # the stored one as-is reported a perfectly recoverable connection as
+        # disconnected once its short-lived access token lapsed.
+        from routers.wetrakr import WeTrakrTokenError, ensure_valid_wetrakr_token
+        try:
+            await ensure_valid_wetrakr_token(db, user_settings, force_check=True)
+        except WeTrakrTokenError:
+            return {"configured": True, "connected": False}
+        return {"configured": True, "connected": True}
 
     async def check_mdblist():
         from core import mdblist
@@ -1371,13 +1454,13 @@ async def get_connection_status(
         return {"configured": True, "connected": connected}
 
     media_server_tasks = [check_media_server(c) for c in media_server_conns]
-    rdr_status, snr_status, trakt_status, simkl_status, mdblist_status, *ms_statuses = await asyncio.gather(
-        check_radarr(), check_sonarr(), check_trakt(), check_simkl(), check_mdblist(), *media_server_tasks
+    rdr_status, snr_status, trakt_status, simkl_status, wetrakr_status, mdblist_status, *ms_statuses = await asyncio.gather(
+        check_radarr(), check_sonarr(), check_trakt(), check_simkl(), check_wetrakr(), check_mdblist(), *media_server_tasks
     )
     if any(conn.type in ("nuvio", "stremio") for conn in media_server_conns):
         await db.commit()
 
-    return {"radarr": rdr_status, "sonarr": snr_status, "trakt": trakt_status, "simkl": simkl_status, "mdblist": mdblist_status, "connections": ms_statuses}
+    return {"radarr": rdr_status, "sonarr": snr_status, "trakt": trakt_status, "simkl": simkl_status, "wetrakr": wetrakr_status, "mdblist": mdblist_status, "connections": ms_statuses}
 
 
 @router.post("/sonarr/profiles")
@@ -1509,8 +1592,10 @@ async def verify_2fa_login(
         if payload.get("type") != "2fa_pending":
             raise credentials_exception
         user_id = int(payload["sub"])
+        remember = bool(payload.get("remember"))
     except (JWTError, ValueError, KeyError):
         raise credentials_exception
+    lifetime = session_lifetime(remember)
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
@@ -1519,7 +1604,13 @@ async def verify_2fa_login(
 
     # Try TOTP code
     if pyotp.TOTP(user.totp_secret).verify(req.code, valid_window=1):
-        return {"access_token": create_access_token(subject=user.id), "token_type": "bearer"}
+        return {
+            "access_token": create_access_token(
+                subject=user.id, expires_delta=lifetime, extra_claims=_session_claims(remember)
+            ),
+            "token_type": "bearer",
+            "expires_in": int(lifetime.total_seconds()),
+        }
 
     # Try backup code
     bc_result = await db.execute(
@@ -1533,7 +1624,13 @@ async def verify_2fa_login(
     if bc:
         bc.used = True
         await db.commit()
-        return {"access_token": create_access_token(subject=user.id), "token_type": "bearer"}
+        return {
+            "access_token": create_access_token(
+                subject=user.id, expires_delta=lifetime, extra_claims=_session_claims(remember)
+            ),
+            "token_type": "bearer",
+            "expires_in": int(lifetime.total_seconds()),
+        }
 
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid verification code")
 
