@@ -46,6 +46,7 @@ Scrob syncs your libraries from **Jellyfin**, **Plex**, **Emby**, **Nuvio**, **A
   - [Updating](#updating)
 - [Configuration](#configuration)
   - [TheTVDB metadata](#thetvdb-metadata)
+  - [RPDB rating posters](#rpdb-rating-posters)
 - [ARVIO Cloud Synchronization](#arvio-cloud-synchronization)
 - [Nuvio Cloud Synchronization](#nuvio-cloud-synchronization)
   - [Connect Nuvio](#connect-nuvio)
@@ -91,6 +92,7 @@ Scrob syncs your libraries from **Jellyfin**, **Plex**, **Emby**, **Nuvio**, **A
 - **Social**: Follow other users and see their activity.
 - **Release schedule**: Movie pages show the full release schedule - theatrical, digital, and physical dates - sourced from TMDB.
 - **TMDB integration**: Rich metadata for every title - posters, backdrops, cast, crew, trailers, collections, and more.
+- **RPDB rating posters**: Optionally use RatingPosterDB movie and show posters with embedded ratings. Configure your own key and customize the artwork and rating sources through RPDB.
 - **Metadata language**: Set a preferred display language per profile - titles, overviews, and episode names show translated where available, independent of the rest of the UI's language.
 - **Search**: Search TMDB across movies, shows, people, and collections, merged with your local library data.
 - **Pick a Movie / Pick a Show**: Get a suggestion on what to watch next from your library or your streaming services based on your preferences.
@@ -99,6 +101,7 @@ Scrob syncs your libraries from **Jellyfin**, **Plex**, **Emby**, **Nuvio**, **A
 - **Continue Watching & Next Up**: Dashboard cards showing in-progress items and the next episode to watch in each series.
 - **Statistics**: A per-user stats page - watch time, activity charts, ratings breakdown, and most-watched people/networks - filterable by all-time, year, month, week, or a custom period.
 - **Season & episode tracking**: Detailed season views with per-episode watched state and progress.
+- **Episode ordering**: Watch a show in an alternate episode order - DVD, absolute, alternate or regional order from TheTVDB, or any TMDB episode group (story arc, production, digital). Chosen per show from the **Episode order** control on the show page; every surface the show's episodes appear on - show, season and episode pages, Next Up, Now Playing, the calendar, history and cards - renumbers to match. TheTVDB-sourced orders need a TheTVDB key; TMDB episode groups don't.
 - **Cast & crew pages**: Full filmography for any person, linked to your library.
 - **Radarr & Sonarr integration**: Add movies and shows to Radarr/Sonarr directly from the Scrob UI.
 - **Plex watchlist automation**: Automatically send items from your Plex watchlist (and selected friends' watchlists) to Radarr or Sonarr.
@@ -315,11 +318,13 @@ Database migrations run automatically on startup - no manual steps required.
 | `DATABASE_URL` | - | **Required** (standard image). PostgreSQL connection string (`postgresql+asyncpg://...`). Optional on the omnibus image - if omitted, the embedded database is used. |
 | `ENABLE_REGISTRATIONS` | `false` | Allow new users to register. The first user can always register regardless of this setting. |
 | `REGISTRATION_MAX_ALLOWED_USERS` | `0` | Maximum number of registered users. `0` = unlimited. |
+| `SESSION_REMEMBER_DAYS` | `30` | How long a login lasts when **Stay logged in** is ticked on the login page, for password and SSO logins. Without it a login lasts 7 days. |
 | `TZ` | `UTC` | Container timezone (e.g. `Europe/Lisbon`). |
 | `PUID` | `1000` | User ID to run the process as. |
 | `PGID` | `1000` | Group ID to run the process as. |
 | `BACKEND_PORT` | `7331` | Internal port the backend binds to. Override only if `7331` conflicts on bare metal. |
 | `OIDC_ENABLED` | `false` | Enable OIDC login. |
+| `OIDC_DISCOVERY_URL` | - | OpenID discovery document URL. When set, Scrob validates `id_token` signatures (JWKS), issuer, audience, and nonce. |
 | `OIDC_DISABLE_PASSWORD_LOGIN` | `false` | Enforce OIDC-only login (disables username/password). |
 
 ### WebSocket (Socket) Configuration
@@ -400,6 +405,14 @@ Aiven requires TLS. Append `?ssl=require` to `DATABASE_URL` (asyncpg accepts it)
 DATABASE_URL: postgresql+asyncpg://user:password@your-aiven-host:5432/scrob?ssl=require
 ```
 
+### RPDB rating posters
+
+To enable [RatingPosterDB](https://ratingposterdb.com/) posters, enter your RPDB API key in **Settings → General → RPDB API Key**, test it, and save. This is a personal display preference: it applies only to your browsing, including when viewing another user's public profile or list. Clear the key and save to return to the original artwork.
+
+Choose poster styles and rating sources in the [RPDB manager](https://manager.ratingposterdb.com/); available customizations depend on your RPDB plan. Scrob uses RPDB's account-default posters and falls back to the original artwork when an RPDB image cannot load. Movie and show portraits, including parent-show portraits in history and Next Up, can use RPDB. Episode stills, season-specific artwork, backdrops, people and collection artwork stay unchanged.
+
+Rating posters are fetched server-side through the same image proxy as TMDB and TheTVDB artwork, so your key stays on the server and is never placed in the page. It is not written into shared media metadata, and data exports include it only when you explicitly select **API Keys**. Existing metadata and the server's image cache are unchanged.
+
 ## ARVIO Cloud Synchronization
 
 Scrob supports pull synchronization from **ARVIO Cloud** (`https://auth.arvio.tv/.netlify/functions`), importing watched movies, watched episodes, and continue watching playback progress per profile.
@@ -457,6 +470,8 @@ Ratings are not synchronized with Nuvio.
 ### Scheduling and Limitations
 
 **Auto Pull** and **Auto Push** can run independently every 15 minutes, 30 minutes, 1 hour, 3 hours, 6 hours, 12 hours, 24 hours, or 48 hours. Nuvio synchronization is polling-based; Nuvio does not use the media-server webhook URLs documented below.
+
+For Plex, Jellyfin, Emby and Nuvio, an Auto Push only sends what changed since the previous push: ratings and watched status the server already received with the same value are skipped, and items that were not found on the server are not searched for again for 24 hours. The **Push** button always reconciles everything, and Auto Push does the same once a week, so a value edited directly on the server is put back within a week at most.
 
 Inbound Nuvio identifiers are normalized to TMDB for Scrob's internal matching. Before an outbound push, Scrob resolves those TMDB identifiers to Nuvio-compatible bare IMDb identifiers (`tt...`) and caches the mapping. Unsupported identifiers are skipped rather than attached to the wrong title.
 
@@ -537,21 +552,22 @@ Stremio exposes a current watched state rather than Scrob's complete per-play hi
 
 ## Simkl Synchronization
 
-1. Create a Simkl application at [simkl.com/settings/developer](https://simkl.com/settings/developer) to get a Client ID.
-2. Open **Connections → Media Trackers → Simkl**, paste the Client ID in, and select **Connect Simkl**.
-3. Go to the shown URL and enter the displayed PIN to authorize, on simkl.com.
-4. Choose what to import under **Simkl → Scrob**, then select **Pull**.
-5. Enable the desired **Scrob → Simkl** options to push watched status, ratings, or live scrobbling back to Simkl.
+1. Open **Connections → Media Trackers → Simkl** and select **Connect Simkl**. There is no app to register or Client ID to enter.
+2. Go to the shown URL and enter the displayed PIN to authorize, on simkl.com.
+3. Choose what to import under **Simkl → Scrob**, then select **Pull**.
+4. Enable the desired **Scrob → Simkl** options to push watched status, ratings, or live scrobbling back to Simkl.
 
-Simkl uses PIN-based authentication - no client secret is needed.
+Scrob signs in with Simkl's AUTH V2 device flow through its own Simkl app, and refreshes the short-lived tokens automatically in the background. Connections made earlier through Simkl's retiring AUTH V1 keep working until Simkl switches it off (expected around April 2027); disconnect and connect again to move to V2.
 
 | Direction | Setting | Behavior |
 |---|---|---|
 | Simkl → Scrob | **Watched history** | Imports watched movies and episodes. |
 | Simkl → Scrob | **Ratings** | Imports ratings. |
 | Simkl → Scrob | **Lists / Watchlist** | Imports "plan to watch" items into a managed **Simkl - Watchlist** list. |
+| Simkl → Scrob | **Dropped shows** | Marks shows you dropped on Simkl as dropped in Scrob. Only shows Scrob already knows are marked, and a show un-dropped on Simkl is not un-dropped in Scrob. Off by default. |
 | Scrob → Simkl | **Watched status** | Pushes watched and unwatched changes made in Scrob or imported from another connected provider. |
 | Scrob → Simkl | **Ratings** | Pushes rating changes. |
+| Scrob → Simkl | **Dropped shows** | Moves shows you drop in Scrob to Simkl's Dropped list, and the manual **Push** or **Auto Push** adds any that are missing. Un-dropping in Scrob moves a show that is still in Simkl's Dropped list to **Completed** (ended and fully watched), **Watching** (some episodes watched) or **On Hold** (nothing watched). A show you have since moved to another list on Simkl is left alone. Off by default. |
 | Scrob → Simkl | **Live scrobbling** | Pushes playback start/stop events from webhooks and manual scrobble sessions in real time. |
 
 The manual **Push** action sends the complete enabled watched-history and ratings snapshot, in batches of 50 items per request. Collection membership and the Simkl watchlist are not pushed back to Simkl.
@@ -622,25 +638,52 @@ The `POST /api/proxy/webhooks/kodi` endpoint (and the `kodi/history`, `kodi/rati
 
 ## OIDC / Single Sign-On
 
-Scrob supports any OpenID Connect provider (Authelia, Authentik, Keycloak, Google, etc.).
+Scrob supports any standards-compliant OpenID Connect provider (Authelia, Authentik, Keycloak, Google, etc.). Login flow is authorization-code with PKCE; when discovery is configured the `id_token` is signature-verified (JWKS) and identity is bound on the IdP's stable `(issuer, sub)` pair so a changed email never breaks the account.
+
+### Prerequisites
+
+- Register Scrob as a client at your IdP with redirect URI `https://scrob.yourdomain.com/oidc-callback`.
+
+### Minimal config
+
+Add these to the `environment:` section of the `scrob` service in your `docker-compose.yaml` (or `docker-compose.yml` for the omnibus image), or to your `.env` file if you run from source — same place as `DATABASE_URL`, `SECRET_KEY`, and the SMTP vars.
 
 ```yaml
 OIDC_ENABLED: "true"
-OIDC_PROVIDER_NAME: "Authelia"
+OIDC_PROVIDER_NAME: "Authentik"
 OIDC_CLIENT_ID: "scrob"
 OIDC_CLIENT_SECRET: "your-secret"
-OIDC_AUTH_URL: "https://auth.yourdomain.com/api/oidc/authorization"
-OIDC_TOKEN_URL: "https://auth.yourdomain.com/api/oidc/token"
-OIDC_USERINFO_URL: "https://auth.yourdomain.com/api/oidc/userinfo"
+OIDC_AUTH_URL: "https://auth.yourdomain.com/application/o/authorize/"
+OIDC_TOKEN_URL: "https://auth.yourdomain.com/application/o/token/"
+OIDC_USERINFO_URL: "https://auth.yourdomain.com/application/o/userinfo/"
 OIDC_REDIRECT_URL: "https://scrob.yourdomain.com/oidc-callback"
-# OIDC_LOGOUT_URL: "https://auth.yourdomain.com/api/oidc/logout"  # your provider's logout endpoint
-# OIDC_SCOPES: "openid email profile"     # default shown - override only if your provider needs different scopes
-# OIDC_IDENTIFIER_FIELD: "email"          # userinfo field used to match/create the Scrob account - default shown
+# Recommended — enables id_token signature verification and (issuer, sub) binding:
+OIDC_DISCOVERY_URL: "https://auth.yourdomain.com/application/o/scrob/.well-known/openid-configuration"
+# Optional — enables RP-initiated SSO logout (populated from discovery when unset):
+# OIDC_LOGOUT_URL: "https://auth.yourdomain.com/application/o/scrob/end-session/"
+# OIDC_SCOPES: "openid email profile"     # default shown
+# OIDC_IDENTIFIER_FIELD: "email"          # userinfo field used only in compat mode
+# OIDC_ISSUER / OIDC_JWKS_URL             # explicit fallbacks when discovery isn't available
 OIDC_AUTO_CREATE_USERS: "true"
 # OIDC_DISABLE_PASSWORD_LOGIN: "true"  # uncomment to enforce SSO-only
 ```
 
-Register Scrob as a client in your provider with redirect URI: `https://scrob.yourdomain.com/oidc-callback`
+### What users see
+
+- The login page shows a **Login with {OIDC_PROVIDER_NAME}** button. If `OIDC_DISABLE_PASSWORD_LOGIN=true`, the password form is hidden and the registration link is removed.
+- First SSO login creates a Scrob account automatically unless `OIDC_AUTO_CREATE_USERS=false`. In that case only pre-existing accounts (matched by verified email) can sign in via SSO.
+- Settings → Security shows the linked SSO provider and offers an **Unlink** button. Unlink is refused when it would lock the user out (no password set, SSO-only mode on, and the identity is the only one).
+
+### MFA, logout, and account linking
+
+- SSO uses the IdP's MFA (number-matching push, passkey, TOTP, etc.). Scrob's own TOTP only runs on password logins.
+- If `OIDC_LOGOUT_URL` is set (or `end_session_endpoint` is present in your discovery document), logging out of Scrob also ends the IdP session. Otherwise Scrob just clears its own cookie — leave it unset for providers that don't offer RP-initiated logout (e.g. Google).
+- Existing local accounts with the same **verified** email as the SSO user are linked automatically on first SSO login - the account, library, and TOTP all stay. Scrob never links to an account whose IdP marks `email_verified: false`.
+
+### Notes
+
+- Setting `OIDC_DISCOVERY_URL` (or both `OIDC_ISSUER` and `OIDC_JWKS_URL`) enables `id_token` signature verification and `(issuer, sub)` identity binding. Without them, Scrob matches users by the `OIDC_IDENTIFIER_FIELD` userinfo claim and logs a warning on first login.
+- The first account created on an empty Scrob instance becomes admin, whether that happens via local registration or SSO. Group and role claims from the IdP are ignored.
 
 ## Email Validation & SMTP
 

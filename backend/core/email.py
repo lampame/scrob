@@ -1,9 +1,33 @@
 import asyncio
+import logging
+import re
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formatdate, make_msgid
 
 from core.config import settings
+
+logger = logging.getLogger(__name__)
+
+SMTP_TIMEOUT = 15
+
+
+def _html_to_text(html: str) -> str:
+    # Keep link targets, since the buttons are the whole point of these mails
+    text = re.sub(r'<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', r"\2: \1", html, flags=re.S)
+    text = re.sub(r"<(script|style)\b.*?</\1>", "", text, flags=re.S)
+    text = re.sub(r"</(p|div|h\d|a)>|<br\s*/?>", "\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in text.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def _log_result(to: str, refused: dict) -> None:
+    if refused:
+        logger.error("SMTP relay refused recipient %s: %s", to, refused)
+    else:
+        logger.info("Email accepted by SMTP relay for %s", to)
 
 
 def _send_sync(to: str, subject: str, html: str) -> None:
@@ -13,26 +37,32 @@ def _send_sync(to: str, subject: str, html: str) -> None:
     msg["Subject"] = subject
     msg["From"] = from_addr
     msg["To"] = to
-    msg.attach(MIMEText(html, "html"))
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=from_addr.rsplit("@", 1)[-1] or None)
+    msg.attach(MIMEText(_html_to_text(html), "plain", "utf-8"))
+    msg.attach(MIMEText(html, "html", "utf-8"))
 
     enc = (settings.smtp_encryption or "tls").lower()
 
     if enc == "ssl":
-        with smtplib.SMTP_SSL(settings.smtp_address, settings.smtp_port) as smtp:
+        with smtplib.SMTP_SSL(settings.smtp_address, settings.smtp_port, timeout=SMTP_TIMEOUT) as smtp:
             if settings.smtp_username and settings.smtp_password:
                 smtp.login(settings.smtp_username, settings.smtp_password)
-            smtp.sendmail(from_addr, to, msg.as_string())
+            refused = smtp.sendmail(from_addr, to, msg.as_string())
+            _log_result(to, refused)
     elif enc == "tls":
-        with smtplib.SMTP(settings.smtp_address, settings.smtp_port) as smtp:
+        with smtplib.SMTP(settings.smtp_address, settings.smtp_port, timeout=SMTP_TIMEOUT) as smtp:
             smtp.starttls()
             if settings.smtp_username and settings.smtp_password:
                 smtp.login(settings.smtp_username, settings.smtp_password)
-            smtp.sendmail(from_addr, to, msg.as_string())
+            refused = smtp.sendmail(from_addr, to, msg.as_string())
+            _log_result(to, refused)
     else:  # none
-        with smtplib.SMTP(settings.smtp_address, settings.smtp_port) as smtp:
+        with smtplib.SMTP(settings.smtp_address, settings.smtp_port, timeout=SMTP_TIMEOUT) as smtp:
             if settings.smtp_username and settings.smtp_password:
                 smtp.login(settings.smtp_username, settings.smtp_password)
-            smtp.sendmail(from_addr, to, msg.as_string())
+            refused = smtp.sendmail(from_addr, to, msg.as_string())
+            _log_result(to, refused)
 
 
 async def send_email(to: str, subject: str, html: str) -> None:

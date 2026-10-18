@@ -24,12 +24,14 @@ from .media_request import MediaRequest
 from .image_cache import ImageCache
 from .media_translation import MediaTranslation
 from .show_translation import ShowTranslation
-from .episode_order import EpisodeOrderMapping, UserShowEpisodeOrder
+from .episode_order import EpisodeOrderMapping, UserShowEpisodeOrder, ShowEpisodePosition
 from .rewatch import ShowRewatch, RewatchProgress
 from .title_credits import TitleCredits
 from .calendar_cache import UserCalendarCache
 from .plex_pending_push import PlexPendingPush
+from .connection_push_state import ConnectionPushState
 from .oauth_device import OAuthDeviceGrant
+from .oidc_identity import OidcIdentity
 
 __all__ = [
     "Base",
@@ -58,8 +60,10 @@ __all__ = [
     "ImageCache",
     "MediaTranslation",
     "ShowTranslation",
-    "EpisodeOrderMapping", "UserShowEpisodeOrder",
+    "EpisodeOrderMapping", "UserShowEpisodeOrder", "ShowEpisodePosition",
     "ShowRewatch", "RewatchProgress",
     "PlexPendingPush",
+    "ConnectionPushState",
     "OAuthDeviceGrant",
+    "OidcIdentity",
 ]
