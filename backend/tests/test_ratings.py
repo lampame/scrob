@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime
 from unittest.mock import AsyncMock
 
 os.environ.setdefault("SECRET_KEY", "test-secret")
@@ -8,6 +9,7 @@ os.environ.setdefault(
     "postgresql+asyncpg://test:test@localhost/test",
 )
 
+from core.identity import find_media
 from models.base import MediaType
 from routers import ratings as ratings_router
 
@@ -45,15 +47,18 @@ class _FakeDB:
 
 
 class FindMediaDeduplicationTests(unittest.IsolatedAsyncioTestCase):
+    """The ratings router resolves items through core.identity.find_media
+    (dual identity, step 1) - the dedup guarantee below carries over."""
+
     async def test_returns_none_when_no_rows(self) -> None:
         db = _FakeDB([])
-        media = await ratings_router._find_media(db, 12345, MediaType.episode)
+        media = await find_media(db, MediaType.episode, tmdb_id=12345)
         self.assertIsNone(media)
 
     async def test_returns_the_single_row(self) -> None:
         only = _FakeMedia(id=42)
         db = _FakeDB([only])
-        media = await ratings_router._find_media(db, 12345, MediaType.episode)
+        media = await find_media(db, MediaType.episode, tmdb_id=12345)
         self.assertIs(media, only)
 
     async def test_duplicate_rows_return_a_result_instead_of_crashing(self) -> None:
@@ -67,9 +72,52 @@ class FindMediaDeduplicationTests(unittest.IsolatedAsyncioTestCase):
         dup_a = _FakeMedia(id=115243)
         dup_b = _FakeMedia(id=114817)
         db = _FakeDB([dup_a, dup_b])
-        media = await ratings_router._find_media(db, 7079819, MediaType.episode)
+        media = await find_media(db, MediaType.episode, tmdb_id=7079819)
         self.assertIsNotNone(media)
         self.assertIn(media, (dup_a, dup_b))
+
+
+class _FakeRatedMedia:
+    def __init__(self, **attrs) -> None:
+        self.id = 1
+        self.tmdb_id = None
+        self.tvdb_id = None
+        self.imdb_id = None
+        self.media_type = MediaType.movie
+        self.title = "Title"
+        self.poster_path = None
+        self.release_date = None
+        self.__dict__.update(attrs)
+
+
+class _FakeRating:
+    def __init__(self, **attrs) -> None:
+        self.id = 1
+        self.season_number = None
+        self.episode_order = None
+        self.user_id = 1
+        self.rating = 8.0
+        self.review = None
+        self.rated_at = datetime(2026, 1, 1)
+        self.__dict__.update(attrs)
+
+
+class FormatRatingTests(unittest.TestCase):
+    """Regression test for the ratings payload leaving out tvdb_id/imdb_id:
+    a rated item identified only by TheTVDB (no tmdb_id, e.g. a TVDB-only
+    show - see core/identity.py) used to serialize with no usable id at all,
+    even though Media stores all three. GET /history already includes every
+    id for the same Media model; GET/POST/DELETE /ratings now match it."""
+
+    def test_includes_tvdb_and_imdb_ids(self) -> None:
+        media = _FakeRatedMedia(tmdb_id=None, tvdb_id=99999, imdb_id="tt1234567")
+        rating = _FakeRating()
+
+        payload = ratings_router.format_rating(rating, media)
+
+        self.assertEqual(payload["media"]["tvdb_id"], 99999)
+        self.assertEqual(payload["media"]["imdb_id"], "tt1234567")
+        self.assertIsNone(payload["media"]["tmdb_id"])
 
 
 if __name__ == "__main__":
