@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, SecretStr, field_validator, model_validator, ConfigDict
 from typing import Optional
 from datetime import datetime
 from models.base import UserRole, MediaType, PrivacyLevel
@@ -31,8 +31,7 @@ class User(UserBase):
     has_password: bool = True
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class UserLogin(BaseModel):
     username: str
@@ -49,6 +48,8 @@ class Token(BaseModel):
     token_type: str = "bearer"
     requires_2fa: bool = False
     temp_token: Optional[str] = None
+    # Seconds the access token is valid for, so the frontend can size the cookie.
+    expires_in: Optional[int] = None
 
 class TokenPayload(BaseModel):
     sub: Optional[int] = None
@@ -88,8 +89,7 @@ class DeviceGrantItem(BaseModel):
     approved_at: Optional[datetime] = None
     last_seen_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class TotpSetupResponse(BaseModel):
     provisioning_uri: str
@@ -111,14 +111,15 @@ class TotpBackupCodeItem(BaseModel):
     code: str
     used: bool
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class TotpBackupCodesResponse(BaseModel):
     codes: list[TotpBackupCodeItem]
 
 class UserSettings(BaseModel):
     tmdb_api_key: Optional[str] = None
+    rpdb_api_key: Optional[str] = Field(default=None, max_length=255)
+    has_rpdb_key: bool = False
     has_effective_tmdb_key: bool = False
     has_global_tmdb_key: bool = False
 
@@ -162,24 +163,43 @@ class UserSettings(BaseModel):
     trakt_push_dropped: Optional[bool] = None
     trakt_push_lists: Optional[bool] = None
     trakt_scrobble: Optional[bool] = None
+    trakt_show_comments: Optional[bool] = None
     trakt_auto_sync_interval: Optional[float] = None
     trakt_auto_push_interval: Optional[float] = None
 
     # Simkl — client_id only (PIN flow, no secret); OAuth token managed via /simkl/* endpoints
     simkl_client_id: Optional[str] = None
     simkl_connected: Optional[bool] = None  # read-only, derived from token presence
+    simkl_auth_v1: Optional[bool] = None  # read-only, connected through the deprecated AUTH V1 (no refresh token)
     simkl_sync_watched: Optional[bool] = None
     simkl_sync_ratings: Optional[bool] = None
     simkl_sync_lists: Optional[bool] = None
+    simkl_sync_dropped: Optional[bool] = None
     simkl_push_watched: Optional[bool] = None
     simkl_push_ratings: Optional[bool] = None
+    simkl_push_dropped: Optional[bool] = None
     simkl_scrobble: Optional[bool] = None
     simkl_auto_sync_interval: Optional[float] = None
     simkl_auto_push_interval: Optional[float] = None
 
+    # WeTrakr — single Scrob-owned app key (core/wetrakr.py), no client_id/secret
+    # field here; OAuth tokens managed via /wetrakr/* endpoints
+    wetrakr_connected: Optional[bool] = None  # read-only, derived from token presence
+    wetrakr_sync_watched: Optional[bool] = None
+    wetrakr_sync_ratings: Optional[bool] = None
+    wetrakr_push_watched: Optional[bool] = None
+    wetrakr_push_ratings: Optional[bool] = None
+    wetrakr_sync_lists: Optional[bool] = None
+    wetrakr_push_lists: Optional[bool] = None
+    wetrakr_sync_comments: Optional[bool] = None
+    wetrakr_push_comments: Optional[bool] = None
+    wetrakr_auto_sync_interval: Optional[float] = None
+    wetrakr_auto_push_interval: Optional[float] = None
+
     # MDBList — API key authentication
     mdblist_api_key: Optional[str] = None
     mdblist_connected: Optional[bool] = None  # read-only, validated by /auth/connection-status
+    has_global_mdblist_key: bool = False  # read-only; global key is for list imports only
     mdblist_sync_watched: Optional[bool] = None
     mdblist_sync_ratings: Optional[bool] = None
     mdblist_sync_watchlist: Optional[bool] = None
@@ -205,15 +225,22 @@ class UserSettings(BaseModel):
     blur_explicit: Optional[bool] = None
     time_format_24h: Optional[bool] = None
     use_hls_player: Optional[bool] = None
+    show_play_button: Optional[bool] = None
     shuffle_next_up: Optional[bool] = None
     minimalist_next_up: Optional[bool] = None
     hide_watched_from_recently_added: Optional[bool] = None
+    condense_history_by_show: Optional[bool] = None
     rate_prompt_movies: Optional[bool] = None
     rate_prompt_episodes: Optional[bool] = None
     watchlist_auto_remove_id: Optional[int] = None
 
-    class Config:
-        from_attributes = True
+    @field_validator("rpdb_api_key", mode="before")
+    @classmethod
+    def normalize_rpdb_api_key(cls, value):
+        from core.rpdb import normalize_api_key
+        return normalize_api_key(value) if isinstance(value, str) or value is None else value
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class NuvioLoginRequest(BaseModel):
@@ -334,8 +361,7 @@ class MediaServerConnectionResponse(MediaServerConnectionBase):
             self.token = ""
         return self
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class ScrobbleConnectionCreate(BaseModel):
     type: str
@@ -358,16 +384,24 @@ class ScrobbleConnectionResponse(ScrobbleConnectionCreate):
     user_id: int
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PasswordUpdate(BaseModel):
     current_password: Optional[str] = None
     new_password: str
 
+class EmailChange(BaseModel):
+    new_email: EmailStr
+    current_password: Optional[str] = None
+
 class WatchEventCreate(BaseModel):
-    tmdb_id: int
+    # Any one of media_id / tmdb_id / tvdb_id identifies the item (see
+    # core/identity.py). tmdb_id used to be mandatory; a TVDB-only episode
+    # has none, so clients send media_id (or tvdb_id + series_tvdb_id context).
+    tmdb_id: Optional[int] = None
+    tvdb_id: Optional[int] = None
+    media_id: Optional[int] = None
     media_type: MediaType
     watched_at: Optional[datetime] = None  # omitted = now; explicit null = unknown date
     completed: bool = True
@@ -375,6 +409,10 @@ class WatchEventCreate(BaseModel):
     series_tvdb_id: Optional[int] = None  # lets the show be linked to TVDB (see #101) without requiring a prior visit to its TVDB page
     season_number: Optional[int] = None
     episode_number: Optional[int] = None
+    # Set after the user confirms a "this looks like a duplicate, add anyway?"
+    # prompt (see the 409 duplicate_watch response from POST /history), to
+    # record it despite an existing watch within the dedup window (#390).
+    force: bool = False
 
 
 class ManualSessionStart(BaseModel):
@@ -424,8 +462,7 @@ class UserProfileResponse(BaseModel):
     def _none_to_list(cls, v: object) -> list:
         return v if v is not None else []
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class PublicProfileResponse(BaseModel):
     id: int
@@ -459,6 +496,7 @@ class PublicProfileResponse(BaseModel):
 
 class GlobalSettings(BaseModel):
     tmdb_api_key           : Optional[str] = None
+    mdblist_api_key        : Optional[str] = None
     tvdb_api_key           : Optional[str] = None
     tvdb_subscriber_pin    : Optional[str] = None
     radarr_url             : Optional[str] = None
@@ -504,8 +542,7 @@ class MediaRequestOut(BaseModel):
     created_at  : datetime
     updated_at  : datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AdminUserCreate(BaseModel):
@@ -523,9 +560,13 @@ class AdminUser(BaseModel):
     api_key    : str
     created_at : datetime
     avatar_url : Optional[str] = None
+    totp_enabled : bool = False
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AdminPasswordReset(BaseModel):
+    password : str = Field(min_length=1)
 
 
 class AdminUserCreate(BaseModel):
