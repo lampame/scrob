@@ -15,10 +15,18 @@ class Media(Base):
         Index("idx_media_show_season_episode", "show_id", "season_number", "episode_number"),
         Index("idx_media_type_release_date", "media_type", "release_date"),
         Index("idx_media_type_tmdb_rating", "media_type", "tmdb_rating"),
+        Index("idx_media_tvdb_type", "tvdb_id", "media_type"),
+        Index("idx_media_imdb", "imdb_id"),
     )
 
     id             : Mapped[int]             = mapped_column(Integer, primary_key=True)
+    # Provider identities. A row can carry any combination; tmdb_id is never a
+    # TVDB id in disguise (that convention ended with migration tvdb1st). For
+    # episodes, tvdb_id is the TVDB *episode* id, which is stable across
+    # TheTVDB's alternate orderings - only (season, number) positions differ.
     tmdb_id        : Mapped[Optional[int]]   = mapped_column(Integer)
+    tvdb_id        : Mapped[Optional[int]]   = mapped_column(Integer)
+    imdb_id        : Mapped[Optional[str]]   = mapped_column(String(20))
     media_type     : Mapped[MediaType]       = mapped_column(Enum(MediaType), nullable=False)
     title          : Mapped[str]             = mapped_column(String(500), nullable=False)
     original_title : Mapped[Optional[str]]   = mapped_column(String(500))
