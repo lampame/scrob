@@ -49,9 +49,9 @@ _CONNECTIONS_SETTINGS_FIELDS = (
     "trakt_sync_watched", "trakt_sync_ratings", "trakt_sync_lists", "trakt_watchlist_split",
     "trakt_push_watched", "trakt_push_ratings", "trakt_push_collection", "trakt_push_lists", "trakt_scrobble",
     "trakt_auto_sync_interval", "trakt_auto_push_interval",
-    "simkl_client_id", "simkl_access_token",
-    "simkl_sync_watched", "simkl_sync_ratings", "simkl_sync_lists",
-    "simkl_push_watched", "simkl_push_ratings", "simkl_scrobble",
+    "simkl_client_id", "simkl_access_token", "simkl_refresh_token", "simkl_token_expires_at",
+    "simkl_sync_watched", "simkl_sync_ratings", "simkl_sync_lists", "simkl_sync_dropped",
+    "simkl_push_watched", "simkl_push_ratings", "simkl_push_dropped", "simkl_scrobble",
     "simkl_auto_sync_interval", "simkl_auto_push_interval",
     "mdblist_api_key", "mdblist_sync_watched", "mdblist_sync_ratings", "mdblist_sync_watchlist",
     "mdblist_push_watched", "mdblist_push_ratings", "mdblist_push_watchlist", "mdblist_push_collection", "mdblist_scrobble",
@@ -76,8 +76,8 @@ _SAFE_SETTINGS_FIELDS = (
     "trakt_sync_watched", "trakt_sync_ratings", "trakt_sync_lists", "trakt_watchlist_split",
     "trakt_push_watched", "trakt_push_ratings", "trakt_push_collection", "trakt_push_lists", "trakt_scrobble",
     "trakt_auto_sync_interval", "trakt_auto_push_interval",
-    "simkl_sync_watched", "simkl_sync_ratings", "simkl_sync_lists",
-    "simkl_push_watched", "simkl_push_ratings", "simkl_scrobble",
+    "simkl_sync_watched", "simkl_sync_ratings", "simkl_sync_lists", "simkl_sync_dropped",
+    "simkl_push_watched", "simkl_push_ratings", "simkl_push_dropped", "simkl_scrobble",
     "simkl_auto_sync_interval", "simkl_auto_push_interval",
     "mdblist_sync_watched", "mdblist_sync_ratings", "mdblist_sync_watchlist",
     "mdblist_push_watched", "mdblist_push_ratings", "mdblist_push_watchlist", "mdblist_push_collection", "mdblist_scrobble",
@@ -303,7 +303,11 @@ async def build_lists(db: AsyncSession, user_id: int) -> tuple[list[dict], list[
 # ── Comments ──────────────────────────────────────────────────────────
 
 async def build_comments(db: AsyncSession, user_id: int) -> dict[str, list[dict]]:
-    comments = (await db.execute(select(Comment).where(Comment.user_id == user_id))).scalars().all()
+    # TVDB-only comments (tmdb_id NULL) have no place in this TMDB-keyed
+    # Trakt-style format, and the importer can't match them back either.
+    comments = (await db.execute(
+        select(Comment).where(Comment.user_id == user_id, Comment.tmdb_id.isnot(None))
+    )).scalars().all()
 
     tmdb_ids_by_type: dict[str, set[int]] = {"movie": set(), "series": set(), "episode": set()}
     for c in comments:
@@ -325,11 +329,14 @@ async def build_comments(db: AsyncSession, user_id: int) -> dict[str, list[dict]
         elif c.media_type == "series" and c.season_number is None:
             show = shows_by_tmdb.get(c.tmdb_id)
             out["shows"].append({**base, "show": _show_dict(c.tmdb_id, show.title if show else "", show.first_air_date if show else None, show.tvdb_id if show else None)})
-        elif c.media_type == "series" and c.season_number is not None:
+        elif c.media_type == "series" and c.episode_number is None:
             show = shows_by_tmdb.get(c.tmdb_id)
             out["seasons"].append({**base, "season": {"number": c.season_number}, "show": _show_dict(c.tmdb_id, show.title if show else "", show.first_air_date if show else None, show.tvdb_id if show else None)})
-        elif c.media_type == "episode":
-            out["episodes"].append({**base, "episode": {"season": c.season_number, "number": c.episode_number}, "ids": {"tmdb": c.tmdb_id}})
+        elif c.media_type in ("series", "episode"):
+            # The UI stores episode comments as media_type "series" with both
+            # season and episode numbers set; "episode" is the importer's old form.
+            show = shows_by_tmdb.get(c.tmdb_id)
+            out["episodes"].append({**base, "episode": {"season": c.season_number, "number": c.episode_number}, "show": _show_dict(c.tmdb_id, show.title if show else "", show.first_air_date if show else None, show.tvdb_id if show else None), "ids": {"tmdb": c.tmdb_id}})
     return out
 
 
@@ -357,6 +364,7 @@ def build_api_keys(user: User, settings: UserSettings | None) -> dict:
         "tmdb_api_key": settings.tmdb_api_key if settings else None,
         "tvdb_api_key": settings.tvdb_api_key if settings else None,
         "tvdb_subscriber_pin": settings.tvdb_subscriber_pin if settings else None,
+        "rpdb_api_key": settings.rpdb_api_key if settings else None,
     }
 
 
