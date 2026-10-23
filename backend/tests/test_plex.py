@@ -38,28 +38,127 @@ class GetHistorySinceCursorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["viewedAt>"], str(expected_epoch))
 
 
+class GetHistoryDecodingResilienceTests(unittest.IsolatedAsyncioTestCase):
+    """#388: some Plex Media Server setups emit a genuinely non-UTF-8 byte in
+    a scraped field (e.g. a legacy-agent title) despite the response
+    otherwise being well-formed JSON - this must not take down decoding of
+    the whole response, or discard whatever pages of history already
+    succeeded before a later page failed some other way."""
+
+    async def test_get_decodes_leniently_instead_of_raising(self) -> None:
+        # \xd0 followed by an ASCII byte is exactly the reported failure:
+        # a lead byte for a 2-byte UTF-8 sequence with no valid continuation
+        # byte after it.
+        bad_bytes = b'{"MediaContainer": {"Metadata": [{"title": "Bad\xd0Title"}], "totalSize": 1}}'
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=bad_bytes, headers={"content-type": "application/json"})
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            plex.httpx, "AsyncClient", side_effect=lambda **kw: _REAL_ASYNC_CLIENT(transport=transport, **kw),
+        ):
+            data = await plex._get("http://plex.local/status/sessions/history/all", "token")
+
+        self.assertEqual(data["MediaContainer"]["Metadata"][0]["title"], "Bad�Title")
+
+    async def test_get_history_keeps_already_fetched_pages_on_a_later_failure(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            start = request.url.params.get("X-Plex-Container-Start")
+            if start == "0":
+                return httpx.Response(200, json={
+                    "MediaContainer": {
+                        "Metadata": [{"ratingKey": "1"}, {"ratingKey": "2"}],
+                        "totalSize": 4,
+                    },
+                })
+            return httpx.Response(500)
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            plex.httpx, "AsyncClient", side_effect=lambda **kw: _REAL_ASYNC_CLIENT(transport=transport, **kw),
+        ):
+            items = await plex.get_history("http://plex.local", "token")
+
+        self.assertEqual([i["ratingKey"] for i in items], ["1", "2"])
+
+
+_SECTIONS = {"MediaContainer": {"Directory": [
+    {"key": "1", "type": "movie"},
+    {"key": "2", "type": "show"},
+]}}
+_SHOWS = {"MediaContainer": {"Metadata": [{"ratingKey": "100", "Guid": [{"id": "tmdb://1396"}]}]}}
+
+
+class PlexLookupTests(unittest.IsolatedAsyncioTestCase):
+    """Plex 500s on parentIndex and ignores guid/grandparentGuid, so lookups
+    must go through the library index and never send those filters."""
+
+    async def _run(self, coro_fn, handler):
+        plex._index_cache.clear()
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            plex.httpx,
+            "AsyncClient",
+            side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            return await coro_fn()
+
+    async def test_find_episode_by_ids_filters_all_leaves_locally(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            for bad in ("parentIndex", "grandparentGuid", "guid"):
+                self.assertNotIn(bad, request.url.params)
+            path = request.url.path
+            if path == "/library/sections":
+                return httpx.Response(200, json=_SECTIONS)
+            if path == "/library/sections/1/all":
+                return httpx.Response(200, json={"MediaContainer": {"Metadata": []}})
+            if path == "/library/sections/2/all":
+                return httpx.Response(200, json=_SHOWS)
+            if path == "/library/metadata/100/allLeaves":
+                return httpx.Response(200, json={"MediaContainer": {"Metadata": [
+                    {"ratingKey": "201", "parentIndex": 1, "index": 2},
+                    {"ratingKey": "202", "parentIndex": 2, "index": 2},
+                ]}})
+            if path == "/library/metadata/202":
+                return httpx.Response(200, json={"MediaContainer": {"Metadata": [{"ratingKey": "202"}]}})
+            self.fail(f"Unexpected Plex path: {path}")
+
+        item = await self._run(lambda: plex.find_episode_by_ids("http://plex.local", "t", 1396, 2, 2), handler)
+        self.assertEqual(item["ratingKey"], "202")
+
+    async def test_find_movie_by_tmdb_id_uses_library_index(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertNotIn("guid", request.url.params)
+            path = request.url.path
+            if path == "/library/sections":
+                return httpx.Response(200, json=_SECTIONS)
+            if path == "/library/sections/1/all":
+                return httpx.Response(200, json={"MediaContainer": {"Metadata": [
+                    {"ratingKey": "7", "Guid": [{"id": "tmdb://550"}]}]}})
+            if path == "/library/sections/2/all":
+                return httpx.Response(200, json=_SHOWS)
+            if path == "/library/metadata/7":
+                return httpx.Response(200, json={"MediaContainer": {"Metadata": [{"ratingKey": "7"}]}})
+            self.fail(f"Unexpected Plex path: {path}")
+
+        item = await self._run(lambda: plex.find_movie_by_tmdb_id("http://plex.local", "t", 550), handler)
+        self.assertEqual(item["ratingKey"], "7")
+
+
 class PlexSeasonRatingTests(unittest.IsolatedAsyncioTestCase):
     async def test_resolve_season_rating_key_uses_parent_show_tmdb_id(self) -> None:
+        plex._index_cache.clear()
         requested_paths: list[str] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
             requested_paths.append(request.url.path)
-            if request.url.path == "/library/sections/all":
-                self.assertEqual(request.url.params["type"], "2")
-                self.assertEqual(request.url.params["guid"], "tmdb://1396")
-                return httpx.Response(
-                    200,
-                    json={
-                        "MediaContainer": {
-                            "Metadata": [
-                                {
-                                    "ratingKey": "100",
-                                    "Guid": [{"id": "tmdb://1396"}],
-                                }
-                            ]
-                        }
-                    },
-                )
+            if request.url.path == "/library/sections":
+                return httpx.Response(200, json=_SECTIONS)
+            if request.url.path == "/library/sections/1/all":
+                return httpx.Response(200, json={"MediaContainer": {"Metadata": []}})
+            if request.url.path == "/library/sections/2/all":
+                return httpx.Response(200, json=_SHOWS)
             if request.url.path == "/library/metadata/100/children":
                 return httpx.Response(
                     200,
@@ -91,7 +190,12 @@ class PlexSeasonRatingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rating_key, "103")
         self.assertEqual(
             requested_paths,
-            ["/library/sections/all", "/library/metadata/100/children"],
+            [
+                "/library/sections",
+                "/library/sections/1/all",
+                "/library/sections/2/all",
+                "/library/metadata/100/children",
+            ],
         )
 
     async def test_zero_rating_clears_plex_season_rating(self) -> None:
@@ -342,6 +446,49 @@ class GuidIdExtractionTests(unittest.TestCase):
         guids = plex.get_guids(item)
         self.assertEqual(guids, [{"id": "com.plexapp.agents.hama://tvdb-73762/1/1"}])
         self.assertEqual(plex.extract_tvdb_id(guids), "73762")
+
+
+class LibrarySectionPaginationTests(unittest.IsolatedAsyncioTestCase):
+    """Regression test for #441: get_movies/get_shows/get_seasons/get_episodes
+    fetched a whole library section in one unpaginated request, which timed
+    out on a large TV library (tens of thousands of episodes) even with the
+    generous 120s client timeout - movies libraries are usually small enough
+    that this went unnoticed, mirroring Jellyfin's own #315."""
+
+    async def _fetch(self, fn, total: int):
+        requests: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            params = dict(request.url.params)
+            requests.append(params)
+            start = int(params["X-Plex-Container-Start"])
+            size = int(params["X-Plex-Container-Size"])
+            page = [{"ratingKey": str(start + i)} for i in range(min(size, total - start))]
+            return httpx.Response(200, json={"MediaContainer": {"Metadata": page, "totalSize": total}})
+
+        transport = httpx.MockTransport(handler)
+        with patch.object(
+            plex.httpx, "AsyncClient", side_effect=lambda **kwargs: _REAL_ASYNC_CLIENT(transport=transport, **kwargs),
+        ):
+            items = await fn("http://plex.local", "token", "section-1")
+        return items, requests
+
+    async def test_get_episodes_paginates_past_the_first_page(self) -> None:
+        items, requests = await self._fetch(plex.get_episodes, total=2500)
+        self.assertEqual(len(items), 2500)
+        self.assertEqual(len(requests), 3)
+        self.assertEqual([r["X-Plex-Container-Start"] for r in requests], ["0", "1000", "2000"])
+        self.assertEqual(requests[0]["type"], "4")
+
+    async def test_get_movies_paginates_too(self) -> None:
+        items, requests = await self._fetch(plex.get_movies, total=1500)
+        self.assertEqual(len(items), 1500)
+        self.assertEqual(len(requests), 2)
+
+    async def test_small_library_is_a_single_request(self) -> None:
+        items, requests = await self._fetch(plex.get_shows, total=10)
+        self.assertEqual(len(items), 10)
+        self.assertEqual(len(requests), 1)
 
 
 if __name__ == "__main__":
