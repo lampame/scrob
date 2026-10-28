@@ -300,9 +300,22 @@ Database migrations run automatically on startup - no manual steps required.
 | `PUID` | `1000` | User ID to run the process as. |
 | `PGID` | `1000` | Group ID to run the process as. |
 | `BACKEND_PORT` | `7331` | Internal port the backend binds to. Override only if `7331` conflicts on bare metal. |
+| `LOG_LEVEL` | `INFO` | Log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. Setting `WARNING` or higher hides the per-request access log entirely. |
+| `ACCESS_LOG_EXCLUDE` | webhooks and polled endpoints | Comma-separated path prefixes whose successful requests (status below 400) are not access-logged. Failed requests are always logged. Defaults to `/webhooks/,/auth/me,/auth/settings,/auth/session/renew,/sync/status,/history/now-playing,/admin/requests/pending-count`. Set it to an empty value to log every request. |
 | `OIDC_ENABLED` | `false` | Enable OIDC login. |
 | `OIDC_DISCOVERY_URL` | - | OpenID discovery document URL. When set, Scrob validates `id_token` signatures (JWKS), issuer, audience, and nonce. |
 | `OIDC_DISABLE_PASSWORD_LOGIN` | `false` | Enforce OIDC-only login (disables username/password). |
+
+#### Reducing log noise
+
+By default Scrob does not log the successful webhook calls (media servers post on every playback progress tick) or the endpoints the web UI polls. To go further:
+
+```yaml
+environment:
+  LOG_LEVEL: WARNING                                   # no per-request lines at all
+  # ACCESS_LOG_EXCLUDE: "/webhooks/,/history/"         # or choose your own noisy prefixes
+  # ACCESS_LOG_EXCLUDE: ""                             # or log every request again
+```
 
 See `docker-compose.yaml` for the full list of OIDC variables and other variables.
 
