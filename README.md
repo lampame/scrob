@@ -296,6 +296,7 @@ Database migrations run automatically on startup - no manual steps required.
 | `ENABLE_REGISTRATIONS` | `false` | Allow new users to register. The first user can always register regardless of this setting. |
 | `REGISTRATION_MAX_ALLOWED_USERS` | `0` | Maximum number of registered users. `0` = unlimited. |
 | `SESSION_REMEMBER_DAYS` | `30` | How long a login lasts when **Stay logged in** is ticked on the login page, for password and SSO logins. Without it a login lasts 7 days. |
+| `LIST_IMPORT_MAX_ITEMS` | `10000` | Maximum number of items imported from a TMDB, TVDB, IMDb or MDBList list. Imports run in the background; a list longer than this is cut off and the import dialog says so. |
 | `TZ` | `UTC` | Container timezone (e.g. `Europe/Lisbon`). |
 | `PUID` | `1000` | User ID to run the process as. |
 | `PGID` | `1000` | Group ID to run the process as. |
