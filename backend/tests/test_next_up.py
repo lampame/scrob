@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
 
-from routers.history import _compute_next_episode, _group_last_watched, _has_aired, _has_confirmed_air_date, _next_up_needs_live_fetch, _progress_percentages, _remaining_episode_stats, _stream_next_up_refresh
+from routers.history import _attach_show_last_watched, _compute_next_episode, _group_last_watched, _has_aired, _has_confirmed_air_date, _next_up_needs_live_fetch, _progress_percentages, _remaining_episode_stats, _stream_next_up_refresh
 from core.rewatch import capped_season_episode_counts
 
 
@@ -88,6 +88,21 @@ class GroupLastWatchedTests(unittest.TestCase):
         rows = [(1, None, 1, None), (1, None, 2, None)]
         last_per_show, last_watched_at = _group_last_watched(rows)
         self.assertNotIn(1, last_per_show)
+
+
+class AttachShowLastWatchedTests(unittest.TestCase):
+    """#521: enrich_with_state stamps episodes with their own (null, for an
+    unwatched next-up episode) last_watched_at, so this must run after it."""
+
+    def test_sets_show_level_timestamp_over_enriched_null(self):
+        items = [{"show_id": 1, "last_watched_at": None}]
+        _attach_show_last_watched(items, {1: datetime(2026, 10, 1, 12, 0, 0)})
+        self.assertEqual(items[0]["last_watched_at"], "2026-10-01T12:00:00")
+
+    def test_show_without_timestamp_gets_none(self):
+        items = [{"show_id": 2}]
+        _attach_show_last_watched(items, {1: datetime(2026, 10, 1)})
+        self.assertIsNone(items[0]["last_watched_at"])
 
 
 class HasAiredTests(unittest.TestCase):
