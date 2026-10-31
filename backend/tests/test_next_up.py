@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 os.environ.setdefault("SECRET_KEY", "test-secret")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
 
-from routers.history import _refresh_undated_next_episodes, _attach_show_last_watched, _compute_next_episode, _group_last_watched, _has_aired, _has_confirmed_air_date, _next_up_needs_live_fetch, _progress_percentages, _remaining_episode_stats, _stream_next_up_refresh
+from routers.history import _refresh_next_episode_air_dates, _attach_show_last_watched, _compute_next_episode, _group_last_watched, _has_aired, _has_confirmed_air_date, _next_up_needs_live_fetch, _progress_percentages, _remaining_episode_stats, _stream_next_up_refresh
 from core.rewatch import capped_season_episode_counts
 
 
@@ -567,9 +567,12 @@ class FetchMissingEpisodeTranslationsTests(unittest.IsolatedAsyncioTestCase):
         upsert.assert_not_awaited()
 
 
-class RefreshUndatedNextEpisodesTests(unittest.IsolatedAsyncioTestCase):
+class RefreshNextEpisodeAirDatesTests(unittest.IsolatedAsyncioTestCase):
     """#365: a next episode stored before TMDB had an air date stays undated,
-    so Next Up hides it for good even after it airs and the calendar lists it."""
+    so Next Up hides it for good even after it airs and the calendar lists it.
+    #424: the reverse - a stored date TMDB later moved into the future."""
+
+    TODAY = date(2026, 9, 22)
 
     def _episode(self, release_date=None, tvdb_canonical=False):
         show = SimpleNamespace(
@@ -582,16 +585,17 @@ class RefreshUndatedNextEpisodesTests(unittest.IsolatedAsyncioTestCase):
 
     async def _run(self, episode, tmdb_result):
         db = SimpleNamespace(commit=AsyncMock())
+        get_episode_mock = AsyncMock(side_effect=tmdb_result) if isinstance(tmdb_result, Exception) else AsyncMock(return_value=tmdb_result)
         with patch("routers.history.get_user_tmdb_key", AsyncMock(return_value="k" * 32)), \
                 patch("routers.history.check_tmdb_key", return_value=True), \
-                patch("routers.history.tmdb.get_episode", AsyncMock(side_effect=tmdb_result) if isinstance(tmdb_result, Exception) else AsyncMock(return_value=tmdb_result)) as get_episode:
-            await _refresh_undated_next_episodes(db, 1, [episode])
+                patch("routers.history.tmdb.get_episode", get_episode_mock) as get_episode:
+            await _refresh_next_episode_air_dates(db, 1, [episode], self.TODAY)
         return db, get_episode
 
     async def test_undated_episode_gets_its_air_date_once_tmdb_has_one(self):
         ep = self._episode()
-        db, _ = await self._run(ep, {"id": 99, "air_date": "2026-10-28", "name": "Pilot", "overview": "o"})
-        self.assertEqual(ep.release_date, "2026-10-28")
+        db, _ = await self._run(ep, {"id": 99, "air_date": "2026-09-20", "name": "Pilot", "overview": "o"})
+        self.assertEqual(ep.release_date, "2026-09-20")
         self.assertEqual(ep.tmdb_id, 99)
         self.assertEqual(ep.title, "Pilot")
         db.commit.assert_awaited_once()
@@ -602,11 +606,28 @@ class RefreshUndatedNextEpisodesTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(ep.release_date)
         db.commit.assert_not_awaited()
 
-    async def test_already_dated_episode_is_not_fetched(self):
+    async def test_recently_dated_episode_moved_later_on_tmdb_is_updated(self):
+        # #424: stored as aired on Sept 20, TMDB now says Oct 16.
+        ep = self._episode(release_date="2026-09-20")
+        db, _ = await self._run(ep, {"id": 99, "air_date": "2026-10-16"})
+        self.assertEqual(ep.release_date, "2026-10-16")
+        db.commit.assert_awaited_once()
+
+    async def test_unchanged_date_writes_nothing(self):
+        ep = self._episode(release_date="2026-09-20")
+        db, _ = await self._run(ep, {"id": 99, "air_date": "2026-09-20"})
+        db.commit.assert_not_awaited()
+
+    async def test_long_aired_episode_is_not_fetched(self):
+        ep = self._episode(release_date="2026-06-01")
+        _, get_episode = await self._run(ep, {"air_date": "2026-10-16"})
+        get_episode.assert_not_awaited()
+        self.assertEqual(ep.release_date, "2026-06-01")
+
+    async def test_future_dated_episode_is_not_fetched(self):
         ep = self._episode(release_date="2026-11-30")
         _, get_episode = await self._run(ep, {"air_date": "2026-01-01"})
         get_episode.assert_not_awaited()
-        self.assertEqual(ep.release_date, "2026-11-30")
 
     async def test_tvdb_canonical_show_is_not_fetched_from_tmdb(self):
         ep = self._episode(tvdb_canonical=True)
@@ -614,7 +635,7 @@ class RefreshUndatedNextEpisodesTests(unittest.IsolatedAsyncioTestCase):
         get_episode.assert_not_awaited()
 
     async def test_tmdb_failure_is_not_fatal(self):
-        ep = self._episode()
+        ep = self._episode(release_date="2026-09-20")
         db, _ = await self._run(ep, RuntimeError("boom"))
-        self.assertIsNone(ep.release_date)
+        self.assertEqual(ep.release_date, "2026-09-20")
         db.commit.assert_not_awaited()

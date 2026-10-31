@@ -1127,26 +1127,37 @@ async def _next_up_remaining_stats(
     return stats
 
 
-async def _refresh_undated_next_episodes(
-    db: AsyncSession, user_id: int, episodes: list[Media], timeout: float = 8.0,
-) -> None:
-    """Fill in the air date of next-up episodes that were stored without one.
+_NEXT_UP_DATE_RECHECK_DAYS = 7
 
-    A renewed show's next episode is often created as a placeholder before TMDB
-    has an air date for it, and Next Up hides an undated episode (#111). Once
-    the placeholder row exists, the missing-episode fallback never runs for the
-    show again, so when TMDB later dates the episode the stored row stays
-    undated and the episode never reaches Next Up, even though the calendar
-    (which reads TMDB live) already lists it (#365). Re-asking TMDB here - one
-    cached episode request per undated episode - lets it surface as soon as it
-    has a date. TMDB trouble is non-fatal: the row just stays hidden."""
-    undated = [
+
+async def _refresh_next_episode_air_dates(
+    db: AsyncSession, user_id: int, episodes: list[Media], today: date, timeout: float = 8.0,
+) -> None:
+    """Re-check the air date TMDB holds for next-up episodes whose stored date
+    can no longer be trusted.
+
+    Two cases, both caused by the Media row being written once and never
+    revisited while TMDB keeps editing the schedule:
+      - stored with no air date (a renewed show's placeholder, hidden by Next
+        Up since #111): when TMDB later dates it, the row stays undated, so the
+        episode never reaches Next Up even though the calendar (which reads
+        TMDB live) already lists it (#365);
+      - stored with a date that has since passed or is about to, which TMDB
+        then moved later: Next Up keeps offering an episode that has not aired
+        (#424).
+    Only undated episodes and ones dated within the last few days are asked
+    about - an episode that aired weeks ago does not move - so this costs one
+    cached TMDB request per such episode. TMDB trouble is non-fatal: the stored
+    value is kept."""
+    cutoff = (today - timedelta(days=_NEXT_UP_DATE_RECHECK_DAYS)).isoformat()
+    candidates = [
         m for m in episodes
-        if not m.release_date and m.show is not None and m.show.tmdb_id
+        if (not m.release_date or cutoff <= m.release_date <= today.isoformat())
+        and m.show is not None and m.show.tmdb_id
         and m.season_number is not None and m.episode_number is not None
         and not _is_tvdb_canonical(m.show)
     ]
-    if not undated:
+    if not candidates:
         return
     api_key = await get_user_tmdb_key(db, user_id)
     if not check_tmdb_key(api_key):
@@ -1163,22 +1174,25 @@ async def _refresh_undated_next_episodes(
                 return None
 
     try:
-        results = await asyncio.wait_for(asyncio.gather(*(_fetch(m) for m in undated)), timeout=timeout)
+        results = await asyncio.wait_for(asyncio.gather(*(_fetch(m) for m in candidates)), timeout=timeout)
     except (asyncio.TimeoutError, tmdb.TMDBUnavailable):
         return
     changed = False
-    for media, data in zip(undated, results):
-        air_date = (data or {}).get("air_date")
-        if not air_date:
+    for media, data in zip(candidates, results):
+        if data is None:
+            continue
+        air_date = data.get("air_date") or None
+        if air_date == (media.release_date or None):
             continue
         media.release_date = air_date
-        media.tmdb_id = media.tmdb_id or data.get("id")
-        if not media.title:
-            media.title = data.get("name") or media.title
-        if not media.overview:
-            media.overview = data.get("overview")
-        if not media.poster_path:
-            media.poster_path = tmdb.poster_url(data.get("still_path"), size="w500")
+        if air_date:
+            media.tmdb_id = media.tmdb_id or data.get("id")
+            if not media.title:
+                media.title = data.get("name") or media.title
+            if not media.overview:
+                media.overview = data.get("overview")
+            if not media.poster_path:
+                media.poster_path = tmdb.poster_url(data.get("still_path"), size="w500")
         changed = True
     if changed:
         await db.commit()
@@ -1513,8 +1527,8 @@ async def get_next_up(
     hidden_set = set(settings.next_up_hidden_shows or []) if settings else set()
 
     today = date.today()
-    await _refresh_undated_next_episodes(
-        db, current_user.id, [m for m in next_per_show.values() if m.id not in completed_ids],
+    await _refresh_next_episode_air_dates(
+        db, current_user.id, [m for m in next_per_show.values() if m.id not in completed_ids], today,
     )
     next_up = [
         m for m in next_per_show.values()
