@@ -1304,6 +1304,59 @@ class FullPushPartialWatchTests(_PartialWatchDB):
         self.assertEqual(armed_media_ids, [self.finished_media_id])
 
 
+class FullPushTvdbOnlyServerSeriesTests(_PartialWatchDB):
+    """#429: a show Scrob knows by both TMDB and TVDB ids was reported "not
+    found on this server" when the Jellyfin/Emby series only carries a TVDB
+    provider id - the TVDB-keyed index was only built for shows with no TMDB id."""
+
+    async def _seed(self) -> tuple[int, int]:
+        from models.collection import CollectionSource
+        from models.events import WatchEvent
+        from models.media import Media, MediaType
+        from models.show import Show
+        from models.sync import SyncJob, SyncStatus
+
+        async with self.Session() as db:
+            conn = MediaServerConnection(
+                user_id=1, type="jellyfin", name="Jellyfin", url="http://jf", token="tok",
+                server_user_id="jf-user", push_watched=True,
+            )
+            db.add(conn)
+            await db.flush()
+            job = SyncJob(
+                user_id=1, source=CollectionSource.jellyfin, status=SyncStatus.pending,
+                connection_id=conn.id, job_type="push",
+            )
+            show = Show(tmdb_id=71446, tvdb_id=327417, title="Money Heist")
+            db.add_all([job, show])
+            await db.flush()
+            episode = Media(
+                tmdb_id=1234, media_type=MediaType.episode, title="Pilot",
+                show_id=show.id, season_number=1, episode_number=1,
+            )
+            db.add(episode)
+            await db.flush()
+            db.add(WatchEvent(
+                user_id=1, media_id=episode.id, watched_at=datetime(2026, 1, 1),
+                completed=True, play_count=1, progress_percent=1.0,
+            ))
+            await db.commit()
+            return conn.id, job.id
+
+    async def test_series_known_to_the_server_only_by_tvdb_id_is_found(self):
+        connection_id, job_id = await self._seed()
+        mark_watched = AsyncMock(return_value=True)
+        with patch.object(sync, "engine", self.engine), \
+             patch.object(sync.jellyfin, "build_tmdb_index", AsyncMock(return_value={})), \
+             patch.object(sync.jellyfin, "build_tvdb_index", AsyncMock(return_value={327417: "series-jf"})), \
+             patch.object(sync.jellyfin, "find_episode_in_series", AsyncMock(return_value={"Id": "ep-jf"})), \
+             patch.object(sync.jellyfin, "get_items_watched_state", AsyncMock(return_value={"ep-jf": False})), \
+             patch.object(sync.jellyfin, "mark_watched", mark_watched), \
+             patch("routers.webhooks.mark_pushed_watched"):
+            await sync._run_full_push(1, connection_id, job_id)
+        self.assertEqual([call.args[3] for call in mark_watched.await_args_list], ["ep-jf"])
+
+
 class FullPushEchoTokenTimingTests(_PartialWatchDB):
     """#372: the push-echo token is armed in _push_watched_group, right
     before the mark_watched call - not once for the whole job up front,

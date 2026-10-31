@@ -7101,11 +7101,14 @@ async def _run_full_push(user_id: int, connection_id: int, job_id: int, incremen
                     jellyfin_series_index = await client_mod.build_tmdb_index(conn.url, conn.token, "Series")
                     # Shows Scrob only ever matched via TVDB (e.g. a legacy-agent
                     # Plex library) have no Show.tmdb_id at all, so the index
-                    # above can never resolve them - only build this second,
-                    # TVDB-keyed index when at least one such show is actually
-                    # in play (#436).
+                    # above can never resolve them - and a show with both ids
+                    # still misses it when the server only knows the series by
+                    # its TVDB id (a TVDB-scraped library, #429). Only build
+                    # this second, TVDB-keyed index when at least one such show
+                    # is actually in play (#436).
                     if any(
-                        m.media_type == MediaType.episode and m.show_id and not show_tmdb_map.get(m.show_id) and show_tvdb_map.get(m.show_id)
+                        m.media_type == MediaType.episode and m.show_id and show_tvdb_map.get(m.show_id)
+                        and (not show_tmdb_map.get(m.show_id) or show_tmdb_map[m.show_id] not in jellyfin_series_index)
                         for m in media_info.values()
                     ):
                         jellyfin_series_tvdb_index = await client_mod.build_tvdb_index(conn.url, conn.token, "Series")
