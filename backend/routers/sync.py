@@ -1879,6 +1879,13 @@ def _expand_multi_episode_items(items: list, media_type: MediaType, source: Coll
             for ep in range(start, end + 1):
                 copy = dict(item)
                 copy["IndexNumber"] = ep
+                if ep != start:
+                    # The item's ProviderIds are the FIRST episode's episode-level
+                    # ids. Left on the extra copies they resolve to that same
+                    # Media row, so the file is inserted twice for one collection
+                    # entry and trips uq_collection_file_source (#525). Drop them
+                    # so the extra episodes resolve by show + season + number.
+                    copy["ProviderIds"] = {}
                 expanded.append(copy)
         else:
             expanded.append(item)

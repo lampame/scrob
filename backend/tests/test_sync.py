@@ -502,6 +502,23 @@ class ExpandMultiEpisodeItemsTests(unittest.TestCase):
         # Original item must be untouched - other code still iterates the raw list.
         self.assertEqual(item["IndexNumber"], 1)
 
+    def test_extra_episodes_do_not_inherit_first_episode_provider_ids(self):
+        """#525: the item's ProviderIds are the first episode's. Copies for the
+        later episodes must not carry them, or every copy resolves to the same
+        Media row and the file is inserted twice (uq_collection_file_source)."""
+        item = {
+            "Id": "file-1", "IndexNumber": 1, "IndexNumberEnd": 3,
+            "ProviderIds": {"Tmdb": "353500", "Tvdb": "42"},
+        }
+
+        expanded = sync._expand_multi_episode_items(
+            [item], sync.MediaType.episode, sync.CollectionSource.jellyfin,
+        )
+
+        self.assertEqual(expanded[0]["ProviderIds"], {"Tmdb": "353500", "Tvdb": "42"})
+        self.assertEqual([e["ProviderIds"] for e in expanded[1:]], [{}, {}])
+        self.assertEqual(item["ProviderIds"], {"Tmdb": "353500", "Tvdb": "42"})
+
     def test_three_episode_span_expands_to_three(self):
         item = {"Id": "file-2", "IndexNumber": 5, "IndexNumberEnd": 7}
 
