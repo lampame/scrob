@@ -9,6 +9,10 @@ import node from '@astrojs/node';
 export default defineConfig({
   output: 'server',
 
+  // Astro 7 defaults to JSX whitespace rules, which drop the spaces around inline
+  // elements split across lines; `true` keeps the lossless behavior of Astro 6.
+  compressHTML: true,
+
   security: {
     checkOrigin: false,
   },

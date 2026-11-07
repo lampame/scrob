@@ -13,6 +13,7 @@ from models.sync import SyncJob, SyncStatus
 from models.users import User, UserSettings
 from core.data_export import build_export_zip
 from core.scrob_import import MAX_TOTAL_SIZE, apply_scrob_import, parse_scrob_export
+from core.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ async def export_data(
         include_scrobble_connections=scrobble_connections,
         include_connections=connections,
     )
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = utcnow().strftime("%Y%m%d_%H%M%S")
     filename = f"scrob-export-{current_user.username}-{timestamp}.zip"
     return Response(
         content=payload,
@@ -70,7 +71,7 @@ async def export_data(
 
 
 async def run_scrob_import(user_id: int, job_id: int, data, include: dict) -> None:
-    from routers.sync import SyncCancelled
+    from routers.sync import SyncCancelled, _short_error
 
     async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     async with async_session() as db:
@@ -95,7 +96,7 @@ async def run_scrob_import(user_id: int, job_id: int, data, include: dict) -> No
             await db.commit()
         except Exception as exc:
             logger.exception("Scrob import job %s failed", job_id)
-            await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.failed, error_message=str(exc)))
+            await db.execute(update(SyncJob).where(SyncJob.id == job_id).values(status=SyncStatus.failed, error_message=_short_error(exc)))
             await db.commit()
 
 
