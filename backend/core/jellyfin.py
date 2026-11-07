@@ -1,6 +1,7 @@
 import asyncio
 import re
 import httpx
+from datetime import datetime
 from typing import Optional, List, Dict
 
 TIMEOUT = httpx.Timeout(120.0)  # 120 second timeout
@@ -23,6 +24,14 @@ def get_jellyfin_tmdb_id(provider_ids: dict) -> int | None:
     if m:
         return int(m.group(1))
     return None
+
+
+def get_jellyfin_tvdb_id(provider_ids: dict) -> int | None:
+    tid = provider_ids.get("Tvdb") or provider_ids.get("tvdb")
+    if not tid:
+        return None
+    tid = str(tid)
+    return int(tid) if tid.isdigit() else None
 
 
 def _auth_headers(token: str) -> Dict[str, str]:
@@ -342,26 +351,29 @@ async def find_episode_in_series(url: str, token: str, series_id: str, season: i
     Split out of find_episode_by_ids so a caller that already has the series'
     Jellyfin item id (e.g. from a pre-built TMDB index - see build_tmdb_index,
     #300) can skip straight to this step instead of repeating the (possibly
-    expensive) series resolution for every episode of the same show. Uses
-    SeriesId + season/episode number, which - unlike AnyProviderIdEquals -
-    reliably narrows the result server-side, so no fallback scan is needed
-    here.
+    expensive) series resolution for every episode of the same show.
+
+    Uses GET /Shows/{seriesId}/Episodes, not a SeriesId filter on /Items:
+    that filter was removed from /Items at some point before Jellyfin 12.1.0
+    (confirmed against its own OpenAPI spec - no SeriesId parameter is even
+    listed anymore) and the server silently ignores the unknown param instead
+    of erroring, so it used to return an arbitrary item from across the whole
+    library rather than narrowing to this series. #436's reported "not found"
+    warnings on modern Jellyfin were this - every episode lookup was silently
+    matching (or failing to match, when the season/episode-index guard below
+    happened to catch the wrong series) the wrong show.
     """
     try:
-        ep_data = await _get(url, token, "Items", params={
-            "SeriesId": series_id,
-            "Recursive": True,
-            "IncludeItemTypes": "Episode",
-            "ParentIndexNumber": season,
-            "IndexNumber": episode,
-            "Fields": "MediaStreams,Path,ProviderIds",
-            "Limit": 1,
+        ep_data = await _get(url, token, f"Shows/{series_id}/Episodes", params={
+            "season": season,
+            "userId": user_id,
+            "Fields": "ProviderIds",
         })
-        ep_items = ep_data.get("Items", [])
-        if not ep_items or ep_items[0].get("SeriesId") != series_id:
+        match = next((i for i in ep_data.get("Items", []) if i.get("IndexNumber") == episode), None)
+        if not match:
             return None
         # user_id required - see #153.
-        return await get_item(url, token, ep_items[0]["Id"], user_id=user_id)
+        return await get_item(url, token, match["Id"], user_id=user_id)
     except Exception:
         return None
 
@@ -428,6 +440,38 @@ async def build_tmdb_index(url: str, token: str, item_type: str) -> Dict[int, st
     return index
 
 
+async def build_tvdb_index(url: str, token: str, item_type: str) -> Dict[int, str]:
+    """Same as build_tmdb_index, but keyed by TVDB id.
+
+    Used as a fallback for series Scrob only ever matched via TVDB (e.g. a
+    legacy-agent Plex library - see plex.get_guids) and so carry no
+    Show.tmdb_id at all, which would otherwise make them unmatchable against
+    Jellyfin/Emby even though Jellyfin's own TheTVDB plugin tags them with a
+    Tvdb provider id (GitHub #436).
+    """
+    index: Dict[int, str] = {}
+    start = 0
+    page_size = 500
+    while True:
+        data = await _get(url, token, "Items", params={
+            "Recursive": True,
+            "IncludeItemTypes": item_type,
+            "Fields": "ProviderIds",
+            "Limit": page_size,
+            "StartIndex": start,
+        })
+        items = data.get("Items", [])
+        for item in items:
+            tid = get_jellyfin_tvdb_id(item.get("ProviderIds", {}))
+            if tid is not None and tid not in index:
+                index[tid] = item["Id"]
+        total = data.get("TotalRecordCount", 0)
+        start += page_size
+        if start >= total or not items:
+            break
+    return index
+
+
 async def scan_libraries(url: str, token: str) -> bool:
     """Trigger a full library scan on the server."""
     try:
@@ -444,16 +488,42 @@ async def scan_libraries(url: str, token: str) -> bool:
 
 PUSH_TIMEOUT = httpx.Timeout(15.0)  # shorter timeout for bulk push operations
 
-async def mark_watched(url: str, token: str, user_id: str, item_id: str, client: httpx.AsyncClient | None = None) -> bool:
-    """Mark a Jellyfin item as played."""
+# Jellyfin takes an ISO 8601 DatePlayed; Emby 4.x answers a 500 ("String ... was
+# not recognized as a valid DateTime") to that and only parses yyyyMMddHHmmss (#530).
+JELLYFIN_DATE_PLAYED_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+EMBY_DATE_PLAYED_FORMAT = "%Y%m%d%H%M%S"
+
+
+async def mark_watched(
+    url: str,
+    token: str,
+    user_id: str,
+    item_id: str,
+    client: httpx.AsyncClient | None = None,
+    played_at: datetime | None = None,
+    date_format: str = JELLYFIN_DATE_PLAYED_FORMAT,
+) -> bool:
+    """Mark a Jellyfin/Emby item as played, optionally stamped with the original watch date (naive UTC).
+
+    If the server refuses the dated request (a version that parses DatePlayed
+    differently) the item is marked played once more without a date: a watch
+    with the wrong date beats a watch that never reaches the server (#530)."""
     headers = _auth_headers(token)
+    endpoint = f"{url.rstrip('/')}/Users/{user_id}/PlayedItems/{item_id}"
+
+    async def _post(c: httpx.AsyncClient) -> bool:
+        if played_at:
+            r = await c.post(endpoint, headers=headers, params={"DatePlayed": played_at.strftime(date_format)})
+            if r.status_code < 400:
+                return True
+        r = await c.post(endpoint, headers=headers)
+        return r.status_code < 400
+
     try:
         if client:
-            r = await client.post(f"{url.rstrip('/')}/Users/{user_id}/PlayedItems/{item_id}", headers=headers)
-            return r.status_code < 400
+            return await _post(client)
         async with httpx.AsyncClient(timeout=PUSH_TIMEOUT, follow_redirects=False) as c:
-            r = await c.post(f"{url.rstrip('/')}/Users/{user_id}/PlayedItems/{item_id}", headers=headers)
-            return r.status_code < 400
+            return await _post(c)
     except Exception:
         return False
 

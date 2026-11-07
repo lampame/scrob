@@ -10,6 +10,14 @@ DEFAULT_URL = "https://api.nuvio.tv"
 DEFAULT_APP_ANON_KEY = "sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN"
 _PAGE_SIZE = 500
 
+# _rpc retries a transient network/timeout failure this many times (so up to
+# 1 + _RPC_MAX_RETRIES attempts total) before giving up, with a short delay
+# between each - Nuvio's cloud API occasionally times out under load (#389),
+# and previously that turned into an immediate, hard sync-job failure.
+_RPC_MAX_RETRIES = 2
+_RPC_RETRY_DELAYS = (0.5, 1.5)
+_RPC_RETRYABLE_EXCEPTIONS = (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError)
+
 
 class NuvioAPIError(RuntimeError):
     pass
@@ -25,6 +33,7 @@ class NuvioAPIError(RuntimeError):
 # refresh token Nuvio will never accept again, with no way to recover short
 # of a full re-authentication.
 OnRefresh = Callable[["NuvioSession"], Awaitable[None]] | None
+OnPage = Callable[[str, list[dict[str, Any]]], Awaitable[None]] | None
 
 _connection_locks: dict[int, asyncio.Lock] = {}
 
@@ -149,11 +158,29 @@ async def _rpc(
     function_name: str,
     payload: dict[str, Any] | None = None,
 ) -> Any:
-    response = await client.post(
-        f"{_base_url(url)}/rest/v1/rpc/{function_name}",
-        headers=_auth_headers(access_token),
-        json=payload,
-    )
+    """POST to one Supabase RPC function, retrying a transient network/
+    timeout failure a couple of times before giving up (#389).
+
+    Only retries when no response came back at all - an actual response
+    (checked by _raise_api_error below) is definitive and never retried,
+    since these RPC calls include writes (sync_push_*) that must not be
+    blindly resent once the server has actually answered. Safe to retry the
+    request itself: unlike sign_in/refresh_session's single-use refresh
+    token, this endpoint has no such one-shot state to lose on a resend.
+    """
+    for attempt in range(_RPC_MAX_RETRIES + 1):
+        try:
+            response = await client.post(
+                f"{_base_url(url)}/rest/v1/rpc/{function_name}",
+                headers=_auth_headers(access_token),
+                json=payload,
+            )
+            break
+        except _RPC_RETRYABLE_EXCEPTIONS as exc:
+            if attempt == _RPC_MAX_RETRIES:
+                raise
+            print(f"  Nuvio RPC {function_name} failed ({exc.__class__.__name__}), retrying ({attempt + 1}/{_RPC_MAX_RETRIES})...")
+            await asyncio.sleep(_RPC_RETRY_DELAYS[attempt])
     await _raise_api_error(response, function_name)
     if response.status_code == 204 or not response.content:
         return None
@@ -417,6 +444,7 @@ async def _push_sync_items(
     progress_items: list[dict[str, Any]] | None = None,
     *,
     on_refresh: OnRefresh = None,
+    on_page: OnPage = None,
 ) -> NuvioSession:
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
         session = await refresh_session(url, refresh_token, client=client)
@@ -427,13 +455,16 @@ async def _push_sync_items(
             ("sync_push_watch_progress", "p_entries", progress_items or []),
         ):
             for offset in range(0, len(items), _PAGE_SIZE):
+                page = items[offset : offset + _PAGE_SIZE]
                 await _rpc(
                     client,
                     url,
                     session.access_token,
                     function_name,
-                    {"p_profile_id": profile_id, items_key: items[offset : offset + _PAGE_SIZE]},
+                    {"p_profile_id": profile_id, items_key: page},
                 )
+                if on_page:
+                    await on_page(function_name, page)
     return session
 
 
@@ -467,7 +498,10 @@ async def push_sync_items(
     progress_items: list[dict[str, Any]],
     *,
     on_refresh: OnRefresh = None,
+    on_page: OnPage = None,
 ) -> NuvioSession:
+    """`on_page(function_name, items)` runs after each page the server accepted,
+    so a caller can record progress even if a later page fails (e.g. a 429)."""
     return await _push_sync_items(
         url,
         refresh_token,
@@ -475,6 +509,7 @@ async def push_sync_items(
         watched_items=watched_items,
         progress_items=progress_items,
         on_refresh=on_refresh,
+        on_page=on_page,
     )
 
 

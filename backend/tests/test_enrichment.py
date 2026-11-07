@@ -160,10 +160,13 @@ class CreateMediaSafelyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _FakeMedia:
-    def __init__(self, id, media_type, tmdb_id) -> None:
+    def __init__(self, id, media_type, tmdb_id, show_id=None, season_number=None, episode_number=None) -> None:
         self.id = id
         self.media_type = media_type
         self.tmdb_id = tmdb_id
+        self.show_id = show_id
+        self.season_number = season_number
+        self.episode_number = episode_number
 
 
 class ApplyMediaChangeSafelyTests(unittest.IsolatedAsyncioTestCase):
@@ -227,6 +230,43 @@ class ApplyMediaChangeSafelyTests(unittest.IsolatedAsyncioTestCase):
 
         result = await apply_media_change_safely(session, media, mutate)
         self.assertIs(result, existing)
+
+    async def test_conflict_between_twins_of_one_episode_merges_the_stub(self) -> None:
+        # #463: the stub that lost the tmdb_id race is the same episode as the
+        # winner (same show/season/number) - fold it in so it isn't re-enriched,
+        # and failing, on every sync.
+        existing = _FakeMedia(id=99, media_type=MediaType.episode, tmdb_id=42, show_id=5, season_number=2, episode_number=3)
+        session = _FakeSession(
+            flush_raises=IntegrityError("stmt", {}, Exception("duplicate key")),
+            existing_rows=[existing],
+        )
+        media = _FakeMedia(id=7, media_type=MediaType.episode, tmdb_id=None, show_id=5, season_number=2, episode_number=3)
+        loser = object()
+        session.get = AsyncMock(return_value=loser)
+
+        def mutate():
+            media.tmdb_id = 42
+
+        with patch("core.episode_order._merge_episode_media", AsyncMock()) as merge:
+            result = await apply_media_change_safely(session, media, mutate)
+        self.assertIs(result, existing)
+        merge.assert_awaited_once_with(session, existing, loser, rekey_comments=False)
+
+    async def test_conflict_with_a_different_episode_is_not_merged(self) -> None:
+        existing = _FakeMedia(id=99, media_type=MediaType.episode, tmdb_id=42, show_id=5, season_number=2, episode_number=4)
+        session = _FakeSession(
+            flush_raises=IntegrityError("stmt", {}, Exception("duplicate key")),
+            existing_rows=[existing],
+        )
+        media = _FakeMedia(id=7, media_type=MediaType.episode, tmdb_id=None, show_id=5, season_number=2, episode_number=3)
+
+        def mutate():
+            media.tmdb_id = 42
+
+        with patch("core.episode_order._merge_episode_media", AsyncMock()) as merge:
+            result = await apply_media_change_safely(session, media, mutate)
+        self.assertIs(result, existing)
+        merge.assert_not_awaited()
 
     async def test_conflict_unrelated_to_the_change_reraises(self) -> None:
         # If media.tmdb_id ended up unchanged, the flush failure came from
@@ -296,8 +336,9 @@ class EnrichMediaEpisodeTvdbFallbackTests(unittest.IsolatedAsyncioTestCase):
             )
 
         get_tvdb_eps.assert_awaited_once_with(411, 4, "tvdb-key", language="eng")
-        # TVDB episode id stored in tmdb_id - existing convention (enrich_episode_from_tvdb).
-        self.assertEqual(media.tmdb_id, 9001)
+        # TVDB episode id lives in tvdb_id; tmdb_id stays unset (migration tvdb1st).
+        self.assertEqual(media.tvdb_id, 9001)
+        self.assertIsNone(media.tmdb_id)
         self.assertEqual(media.title, "TVDB Episode")
         self.assertEqual(media.tmdb_data.get("source"), "tvdb")
 
@@ -331,7 +372,8 @@ class EnrichMediaEpisodeTvdbFallbackTests(unittest.IsolatedAsyncioTestCase):
             await enrich_media(media, api_key="tmdb-key", tvdb_id=999, tvdb_api_key="tvdb-key")
 
         get_ep.assert_not_awaited()
-        self.assertEqual(media.tmdb_id, 100)
+        self.assertEqual(media.tvdb_id, 100)
+        self.assertIsNone(media.tmdb_id)
         self.assertEqual(media.tmdb_data.get("source"), "tvdb")
 
 
